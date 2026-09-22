@@ -382,7 +382,15 @@ fn write(path: &Path, content: &str) {
 }
 
 fn report(diags: &[Diag]) {
+    let src = diags
+        .iter()
+        .filter_map(|d| d.location.as_ref())
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
     eprint!("{}", render_all(diags));
+    if !src.is_empty() {
+        eprint!("{}", hs_compiler::diagnostics::frames_all(diags, &src));
+    }
     std::process::exit(1);
 }
 

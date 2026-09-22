@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
     pub line: usize,
@@ -119,6 +121,33 @@ impl Sym {
             OrOr => "||",
             Assign => "=",
             Ellipsis => "...",
+        }
+    }
+}
+
+impl fmt::Display for Sym {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}`", self.as_str())
+    }
+}
+
+impl fmt::Display for Kw {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}`", format!("{:?}", self).to_lowercase())
+    }
+}
+
+impl fmt::Display for Tok {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Tok::*;
+        match self {
+            Ident(s) => write!(f, "`{s}`"),
+            Int(n) => write!(f, "the number `{n}`"),
+            Float(x) => write!(f, "the number `{x}`"),
+            Str(s) => write!(f, "the string {:?}", s),
+            Kw(k) => write!(f, "{k}"),
+            Sym(s) => write!(f, "{s}"),
+            Eof => write!(f, "end of file"),
         }
     }
 }

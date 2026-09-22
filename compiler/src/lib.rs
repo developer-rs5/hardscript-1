@@ -9,6 +9,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod diagnostics;
 pub mod docs;
 pub mod error;
 pub mod fmt;
@@ -44,14 +45,23 @@ pub fn parse(toks: Vec<Token>) -> Result<Program, Vec<Diag>> {
 /// Lex + parse a source string. The [`Program`] receives `path` so
 /// diagnostics and codegen can report locations against it.
 pub fn frontend(src: &str, path: impl Into<String>) -> Result<Program, Vec<Diag>> {
+    let path = path.into();
     let (toks, diags) = lex(src);
-    match toks {
-        Some(t) => {
-            let mut p = parse(t)?;
-            p.path = path.into();
+    let Some(toks) = toks else {
+        return Err(diags
+            .into_iter()
+            .map(|d| d.with_location(path.clone()))
+            .collect());
+    };
+    match parse(toks) {
+        Ok(mut p) => {
+            p.path = path;
             Ok(p)
         }
-        None => Err(diags),
+        Err(ds) => Err(ds
+            .into_iter()
+            .map(|d| d.with_location(path.clone()))
+            .collect()),
     }
 }
 

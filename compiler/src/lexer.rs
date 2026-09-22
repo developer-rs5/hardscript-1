@@ -1,18 +1,16 @@
 use crate::error::{Diag, ErrorKind};
 use crate::token::{Kw, Span, Sym, Tok, Token};
 
-pub struct Lexer<'a> {
-    src: &'a str,
+pub struct Lexer {
     chars: Vec<char>,
     pos: usize,
     line: usize,
     col: usize,
 }
 
-impl<'a> Lexer<'a> {
-    pub fn new(src: &'a str) -> Lexer<'a> {
+impl Lexer {
+    pub fn new(src: &str) -> Lexer {
         Lexer {
-            src,
             chars: src.chars().collect(),
             pos: 0,
             line: 1,

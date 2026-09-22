@@ -189,12 +189,17 @@ impl Checker {
         match e {
             Expr::Ident(name, sp) => {
                 if !scope.contains_key(name) && !self.funcs.contains_key(name) {
-                    self.err(
-                        format!("`{name}` is not defined"),
-                        *sp,
-                        format!(
-                            "Define `{name} <- ...` (mutable) or `{name} ::= ...` (const) before use."
-                        ),
+                    self.diags.push(
+                        Diag::new(
+                            ErrorKind::Type,
+                            format!("`{name}` is not defined"),
+                            *sp,
+                            format!(
+                                "Define `{name} <- ...` (mutable) or `{name} ::= ...` (const) before use."
+                            ),
+                        )
+                        .with_expected(format!("a defined name or module function"))
+                        .with_received(format!("`{name}`")),
                     );
                 }
             }

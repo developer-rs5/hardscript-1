@@ -91,12 +91,14 @@ impl Parser {
                 self.advance();
                 Ok((s, sp))
             }
-            _ => Err(vec![Diag::new(
+            other => Err(vec![Diag::new(
                 ErrorKind::Parse,
                 format!("expected an identifier {ctx}"),
                 sp,
                 "Use a name like `users`, `total`, or `handle_request`.",
-            )]),
+            )
+            .with_expected("an identifier")
+            .with_received(format!("`{other}`"))]),
         }
     }
 

@@ -30,6 +30,8 @@ pub struct Diag {
     pub location: Option<String>,
     pub suggestion: Option<String>,
     pub notes: Vec<String>,
+    pub expected: Option<String>,
+    pub received: Option<String>,
 }
 
 impl Diag {
@@ -41,6 +43,8 @@ impl Diag {
             location: None,
             suggestion: Some(suggestion.into()),
             notes: Vec::new(),
+            expected: None,
+            received: None,
         }
     }
 
@@ -52,6 +56,8 @@ impl Diag {
             location: None,
             suggestion: None,
             notes: Vec::new(),
+            expected: None,
+            received: None,
         }
     }
 
@@ -62,6 +68,18 @@ impl Diag {
 
     pub fn with_note(mut self, note: impl Into<String>) -> Diag {
         self.notes.push(note.into());
+        self
+    }
+
+    /// What the compiler wanted here (e.g. `an identifier`, `Int`).
+    pub fn with_expected(mut self, e: impl Into<String>) -> Diag {
+        self.expected = Some(e.into());
+        self
+    }
+
+    /// What was actually found instead (e.g. the offending token).
+    pub fn with_received(mut self, r: impl Into<String>) -> Diag {
+        self.received = Some(r.into());
         self
     }
 
@@ -76,6 +94,16 @@ impl Diag {
         let mut out = String::new();
         out.push_str(self.kind.name());
         out.push('\n');
+        if let Some(exp) = &self.expected {
+            out.push_str("Expected:   ");
+            out.push_str(exp);
+            out.push('\n');
+        }
+        if let Some(rec) = &self.received {
+            out.push_str("Received:   ");
+            out.push_str(rec);
+            out.push('\n');
+        }
         if let Some(loc) = &self.location {
             out.push_str("Location:   ");
             out.push_str(loc);
@@ -97,10 +125,6 @@ impl Diag {
             out.push_str("Note:       ");
             out.push_str(n);
             out.push('\n');
-        }
-        if self.location.is_none() && self.span.is_some() {
-            out.push('\n');
-            out.push_str("Expected / Received details are shown below when rendering source context.\n");
         }
         out
     }
