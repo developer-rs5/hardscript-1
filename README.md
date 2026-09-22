@@ -36,7 +36,7 @@ HardScript is a statically-oriented scripting language that compiles to C++ and 
 | Data | JSON parse/stringify, first-class object/map/list values, PostgreSQL over the native wire protocol |
 | Security | SHA-1 / SHA-256 / MD5 / HMAC, base64, UUIDs, random tokens, JWT sign & verify |
 | Toolchain | `hard` CLI: `new`, `build`, `run`, `test`, `fmt`, `docs`, `add`, `doctor`, `bench`; diagnostics with location + suggestion |
-| Runtime | Single-header C++ runtime (`hs_runtime.hpp`), thread-per-connection server, static file serving |
+| Runtime | Split C++ runtime under `runtime/` (`hs_runtime.hpp` umbrella + `value`/`io`/`crypto`/`http`/`sched`/`postgres`/`util`), thread-per-connection server, static file serving |
 
 ---
 
@@ -180,7 +180,7 @@ hard help                    Show help
 │                              ▼                                   │
 │               ┌──────────────────────────────┐                  │
 │               │  Native executable           │                  │
-│               │  runtime/hs_runtime.hpp      │                  │
+│               │  runtime/ (hs_runtime.hpp umbrella) │            │
 │               │  Haskell-free, hands-free    │                  │
 │               └──────────────────────────────┘                  │
 └──────────────────────────────────────────────────────────────────┘
@@ -194,7 +194,9 @@ compiler/           Rust compiler crate (hs-compiler)
   src/fmt.rs        formatter                  src/docs.rs     API.md generator
 cli/                `hard` CLI (build/run/test/fmt/docs/bench/...)
 lsp/                minimal language server (diagnostics today)
-runtime/            C++ runtime, single header: runtime/hs_runtime.hpp
+runtime/            C++ runtime split into focused headers:
+                    runtime/hs_runtime.hpp is the umbrella (value, io, crypto,
+                    http, sched, postgres, util)
 tests/              integration scripts        examples/       official examples
 reports/            automated smoke-test reports
 ```

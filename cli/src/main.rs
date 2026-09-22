@@ -5,9 +5,51 @@ use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// The single-header runtime is embedded into the CLI binary at build time so
-// `hard` works without a checkout of the compiler repository.
-const RUNTIME_HPP: &str = include_str!("../../runtime/hs_runtime.hpp");
+// The runtime headers are embedded into the CLI binary at build time so
+// `hard` works without a checkout of the compiler repository. Each part is
+// written next to `hs_runtime.hpp` in the build directory; the umbrella header
+// includes them by name.
+const RUNTIME_FILES: &[(&str, &str)] = &[
+    (
+        "hs_runtime_value.hpp",
+        include_str!("../../runtime/hs_runtime_value.hpp"),
+    ),
+    (
+        "hs_runtime_io.hpp",
+        include_str!("../../runtime/hs_runtime_io.hpp"),
+    ),
+    (
+        "hs_runtime_crypto.hpp",
+        include_str!("../../runtime/hs_runtime_crypto.hpp"),
+    ),
+    (
+        "hs_runtime_http.hpp",
+        include_str!("../../runtime/hs_runtime_http.hpp"),
+    ),
+    (
+        "hs_runtime_sched.hpp",
+        include_str!("../../runtime/hs_runtime_sched.hpp"),
+    ),
+    (
+        "hs_runtime_postgres.hpp",
+        include_str!("../../runtime/hs_runtime_postgres.hpp"),
+    ),
+    (
+        "hs_runtime_util.hpp",
+        include_str!("../../runtime/hs_runtime_util.hpp"),
+    ),
+    ("hs_runtime.hpp", include_str!("../../runtime/hs_runtime.hpp")),
+];
+
+fn write_runtime(dir: &Path) {
+    for (name, content) in RUNTIME_FILES {
+        write(&dir.join(name), content);
+    }
+}
+
+fn runtime_bytes() -> usize {
+    RUNTIME_FILES.iter().map(|(_, c)| c.len()).sum()
+}
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -104,7 +146,7 @@ fn cmd_new(args: &[String]) {
          [modules]\n"
     );
     write(&dir.join("hard.toml"), &toml);
-    write(&dir.join("runtime/hs_runtime.hpp"), RUNTIME_HPP);
+    write_runtime(&dir.join("runtime"));
     write(&dir.join(".gitignore"), ".hard/\n*.o\n");
     println!("Created {name}/");
     println!("\nNext:\n  cd {name}\n  hard run");
@@ -209,7 +251,7 @@ fn cmd_doctor(_args: &[String]) {
     }
     println!(
         "  runtime header: embedded ({} bytes)",
-        RUNTIME_HPP.len()
+        runtime_bytes()
     );
     if !ok {
         std::process::exit(1);
@@ -294,7 +336,7 @@ fn compile_impl(
 
     let build_dir = PathBuf::from(".hard");
     std::fs::create_dir_all(&build_dir).unwrap_or_else(|e| die(&e.to_string()));
-    write(&build_dir.join("hs_runtime.hpp"), RUNTIME_HPP);
+    write_runtime(&build_dir);
     write(&build_dir.join(format!("{name}.cpp")), &cpp);
 
     let bin = if release {
