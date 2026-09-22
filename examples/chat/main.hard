@@ -1,0 +1,29 @@
+bring http
+
+bring websocket
+
+app @9090
+
+socket "/chat" {
+    connect :: {
+        websocket.join("lobby")
+        websocket.broadcast(websocket.self + " joined")
+    }
+    message(d) :: {
+        ?(d == "ping") {
+            websocket.reply("pong")
+        }
+        ?(d == "leave") {
+            websocket.leave()
+        }
+    }
+    disconnect :: {
+        websocket.broadcast(websocket.self + " left")
+    }
+}
+
+test "server is defined on port 9090" {
+    res <- GET "/chat"
+    expect res.status == 404
+}
+

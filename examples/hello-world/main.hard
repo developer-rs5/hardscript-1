@@ -1,0 +1,14 @@
+bring http
+
+app @3000
+
+GET "/" :: {
+    <- { hello: "world" }
+}
+
+test "hello world" {
+    res <- GET "/"
+    expect res.status == 200
+    expect res.body.hello == "world"
+}
+

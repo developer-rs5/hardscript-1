@@ -1,0 +1,36 @@
+bring http
+
+bring crypto
+
+bring jwt
+
+app @9090
+
+secret <- "dev-secret-change-me"
+
+POST "/register" :: (body = User) {
+    token <- jwt.sign({ user: body.name, role: "member" }, secret)
+    <- { status: 201, token: token, user: body.name }
+}
+
+POST "/login" :: (body = User) {
+    token <- jwt.sign({ user: body.name, role: "member" }, secret)
+    <- { status: 200, token: token }
+}
+
+POST "/verify" :: (body = User) {
+    ok <- jwt.verify(body.token, secret)
+    <- { verified: ok }
+}
+
+test "register then login" {
+    reg <- POST "/register" { { name: "ada", key: "hunter2" } }
+    expect reg.body.status == 201
+    expect reg.body.user == "ada"
+    login <- POST "/login" { { name: "ada", key: "hunter2" } }
+    expect login.body.status == 200
+    expect login.body.token != ""
+    verify <- POST "/verify" { { token: login.body.token } }
+    expect verify.body.verified == true
+}
+

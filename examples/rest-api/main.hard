@@ -1,0 +1,63 @@
+bring http
+
+bring json
+
+bring fs
+
+bring time
+
+app @8080
+
+model User = users [
+    id => Int #id,
+    name => Str,
+]
+
+store <- ".hard/users.json"
+
+GET "/users" :: {
+    ?(fs.exists(store)) {
+        <- json.parse(fs.read(store))
+    }
+    fs.write(store, "[]")
+    <- json.parse(fs.read(store))
+}
+
+GET "/users/:id" :: (id = Str) {
+    users <- json.parse(fs.read(store))
+    loop user => users {
+        ?(user.id + "" == id) {
+            <- { user: user }
+        }
+    }
+    <- { error: "user not found" }
+}
+
+POST "/users" :: (body = User) {
+    users <- json.parse(fs.read(store))
+    created <- { id: time.now(), name: body.name }
+    fs.write(store, json.stringify(users + [created]))
+    <- { status: 201, user: created }
+}
+
+DELETE "/users/:id" :: (id = Str) {
+    users <- json.parse(fs.read(store))
+    loop user => users {
+        ?(user.id + "" == id) {
+            <- { status: 200, deleted: { id: user.id, name: user.name } }
+        }
+    }
+    <- { status: 404, error: "user not found" }
+}
+
+test "create then read" {
+    fs.write(store, "[]")
+    created <- POST "/users" { { name: "grace" } }
+    expect created.body.status == 201
+    expect created.body.user.name == "grace"
+    list_res <- GET "/users"
+    expect list_res.body[0].name == "grace"
+    missing <- DELETE "/users/does-not-exist"
+    expect missing.body.error == "user not found"
+}
+

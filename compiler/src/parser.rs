@@ -100,6 +100,28 @@ impl Parser {
         }
     }
 
+    fn member_name(&mut self) -> Result<(String, Span), Vec<Diag>> {
+        let sp = self.span();
+        match self.peek() {
+            Tok::Ident(_) | Tok::Kw(_) => {
+                let tok = self.peek().clone();
+                self.advance();
+                let name = match tok {
+                    Tok::Ident(s) => s,
+                    Tok::Kw(k) => format!("{:?}", k).to_lowercase(),
+                    _ => unreachable!(),
+                };
+                Ok((name, sp))
+            }
+            _ => Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("expected a name after `.`"),
+                sp,
+                "Use a name like `users`, `total`, or `handle_request`.",
+            )]),
+        }
+    }
+
     fn prev_span(&self) -> Span {
         if self.pos == 0 {
             Span::new(1, 1)
@@ -730,7 +752,7 @@ impl Parser {
             match *self.peek() {
                 Tok::Sym(Sym::Dot) => {
                     self.advance();
-                    let (name, sp) = self.expect_ident("after `.`")?;
+                    let (name, sp) = self.member_name()?;
                     e = Expr::Member(Box::new(e), name, sp);
                 }
                 Tok::Sym(Sym::LParen) => {

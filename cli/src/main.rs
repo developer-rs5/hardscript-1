@@ -147,6 +147,7 @@ fn cmd_test(rest: &[String]) {
 }
 
 fn cmd_fmt(rest: &[String]) {
+    let check = rest.iter().any(|a| a == "--check");
     let (target, _) = find_target(rest);
     let src = match std::fs::read_to_string(&target) {
         Ok(s) => s,
@@ -155,8 +156,17 @@ fn cmd_fmt(rest: &[String]) {
     match frontend(&src, target.to_str().unwrap_or("").to_string()) {
         Ok(prog) => {
             let out = fmt::format(&prog);
-            std::fs::write(&target, out).unwrap_or_else(|_| die("cannot write formatted file"));
-            println!("formatted {}", target.display());
+            if check {
+                if out == src {
+                    println!("{} is formatted correctly", target.display());
+                } else {
+                    eprintln!("{} is not formatted (run `hard fmt`)", target.display());
+                    std::process::exit(1);
+                }
+            } else {
+                std::fs::write(&target, out).unwrap_or_else(|_| die("cannot write formatted file"));
+                println!("formatted {}", target.display());
+            }
         }
         Err(diags) => report(&diags),
     }

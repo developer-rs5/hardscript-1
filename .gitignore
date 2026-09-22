@@ -6,6 +6,9 @@ Cargo.lock
 .hard/
 *.hsbin
 
+# Generated docs
+examples/*/API.md
+
 # Generated binaries
 *.o
 *.out

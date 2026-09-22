@@ -508,7 +508,7 @@ impl Codegen {
                     }
                     inner.push_str(&self.expr(it));
                 }
-                format!("hs::Val::list({{ {inner} }})")
+                format!("hs::Val::list(std::vector<hs::Val>{{ {inner} }})")
             }
             Expr::Obj(kvs, _) => {
                 let mut inner = String::new();
@@ -522,7 +522,14 @@ impl Codegen {
                 format!("hs::Val::object({{ {inner} }})")
             }
             Expr::Ident(name, _) => safe_id(name),
-            Expr::Member(base, name, _) => {
+            Expr::Member(base, name, sp) => {
+                if let Expr::Ident(module, _) = base.as_ref() {
+                    if MODULES.contains(&module.as_str()) {
+                        if let Some(r) = self.builtin(module, name, &[], *sp) {
+                            return r;
+                        }
+                    }
+                }
                 let b = self.expr(base);
                 format!("hs::get_member({b}, {:?})", name)
             }
@@ -609,7 +616,7 @@ impl Codegen {
 
     fn ttx(&mut self, args: &[Expr], i: usize) -> String {
         let v = self.arg_at(args, i);
-        format!("hs::to_text({v})")
+        format!("hs::to_text({v}).sv")
     }
 
     fn tin(&mut self, args: &[Expr], i: usize) -> String {
@@ -802,7 +809,7 @@ impl Codegen {
     }
 
     fn void_expr(body: String) -> String {
-        format!("([]() -> hs::Val {{ {body}; return hs::Val::nil(); }}())")
+        format!("([&]() -> hs::Val {{ {body}; return hs::Val::nil(); }}())")
     }
 
     // ---------- source-ish rendering for diagnostics / expect ----------

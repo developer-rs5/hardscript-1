@@ -31,15 +31,32 @@ impl Fmt {
             Stmt::Bring(m, _) => self.line(d, &format!("bring {}", self.module(m))),
             Stmt::App(p, _) => self.line(d, &format!("app @{p}")),
             Stmt::Model(m) => {
-                self.line(d, &format!("model {} [", m.name));
+                self.line(d, &format!("model {} = {} [", m.name, m.table));
                 for f in &m.fields {
-                    let attr: Vec<String> = f.attrs.iter().map(|a| format!(" #{a}")).collect();
-                    self.line(d + 1, &format!("{} => {} {}", f.name, f.ty, attr.concat()));
+                    let attrs: String = if f.attrs.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", f.attrs.iter().map(|a| format!("#{a}")).collect::<Vec<_>>().join(" "))
+                    };
+                    self.line(d + 1, &format!("{} => {}{attrs},", f.name, f.ty));
                 }
                 self.line(d, "]");
             }
             Stmt::Route(r) => {
-                self.line(d, &format!("{} {:?} :: {{", r.method, r.path));
+                let params: Vec<String> = r
+                    .params
+                    .iter()
+                    .map(|p| match &p.ty {
+                        Some(t) => format!("{} = {t}", p.name),
+                        None => p.name.clone(),
+                    })
+                    .collect();
+                let ps = if params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", params.join(", "))
+                };
+                self.line(d, &format!("{} {:?} ::{ps} {{", r.method, r.path));
                 for s in &r.body {
                     self.stmt(s, d + 1);
                 }

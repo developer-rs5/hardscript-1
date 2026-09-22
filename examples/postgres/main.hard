@@ -1,0 +1,27 @@
+bring http
+
+bring postgres
+
+app @9090
+
+db <- postgres.connect("host=127.0.0.1 port=5432 user=postgres dbname=hardscript")
+
+GET "/users" :: {
+    <- { users: postgres.query(db, "select id, name from users order by id") }
+}
+
+GET "/users/:id" :: (id = Str) {
+    rows <- postgres.query(db, "select id, name from users where id = " + id)
+    <- { users: rows }
+}
+
+POST "/users" :: (body = User) {
+    postgres.query(db, "insert into users (name) values ('" + body.name + "')")
+    <- { status: 201 }
+}
+
+DELETE "/users/:id" :: (id = Str) {
+    postgres.query(db, "delete from users where id = " + id)
+    <- { status: 200 }
+}
+
