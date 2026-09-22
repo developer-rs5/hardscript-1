@@ -13,6 +13,7 @@ pub mod docs;
 pub mod error;
 pub mod fmt;
 pub mod lexer;
+pub mod optimizer;
 pub mod parser;
 pub mod token;
 pub mod typecheck;
@@ -58,7 +59,11 @@ pub fn frontend(src: &str, path: impl Into<String>) -> Result<Program, Vec<Diag>
 /// source on success, or the collected diagnostics on failure.
 pub fn compile_to_cpp(src: &str, path: impl Into<String>) -> Result<String, Vec<Diag>> {
     let path = path.into();
-    let prog = frontend(src, path.clone())?;
+    let mut prog = frontend(src, path.clone())?;
+
+    // AST optimization (safe, semantics-preserving; see optimizer module).
+    let _optimized = optimizer::run(&mut prog);
+
     let mut errs = typecheck::check(&prog);
 
     // Ignore codegen diagnostics that are carried as errors only when severe.
