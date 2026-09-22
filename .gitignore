@@ -1,0 +1,26 @@
+# Rust
+/target/
+Cargo.lock
+
+# HardScript build output
+.hard/
+*.hsbin
+
+# Generated binaries
+*.o
+*.out
+*.release
+
+# Editor caches
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Reports are generated artifacts kept in git
+# reports/ is committed

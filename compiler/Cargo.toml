@@ -1,0 +1,9 @@
+[package]
+name = "hs-compiler"
+version.workspace = true
+edition.workspace = true
+description = "HardScript compiler: lexer, parser, type checker, C++ code generator, formatter and docs generator."
+
+[lib]
+name = "hs_compiler"
+path = "src/lib.rs"

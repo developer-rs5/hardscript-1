@@ -1,0 +1,11 @@
+[package]
+name = "hs-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hard"
+path = "src/main.rs"
+
+[dependencies]
+hs-compiler = { path = "../compiler" }

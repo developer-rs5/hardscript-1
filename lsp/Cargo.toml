@@ -1,0 +1,8 @@
+[package]
+name = "hs-lsp"
+version.workspace = true
+edition.workspace = true
+description = "HardScript language server (diagnostics today; full LSP protocol next)."
+
+[dependencies]
+hs-compiler = { path = "../compiler" }
