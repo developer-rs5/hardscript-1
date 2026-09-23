@@ -1,5 +1,6 @@
 #ifndef HS_RUNTIME_HTTP_HPP
 #define HS_RUNTIME_HTTP_HPP
+#include <netinet/tcp.h>
 #include "hs_runtime_value.hpp"
 #include "hs_runtime_arena.hpp"
 // ===========================================================================
@@ -22,7 +23,7 @@ inline void hs_install_shutdown_signals() {
 
 // Per-milestone keep-alive toggle. M1.5 flips this and the request loop in
 // handle_connection() closes over it; the parser is keep-alive aware from M1.1.
-static constexpr bool g_hs_keepalive = false;
+static constexpr bool g_hs_keepalive = true;
 static constexpr size_t kMaxRequestBytes = 16 * 1024 * 1024;
 static constexpr unsigned long long kMaxRequestsPerConn = 10000;
 
@@ -745,6 +746,8 @@ inline void Server::listen() {
             if (errno == EINTR) continue;
             break;
         }
+        int one = 1;
+        setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); // avoid Nagle stalls on keep-alive
         std::thread(handle_connection, cfd, std::ref(*this)).detach();
     }
     close(sfd);

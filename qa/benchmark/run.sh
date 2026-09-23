@@ -131,7 +131,7 @@ run_stack() { # name cmd keepalive_supported
 }
 
 declare -A VMETA
-VMETA[hs]="$HS_SIZE|$HS_BUILD|$HS_COLD|env $HS_BIN|0"
+VMETA[hs]="$HS_SIZE|$HS_BUILD|$HS_COLD|env $HS_BIN|1"
 VMETA[node]="$N_SIZE|$N_BUILD|$N_COLD|$N_BIN|1"
 VMETA[bun]="$B_SIZE|n/a|$B_COLD|bun $ROOT/qa/benchmark/bun/app.bun.js|1"
 VMETA[go]="$GO_SIZE|$GO_BUILD|$GO_COLD|$GO_BIN|1"
