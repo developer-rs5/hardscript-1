@@ -313,8 +313,31 @@ fn compile(target: &Path) -> Result<(PathBuf, PathBuf), Vec<Diag>> {
     compile_impl(target, &["-O2"], false)
 }
 
+// MS1.7: release builds get -O3 plus link-time optimization, native CPU
+// tuning and hidden visibility. All overridable via HS_CXXFLAGS (appended)
+// and HS_NO_NATIVE=1 (drop -march=native for portability). The flags list is
+// collected up front so build-report / bench numbers stay deterministic.
+fn release_flags() -> Vec<String> {
+    let mut f = vec!["-O3".to_string(), "-DNDEBUG".to_string(), "-flto".to_string()];
+    if std::env::var("HS_NO_NATIVE").is_err() {
+        f.push("-march=native".to_string());
+        f.push("-mtune=native".to_string());
+    }
+    f.push("-fvisibility=hidden".to_string());
+    if let Ok(extra) = std::env::var("HS_CXXFLAGS") {
+        for part in extra.split_whitespace() {
+            if !part.is_empty() {
+                f.push(part.to_string());
+            }
+        }
+    }
+    f
+}
+
 fn compile_release(target: &Path) -> Result<(PathBuf, PathBuf), Vec<Diag>> {
-    compile_impl(target, &["-O3", "-DNDEBUG"], true)
+    let flags = release_flags();
+    let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
+    compile_impl(target, &flag_refs, true)
 }
 
 fn compile_impl(
