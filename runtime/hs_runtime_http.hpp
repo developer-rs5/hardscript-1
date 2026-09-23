@@ -28,6 +28,24 @@ static constexpr size_t kMaxRequestBytes = 16 * 1024 * 1024;
 static constexpr unsigned long long kMaxRequestsPerConn = 10000;
 
 // ---------------------------------------------------------------------------
+// Connection worker pool (ms1.3): reused handler threads instead of one thread
+// per connection. The pool grows on demand (keep-alive connections pin a
+// worker for their lifetime) up to kMaxWorkers, and idle workers return to
+// the pool, so the per-worker thread_local arena amortizes to ~0 allocations.
+struct ConnPool {
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<int> q;
+    std::atomic<bool> stop{false};
+    std::atomic<int> idle{0};
+    std::atomic<unsigned> spawned{0};
+    std::vector<std::thread> workers;
+    size_t q_cap = 4096;
+};
+inline constexpr size_t kMaxWorkers = 256;
+inline ConnPool& conn_pool() { static ConnPool p; return p; }
+
+// ---------------------------------------------------------------------------
 // Zero-allocation helpers
 // ---------------------------------------------------------------------------
 inline char fold_ascii(char c) {
@@ -611,11 +629,9 @@ static bool hs_parse_request(const std::string& buf, Request& req, size_t& consu
     return true;
 }
 
-static void handle_connection(int fd, Server& srv) {
+static void handle_connection(int fd, Server& srv, hs::Arena& arena, hs::Arena::Str& head) {
     ++g_hs_conn;
     struct ConnGuard { ~ConnGuard() { g_hs_conn.fetch_sub(1); } } conn_guard;
-    thread_local hs::Arena arena;
-    thread_local hs::Arena::Str head;
     arena.reset();
     head.a = &arena;
     std::string buf;
@@ -701,6 +717,29 @@ static void handle_connection(int fd, Server& srv) {
     close(fd);
 }
 
+// Pooled handler thread: the thread_local arena/Str live HERE, so one worker
+// serves many connections and the bump allocator is reused across requests.
+static void conn_worker(Server& srv) {
+    thread_local hs::Arena arena;
+    thread_local hs::Arena::Str head;
+    for (;;) {
+        int fd;
+        {
+            std::unique_lock<std::mutex> lk(conn_pool().m);
+            conn_pool().idle.fetch_add(1);
+            conn_pool().cv.wait(lk, [] { return conn_pool().stop.load() || !conn_pool().q.empty(); });
+            conn_pool().idle.fetch_sub(1);
+            if (conn_pool().q.empty()) {
+                if (conn_pool().stop.load()) return;
+                continue;
+            }
+            fd = conn_pool().q.back();
+            conn_pool().q.pop_back();
+        }
+        handle_connection(fd, srv, arena, head);
+    }
+}
+
 inline void Server::listen() {
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sfd < 0) throw std::runtime_error("cannot create socket");
@@ -719,7 +758,14 @@ inline void Server::listen() {
         close(sfd);
         throw std::runtime_error("cannot listen on port " + std::to_string(port));
     }
-    printf("HardScript server listening on http://127.0.0.1:%d\n", port);
+    unsigned nw = std::thread::hardware_concurrency();
+    nw = nw < 2 ? 2 : (nw > 32 ? 32 : nw); // seed pool (grows on demand up to kMaxWorkers)
+    conn_pool().stop.store(false);
+    conn_pool().q.clear();
+    conn_pool().idle.store(0);
+    for (unsigned i = 0; i < nw; ++i)
+        conn_pool().workers.emplace_back(conn_worker, std::ref(*this));
+    printf("HardScript server listening on http://127.0.0.1:%d (%u workers)\n", port, nw);
     fflush(stdout);
     hs_install_shutdown_signals();
     for (;;) {
@@ -746,13 +792,26 @@ inline void Server::listen() {
             if (errno == EINTR) continue;
             break;
         }
-        int one = 1;
-        setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); // avoid Nagle stalls on keep-alive
-        std::thread(handle_connection, cfd, std::ref(*this)).detach();
+        int no = 1;
+        setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &no, sizeof no); // avoid Nagle stalls on keep-alive
+        {
+            std::unique_lock<std::mutex> lk(conn_pool().m);
+            conn_pool().cv.wait(lk, [] { return conn_pool().stop.load() || conn_pool().q.size() < conn_pool().q_cap; });
+            conn_pool().q.push_back(cfd);
+            // Grow the pool when every worker is busy (keep-alive connections
+            // pin a worker for their lifetime; spawn until we have slack).
+            if (conn_pool().idle.load() == 0 && conn_pool().workers.size() < kMaxWorkers)
+                conn_pool().workers.emplace_back(conn_worker, std::ref(*this));
+        }
+        conn_pool().cv.notify_one();
     }
     close(sfd);
+    conn_pool().stop.store(true);
+    conn_pool().cv.notify_all();
     for (int i = 0; i < 100 && g_hs_conn.load() > 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    for (auto& w : conn_pool().workers) if (w.joinable()) w.join();
+    conn_pool().workers.clear();
 }
 
 #endif
