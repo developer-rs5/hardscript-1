@@ -56,6 +56,13 @@ inline Response hs_respond(const Val& v) {
     if (v.is_str()) return Response::text(v.sv);
     return Response::json(v);
 }
+// Rvalue overload: `<- {...}` temporaries move their payload straight into
+// the response so the JSON serializer streams the value to the socket arena.
+inline Response hs_respond(Val&& v) {
+    if (v.is_nil()) return Response::empty(204);
+    if (v.is_str()) return Response::text(std::move(v.sv));
+    return Response::json(std::move(v));
+}
 
 inline Val args_list() {
     std::vector<Val> v;

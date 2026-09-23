@@ -28,6 +28,18 @@ idle RSS ≤ 3 MB.
 | cold start | ~2 ms (release) | ≤ 25 ms | met |
 | idle RSS | ~4096 KB (arena reserved) | ≤ 3 MB | ~1.4× target (thread stacks are lazily committed) |
 
+## M1.4 measured (streaming JSON encoder, commit *next*)
+
+| lane | value | note |
+|---|---|---|
+| keep-alive mixed (c32) | 39554–39766 RPS (0 err) | prior ~30k |
+| conn/req mixed (c32) | 9565–9719 RPS (0 err) | prior 7530–7897 |
+| echo-only keep-alive | 58170 RPS | 18-byte payload |
+| echo-only 1 KB payload | 53634 RPS | response ~1.04 KB JSON, 0 err after warmup blip |
+| echo-only 10 KB payload | 35935 RPS | response ~10.0 KB JSON, 0 err |
+| echo-only 100 KB payload | 5386 RPS | response ~100 KB JSON, 0 err, CL exact (10017 = body) |
+| JSON correctness | regression 008 | escapes, int64, float, nesting — exact output |
+
 ## Milestone log
 
 | commit | milestone | effect |
@@ -37,6 +49,8 @@ idle RSS ≤ 3 MB.
 | d7e07f2 | ms1.5 keep-alive + TCP_NODELAY | 31199 RPS keep-alive (Nagle fix) |
 | 6ab1a74 | ms1.3 grow-on-demand worker pool | 0.000 alloc/req; 7897 conn/req RPS |
 | b2d7b3f | ms1.7 -O3 -flto -march=native -fvisibility=hidden | no regression; ~30.7k keep-alive |
+| c8d265b | ms1.8 phase-1 runtime report | baseline + milestone log written |
+| *next* | ms1.4 streaming JSON encoder | JSON bodies stream into the arena Str (single send, no temp std::string / ostringstream / per-byte snprintf) |
 
 ## Quality gates
 

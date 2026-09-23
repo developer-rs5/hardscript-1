@@ -144,52 +144,138 @@ struct Val {
 // ===========================================================================
 // JSON
 // ===========================================================================
-inline void json_escape(const std::string& in, std::string& out) {
-    for (unsigned char c : in) {
+inline size_t json_escaped_length(std::string_view sv) {
+    size_t n = 0;
+    for (unsigned char c : sv) {
         switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
+            case '"': case '\\': case '\b': case '\f': case '\n': case '\r': case '\t':
+                n += 2;
+                break;
             default:
-                if (c < 0x20) { char b[8]; std::snprintf(b, 8, "\\u%04x", c); out += b; }
-                else out += (char)c;
+                n += c < 0x20 ? 6 : 1;
+                break;
+        }
+    }
+    return n;
+}
+
+// Allocation-free serializer: writes straight into any sink exposing
+// append(const char*, size_t) — Arena::Str or std::string — with no
+// temporary strings, no ostringstream, no per-byte snprintf.
+template <typename Sink>
+inline void json_escape_to(std::string_view sv, Sink& out) {
+    static const char HEX[] = "0123456789abcdef";
+    for (unsigned char c : sv) {
+        switch (c) {
+            case '"': out.append("\\\"", 2); break;
+            case '\\': out.append("\\\\", 2); break;
+            case '\b': out.append("\\b", 2); break;
+            case '\f': out.append("\\f", 2); break;
+            case '\n': out.append("\\n", 2); break;
+            case '\r': out.append("\\r", 2); break;
+            case '\t': out.append("\\t", 2); break;
+            default:
+                if (c < 0x20) {
+                    char b[8];
+                    b[0] = '\\'; b[1] = 'u'; b[2] = '0'; b[3] = '0';
+                    b[4] = HEX[c >> 4]; b[5] = HEX[c & 0xF];
+                    out.append(b, 6);
+                } else {
+                    out.append((const char*)&c, 1);
+                }
         }
     }
 }
 
-inline void val_to_json(const Val& v, std::string& out) {
+template <typename Sink>
+inline void json_append_int(Sink& out, int64_t v) {
+    char b[24];
+    unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    size_t n = 0;
+    do { b[n++] = char('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) b[n++] = '-';
+    while (n) out.append(&b[--n], 1);
+}
+
+// Mirrors the previous %.15g behaviour (plus a trailing ".0" when the short
+// form has no '.', 'e' or 'E'), written from a stack buffer.
+template <typename Sink>
+inline void json_append_double(Sink& out, double d) {
+    char b[48];
+    int n = std::snprintf(b, sizeof b, "%.15g", d);
+    if (n < 0) n = 0;
+    int dot = 0;
+    for (int i = 0; i < n; i++) {
+        char z = b[i];
+        if (z == '.' || z == 'e' || z == 'E') { dot = 1; break; }
+    }
+    out.append(b, (size_t)n);
+    if (!dot) out.append(".0", 2);
+}
+
+// Exact serialized byte count of `v` without writing it: used to fill
+// Content-Length before streaming a JSON body into the same socket buffer.
+inline size_t json_size(const Val& v) {
     switch (v.t) {
-        case Val::T::Nil: out += "null"; break;
-        case Val::T::Int: out += std::to_string(v.iv); break;
-        case Val::T::Flt: {
-            std::ostringstream o;
-            o.precision(15);
-            o << v.fv;
-            std::string s = o.str();
-            if (s.find('.') == std::string::npos) s += ".0";
-            out += s;
-            break;
+        case Val::T::Nil: return 4;
+        case Val::T::Bool: return v.bv ? 4 : 5;
+        case Val::T::Int: {
+            unsigned long long u = v.iv < 0 ? 0ULL - (unsigned long long)v.iv : (unsigned long long)v.iv;
+            size_t n = v.iv < 0 ? 1 : 0;
+            do { n++; u /= 10; } while (u);
+            return n;
         }
-        case Val::T::Bool: out += v.bv ? "true" : "false"; break;
-        case Val::T::Str: out += '"'; json_escape(v.sv, out); out += '"'; break;
+        case Val::T::Flt: {
+            char b[48];
+            int n = std::snprintf(b, sizeof b, "%.15g", v.fv);
+            if (n < 0) n = 0;
+            int dot = 0;
+            for (int i = 0; i < n; i++) if (b[i] == '.' || b[i] == 'e' || b[i] == 'E') dot = 1;
+            return (size_t)n + (dot ? 0 : 2);
+        }
+        case Val::T::Str: return 2 + json_escaped_length(std::string_view(v.sv));
         case Val::T::Arr: {
-            out += '[';
-            for (size_t k = 0; k < v.arr.size(); k++) { if (k) out += ','; val_to_json(v.arr[k], out); }
-            out += ']';
+            size_t n = 1;
+            for (size_t k = 0; k < v.arr.size(); k++) { if (k) n++; n += json_size(v.arr[k]); }
+            return n + 1;
+        }
+        case Val::T::Obj: {
+            size_t n = 1;
+            for (size_t k = 0; k < v.obj.size(); k++) {
+                if (k) n++;
+                n += 1 + json_escaped_length(std::string_view(v.obj[k].first)) + 2;
+                n += json_size(v.obj[k].second);
+            }
+            return n + 1;
+        }
+    }
+    return 0;
+}
+
+template <typename Sink>
+inline void val_to_json(const Val& v, Sink& out) {
+    switch (v.t) {
+        case Val::T::Nil: out.append("null", 4); break;
+        case Val::T::Int: json_append_int(out, v.iv); break;
+        case Val::T::Flt: json_append_double(out, v.fv); break;
+        case Val::T::Bool: out.append(v.bv ? "true" : "false", v.bv ? 4 : 5); break;
+        case Val::T::Str: out.append("\"", 1); json_escape_to(std::string_view(v.sv), out); out.append("\"", 1); break;
+        case Val::T::Arr: {
+            out.append("[", 1);
+            for (size_t k = 0; k < v.arr.size(); k++) { if (k) out.append(",", 1); val_to_json(v.arr[k], out); }
+            out.append("]", 1);
             break;
         }
         case Val::T::Obj: {
-            out += '{';
+            out.append("{", 1);
             for (size_t k = 0; k < v.obj.size(); k++) {
-                if (k) out += ',';
-                out += '"'; json_escape(v.obj[k].first, out); out += "\":";
+                if (k) out.append(",", 1);
+                out.append("\"", 1);
+                json_escape_to(std::string_view(v.obj[k].first), out);
+                out.append("\":", 2);
                 val_to_json(v.obj[k].second, out);
             }
-            out += '}';
+            out.append("}", 1);
             break;
         }
     }
@@ -197,7 +283,8 @@ inline void val_to_json(const Val& v, std::string& out) {
 
 inline std::string to_json(const Val& v) {
     std::string out;
-    val_to_json(v, out);
+    out.reserve(json_size(v));
+    val_to_json<std::string>(v, out);
     return out;
 }
 inline std::string Val::to_json() const { return ::hs::to_json(*this); }

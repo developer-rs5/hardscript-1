@@ -150,12 +150,22 @@ struct Response {
     int status = 200;
     std::string ctype = "text/plain; charset=utf-8";
     std::string body;
+    Val json_v;               // JSON body kept as a value when has_json is set
+    bool has_json = false;
     std::vector<std::pair<std::string, std::string>> headers;
     Response() = default;
     static Response json(const Val& v) {
         Response r;
         r.ctype = "application/json; charset=utf-8";
-        r.body = to_json(v);
+        r.json_v = v;
+        r.has_json = true;
+        return r;
+    }
+    static Response json(Val&& v) {
+        Response r;
+        r.ctype = "application/json; charset=utf-8";
+        r.json_v = std::move(v);
+        r.has_json = true;
         return r;
     }
     static Response text(const std::string& s) {
@@ -300,7 +310,8 @@ struct Server {
         Val h = Val::object({});
         h.set("content-type", Val::text(r.ctype));
         out.set("headers", h);
-        if (!r.body.empty()) {
+        if (r.has_json) out.set("body", std::move(r.json_v));
+        else if (!r.body.empty()) {
             try { out.set("body", parse_json(r.body)); }
             catch (...) { out.set("body", Val::text(r.body)); }
         }
@@ -358,16 +369,20 @@ static bool send_all(int fd, const std::string& data) {
 // the response bytes are never glued into one contiguous copy, so a large
 // body transfers in linear time with zero intermediate allocation. The head
 // is serialized into an arena-backed buffer (request-scoped, reset after).
+// JSON responses stream the serialized body into that same arena buffer
+// (exact Content-Length via json_size beforehand), landing head + body in
+// one buffer and one send().
 static bool http_respond(int fd, const Response& r, bool keep, hs::Arena::Str& out) {
     out.reset();
+    size_t cl = r.has_json ? json_size(r.json_v) : r.body.size();
     out.append("HTTP/1.1 ");
-    out.append(std::to_string(r.status));
+    json_append_int(out, (int64_t)r.status);
     out.append(' ');
     out.append(http_reason(r.status));
     out.append("\r\nContent-Type: ");
     out.append(r.ctype);
     out.append("\r\nContent-Length: ");
-    out.append(std::to_string(r.body.size()));
+    json_append_int(out, (int64_t)cl);
     out.append("\r\nConnection: ");
     out.append((keep && g_hs_keepalive) ? "keep-alive" : "close");
     out.append("\r\nServer: hardscript/");
@@ -375,8 +390,9 @@ static bool http_respond(int fd, const Response& r, bool keep, hs::Arena::Str& o
     out.append("\r\n");
     for (auto& h : r.headers) { out.append(h.first); out.append(": "); out.append(h.second); out.append("\r\n"); }
     out.append("\r\n");
+    if (r.has_json) val_to_json(r.json_v, out); // body lands in the same buffer
     if (!send_all(fd, out.data, out.len)) return false;
-    if (!r.body.empty() && !send_all(fd, r.body.data(), r.body.size())) return false;
+    if (!r.has_json && !r.body.empty() && !send_all(fd, r.body.data(), r.body.size())) return false;
     return true;
 }
 
