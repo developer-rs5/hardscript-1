@@ -21,6 +21,16 @@ python3 "$GEN" >/dev/null
 rm -rf "$TMP"
 ( cd "$ROOT" && "$HARD" build "$APP"; ) >/dev/null 2>&1 || { echo "build failed"; exit 1; }
 
+if [ "${PH4_SANITIZE:-0}" = "1" ]; then
+    echo "== sanitizer recompile (ASan/UBSan) =="
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1:abort_on_error=1}"
+    export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
+    g++ -std=c++17 -pthread -I "$ROOT/.hard" \
+        -fsanitize=address,undefined -fno-sanitize-recover=all -g -O1 \
+        -fno-omit-frame-pointer \
+        "$ROOT/.hard/runtime_torture.cpp" -o "$ROOT/.hard/runtime_torture" || { echo "sanitize build failed"; exit 1; }
+fi
+
 "$ROOT/.hard/runtime_torture" >"$ROOT/.hard/srv.log" 2>&1 &
 SRV=$!
 sleep 1.5
@@ -104,5 +114,8 @@ echo "-- websocket 500 clients --"
 python3 "$ROOT/qa/phase4_ws.py" "$PORT" 500 && ok "ws 500 clients echo" || bad "ws echo failure"
 
 kill $SRV 2>/dev/null
+wait $SRV 2>/dev/null
+srv_rc=$?
+[ "$srv_rc" -eq 0 ] && ok "server clean exit (rc=0)" || bad "server exit rc=$srv_rc (sanitizer finding?)"
 echo "== Phase 4: $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

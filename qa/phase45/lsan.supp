@@ -1,0 +1,11 @@
+# LeakSanitizer suppressions for HardScript v0.1.1 audit.
+#
+# These are intentionally process-lifetime singletons: function-local static
+# registries that are cheap to construct once and never individually freed.
+# They are not per-request or per-connection allocations, so they are not
+# memory-safety bugs. Everything else must be leak-free.
+leak:hs::ws_registry
+leak:hs::ws_clients
+leak:hs::ws_rooms
+leak:hs::ws_client_room
+leak:hs::test_registry

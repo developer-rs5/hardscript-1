@@ -4,6 +4,20 @@
 // ===========================================================================
 // HTTP
 // ===========================================================================
+// Graceful shutdown: SIGINT/SIGTERM set a flag so the accept loop can break
+// out and main() can return normally (clean destructor + leak-sanitizer run).
+// Kept intentionally tiny: no per-request cleanup depends on it, only the
+// ability to stop the listener without killing the process abruptly.
+inline std::atomic<bool> g_hs_stop{false};
+inline std::atomic<int> g_hs_conn{0};
+inline void hs_install_shutdown_signals() {
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof sa);
+    sa.sa_handler = [](int) { g_hs_stop.store(true); };
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+}
 struct Request {
     std::string method;
     std::string path;    // decoded path, no query
@@ -384,6 +398,8 @@ inline void ws_reply(const std::string& payload) {
 }
 
 static void handle_connection(int fd, Server& srv) {
+    ++g_hs_conn;
+    struct ConnGuard { ~ConnGuard() { g_hs_conn.fetch_sub(1); } } conn_guard;
     std::string buf;
     char chunk[4096];
     struct pollfd pfd;
@@ -532,7 +548,9 @@ inline void Server::listen() {
     }
     printf("HardScript server listening on http://127.0.0.1:%d\n", port);
     fflush(stdout);
+    hs_install_shutdown_signals();
     for (;;) {
+        if (g_hs_stop.load()) break;
         struct sockaddr_in ca;
         socklen_t clen = sizeof ca;
         int cfd = accept(sfd, (struct sockaddr*)&ca, &clen);
@@ -543,6 +561,8 @@ inline void Server::listen() {
         std::thread(handle_connection, cfd, std::ref(*this)).detach();
     }
     close(sfd);
+    for (int i = 0; i < 100 && g_hs_conn.load() > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 
 #endif

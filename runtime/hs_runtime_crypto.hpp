@@ -106,11 +106,12 @@ inline std::string base64_decode(const std::string& s) {
         return -1;
     };
     std::string out;
-    int v = 0, bits = 0;
+    uint32_t v = 0;
+    int bits = 0;
     for (char c : s) {
         int d = hv(c);
         if (d < 0) continue;
-        v = (v << 6) | d;
+        v = ((v << 6) | (uint32_t)d) & 0x3ffffff;
         bits += 6;
         if (bits >= 8) { bits -= 8; out += (char)((v >> bits) & 0xff); }
     }

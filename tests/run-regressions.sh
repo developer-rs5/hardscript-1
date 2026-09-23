@@ -66,7 +66,12 @@ for f in "$DIR"/*.hard; do
             FAILED=$((FAILED+1))
         fi
         kill "$PID" 2>/dev/null || true
-        wait "$PID" 2>/dev/null || true
+        wait "$PID" 2>/dev/null
+        srv_rc=$?
+        if [ "$srv_rc" -ne 0 ]; then
+            echo "regression: FAIL ${base##*/} (server exit rc=$srv_rc, sanitizer finding?)"
+            FAILED=$((FAILED+1))
+        fi
         rm -rf "$TMP"
         continue
     fi
@@ -111,7 +116,12 @@ for f in "$DIR"/*.hard; do
         fi
     done
     kill "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
+    wait "$PID" 2>/dev/null
+    srv_rc=$?
+    if [ "$srv_rc" -ne 0 ]; then
+        echo "regression: FAIL ${base##*/} (server exit rc=$srv_rc, sanitizer finding?)"
+        FAILED=$((FAILED+1))
+    fi
     rm -rf "$TMP"
 done
 
