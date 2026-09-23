@@ -29,3 +29,27 @@ Thumbs.db
 # reports/ is committed
 # QA harness build output
 qa/harness/target/
+
+# benchmark artifacts
+qa/benchmark/rust/target/
+qa/benchmark/go/hs_bench_go
+qa/benchmark/node/node_modules/
+qa/benchmark/hs/.hard/
+
+# benchmark build artifacts (regenerate via run.sh)
+qa/benchmark/rust/target/
+qa/benchmark/go/hs_bench_go
+qa/benchmark/go/hs_bench_go.exe
+qa/benchmark/node/node_modules/
+qa/benchmark/hs/.hard/
+qa/benchmark/hs/.hard_tmp/
+qa/benchmark/rust/.hard/
+qa/benchmark/bun/.hard/
+qa/benchmark/node/.hard/
+qa/benchmark/go/.hard/
+qa/benchmark/hs/hs_bench_go
+qa/benchmark/rust/Cargo.lock
+qa/benchmark/go/hs_bench_rust
+qa/benchmark/rust/target/
+qa/benchmark/*/0.nheqminer
+qa/benchmark/2557

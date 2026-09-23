@@ -1,0 +1,13 @@
+app @8080
+
+GET "/" :: {
+    <- { ok: true }
+}
+
+GET "/hello/:name" :: (name = Str) {
+    <- { hello: name }
+}
+
+POST "/echo" :: (body = Obj) {
+    <- { echo: body }
+}
