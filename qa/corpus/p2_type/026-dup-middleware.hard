@@ -1,0 +1,5 @@
+before g :: { }
+before g :: { }
+GET "/" :: {
+    <- 1
+}

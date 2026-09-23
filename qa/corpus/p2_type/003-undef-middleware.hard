@@ -1,0 +1,6 @@
+before gate :: {
+    <- nope
+}
+GET "/" :: {
+    <- 1
+}

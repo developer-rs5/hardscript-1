@@ -1,0 +1,6 @@
+model M = m [
+  id => Int #id,
+  inner => m2 [
+    x => Int,
+  ],
+]

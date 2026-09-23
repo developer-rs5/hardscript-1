@@ -1,0 +1,5 @@
+before g :: { }
+calc g() => Num { <- 1 }
+GET "/" :: {
+    <- 1
+}

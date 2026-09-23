@@ -1,0 +1,5 @@
+a <- "x"
+b <- json.stringify(a)
+GET "/" :: {
+    <- 1
+}

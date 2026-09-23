@@ -1,0 +1,6 @@
+before gm7 :: { <- crypto.sha256bin("x")
+    <- 1
+}
+GET "/" :: {
+    <- 1
+}

@@ -1,0 +1,6 @@
+socket "/s" {
+    connect :: { <- nope }
+}
+GET "/" :: {
+    <- 1
+}

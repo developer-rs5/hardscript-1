@@ -27,3 +27,5 @@ Thumbs.db
 
 # Reports are generated artifacts kept in git
 # reports/ is committed
+# QA harness build output
+qa/harness/target/

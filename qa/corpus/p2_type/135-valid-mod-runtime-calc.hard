@@ -1,0 +1,6 @@
+calc cf21() => Num {
+    <- runtime.platform()
+}
+GET "/" :: {
+    <- 1
+}

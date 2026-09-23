@@ -122,7 +122,9 @@ impl Checker {
                     if let Some(prev) = self.globals.get(&v.name) {
                         let _ = prev;
                     }
-                    let mut scope = self.base_scope(false);
+                    // Globals are shared across the file (SPEC §9), so an
+                    // initializer may reference any other top-level name.
+                    let mut scope = self.base_scope(true);
                     self.expr(&v.value, &mut scope);
                 }
                 _ => {}

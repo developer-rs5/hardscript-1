@@ -1,0 +1,4 @@
+calc add(Num x, Num y) => Num { <- x + y }
+GET "/" :: {
+    <- add(add(1, 2), 3)
+}

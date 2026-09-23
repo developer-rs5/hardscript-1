@@ -1,0 +1,3 @@
+g4 <- 4
+calc h4(Num x) => Num { <- x + g4 }
+GET "/4" :: { <- h4(g4) }

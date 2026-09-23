@@ -1,0 +1,6 @@
+before gm17 :: { <- time.iso(time.now())
+    <- 1
+}
+GET "/" :: {
+    <- 1
+}

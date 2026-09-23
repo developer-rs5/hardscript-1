@@ -1,0 +1,4 @@
+calc f(Num x) => Num { <- x + q }
+GET "/" :: {
+    <- 1
+}

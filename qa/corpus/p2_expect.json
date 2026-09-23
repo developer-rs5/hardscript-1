@@ -1,0 +1,486 @@
+{
+ "001-undef-route.hard": {
+  "expect": "err",
+  "msg": "`nope` is not defined"
+ },
+ "002-undef-calc.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "003-undef-middleware.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "004-undef-socket.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "005-undef-test.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "006-undef-if.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "007-undef-loop.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "008-undef-race.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "009-undef-pick.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "010-undef-expect.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "011-undef-in-obj.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "012-undef-in-list.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "013-undef-in-index-base.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "014-undef-in-index-idx.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "015-undef-in-member-base.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "016-undef-in-binary.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "017-undef-in-unary.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "018-undef-in-arg.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "019-undef-in-callee.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "020-undef-in-var-value.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "021-undef-in-const-value.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "022-undef-in-nested.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "023-dup-model.hard": {
+  "expect": "err",
+  "msg": "duplicate declaration of `model M`"
+ },
+ "024-dup-calc.hard": {
+  "expect": "err",
+  "msg": "duplicate declaration of `f`"
+ },
+ "025-dup-test.hard": {
+  "expect": "err",
+  "msg": "duplicate declaration of `test t`"
+ },
+ "026-dup-middleware.hard": {
+  "expect": "err",
+  "msg": "duplicate declaration of `middleware g`"
+ },
+ "027-dup-route.hard": {
+  "expect": "err",
+  "msg": "duplicate declaration of `GET /`"
+ },
+ "028-dup-route-param.hard": {
+  "expect": "err",
+  "msg": "duplicate declaration of `GET /x/:id`"
+ },
+ "029-valid-bug3-global-chain.hard": {
+  "expect": "ok"
+ },
+ "030-valid-bug3-global-fwd.hard": {
+  "expect": "ok"
+ },
+ "031-valid-bug3-global-mod.hard": {
+  "expect": "ok"
+ },
+ "032-valid-globals-in-route.hard": {
+  "expect": "ok"
+ },
+ "033-valid-globals-in-middleware.hard": {
+  "expect": "ok"
+ },
+ "034-valid-globals-in-socket.hard": {
+  "expect": "ok"
+ },
+ "035-valid-globals-in-test.hard": {
+  "expect": "ok"
+ },
+ "036-valid-func-call-valid.hard": {
+  "expect": "ok"
+ },
+ "037-valid-func-call-nested.hard": {
+  "expect": "ok"
+ },
+ "038-valid-func-global-shadow.hard": {
+  "expect": "ok"
+ },
+ "039-valid-module-json.hard": {
+  "expect": "ok"
+ },
+ "040-valid-module-env.hard": {
+  "expect": "ok"
+ },
+ "041-valid-module-crypto.hard": {
+  "expect": "ok"
+ },
+ "042-valid-module-time.hard": {
+  "expect": "ok"
+ },
+ "043-valid-module-runtime.hard": {
+  "expect": "ok"
+ },
+ "044-valid-module-method-object.hard": {
+  "expect": "ok"
+ },
+ "045-valid-req-usage.hard": {
+  "expect": "ok"
+ },
+ "046-valid-req-params.hard": {
+  "expect": "ok"
+ },
+ "047-valid-req-body.hard": {
+  "expect": "ok"
+ },
+ "048-valid-scope-if.hard": {
+  "expect": "ok"
+ },
+ "049-valid-scope-loop.hard": {
+  "expect": "ok"
+ },
+ "050-valid-scope-race.hard": {
+  "expect": "ok"
+ },
+ "051-valid-scope-pick.hard": {
+  "expect": "ok"
+ },
+ "052-valid-scope-expect-route.hard": {
+  "expect": "ok"
+ },
+ "053-valid-test-block-uses-global.hard": {
+  "expect": "ok"
+ },
+ "054-valid-socket-message-global.hard": {
+  "expect": "ok"
+ },
+ "055-valid-model-valid.hard": {
+  "expect": "ok"
+ },
+ "056-valid-calc-ret-types.hard": {
+  "expect": "ok"
+ },
+ "057-valid-deep-nest-ok.hard": {
+  "expect": "ok"
+ },
+ "058-valid-chain-ok.hard": {
+  "expect": "ok"
+ },
+ "059-err-deep-nest-err.hard": {
+  "expect": "err",
+  "msg": "nesting too deep"
+ },
+ "060-lenient-unchecked-module-fn-arity.hard": {
+  "expect": "ok"
+ },
+ "061-lenient-unchecked-module-fn-name.hard": {
+  "expect": "ok"
+ },
+ "062-lenient-reassign-var.hard": {
+  "expect": "ok"
+ },
+ "063-lenient-redeclare-const.hard": {
+  "expect": "ok"
+ },
+ "064-lenient-reassign-const.hard": {
+  "expect": "ok"
+ },
+ "065-lenient-dup-var-global.hard": {
+  "expect": "ok"
+ },
+ "066-lenient-expr-stmt-noreturn.hard": {
+  "expect": "ok"
+ },
+ "067-valid-calc-in-calc.hard": {
+  "expect": "ok"
+ },
+ "068-valid-calc-in-mid.hard": {
+  "expect": "ok"
+ },
+ "069-valid-calc-in-socket.hard": {
+  "expect": "ok"
+ },
+ "070-valid-calc-in-test.hard": {
+  "expect": "ok"
+ },
+ "071-valid-calc-in-pick.hard": {
+  "expect": "ok"
+ },
+ "072-valid-calc-in-loop.hard": {
+  "expect": "ok"
+ },
+ "073-valid-calc-empty-body.hard": {
+  "expect": "ok"
+ },
+ "074-valid-async-calc.hard": {
+  "expect": "ok"
+ },
+ "075-valid-calc-multi.hard": {
+  "expect": "ok"
+ },
+ "076-valid-global-in-calc.hard": {
+  "expect": "ok"
+ },
+ "077-valid-multi-globals.hard": {
+  "expect": "ok"
+ },
+ "078-valid-global-mod-chain.hard": {
+  "expect": "ok"
+ },
+ "079-valid-scope-deep.hard": {
+  "expect": "ok"
+ },
+ "080-valid-scope-loop-nested.hard": {
+  "expect": "ok"
+ },
+ "081-valid-scope-shadow-param.hard": {
+  "expect": "ok"
+ },
+ "082-valid-scope-param-across.hard": {
+  "expect": "ok"
+ },
+ "083-valid-race-discard.hard": {
+  "expect": "ok"
+ },
+ "084-valid-wait-basic.hard": {
+  "expect": "ok"
+ },
+ "085-valid-pick-default-obj.hard": {
+  "expect": "err",
+  "msg": "`nil` is not defined"
+ },
+ "086-valid-chain-ok100.hard": {
+  "expect": "ok"
+ },
+ "087-valid-chain-members-ok50.hard": {
+  "expect": "ok"
+ },
+ "088-valid-model-doc-only.hard": {
+  "expect": "ok"
+ },
+ "089-valid-index-str.hard": {
+  "expect": "ok"
+ },
+ "090-valid-index-list-of-list.hard": {
+  "expect": "ok"
+ },
+ "091-valid-index-expr.hard": {
+  "expect": "ok"
+ },
+ "092-valid-range-lexes.hard": {
+  "expect": "err",
+  "msg": "expected ']' to close list"
+ },
+ "093-valid-expect-ok-route.hard": {
+  "expect": "ok"
+ },
+ "094-valid-expect-str-eq.hard": {
+  "expect": "ok"
+ },
+ "095-valid-expect-fn-call.hard": {
+  "expect": "ok"
+ },
+ "096-valid-boot-underscore-arg.hard": {
+  "expect": "ok"
+ },
+ "097-valid-route-body-expr-ret.hard": {
+  "expect": "ok"
+ },
+ "098-valid-socket-connect-global-call.hard": {
+  "expect": "ok"
+ },
+ "099-valid-nested-object-kv.hard": {
+  "expect": "ok"
+ },
+ "100-valid-string-escapes.hard": {
+  "expect": "ok"
+ },
+ "101-err-undef-in-calc-param.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "102-err-undef-in-calc-body.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "103-err-undef-in-global.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "104-err-undef-in-const.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "105-err-undef-self-ref.hard": {
+  "expect": "ok"
+ },
+ "106-err-undef-member.hard": {
+  "expect": "ok"
+ },
+ "107-err-undef-index-empty.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "108-err-undef-match-arm.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "109-err-undef-race-arg.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "110-err-undef-fn-as-arg.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "111-err-undef-user-fn.hard": {
+  "expect": "err",
+  "msg": "not defined"
+ },
+ "112-err-dup-calc-params.hard": {
+  "expect": "ok"
+ },
+ "113-err-dup-middleware-route-name.hard": {
+  "expect": "ok"
+ },
+ "114-valid-mod-json-route.hard": {
+  "expect": "ok"
+ },
+ "115-valid-mod-json-calc.hard": {
+  "expect": "ok"
+ },
+ "116-valid-mod-json-middleware.hard": {
+  "expect": "ok"
+ },
+ "117-valid-mod-json-socket.hard": {
+  "expect": "ok"
+ },
+ "118-valid-mod-json-test.hard": {
+  "expect": "ok"
+ },
+ "119-valid-mod-crypto-route.hard": {
+  "expect": "ok"
+ },
+ "120-valid-mod-crypto-calc.hard": {
+  "expect": "ok"
+ },
+ "121-valid-mod-crypto-middleware.hard": {
+  "expect": "ok"
+ },
+ "122-valid-mod-crypto-socket.hard": {
+  "expect": "ok"
+ },
+ "123-valid-mod-crypto-test.hard": {
+  "expect": "ok"
+ },
+ "124-valid-mod-env-route.hard": {
+  "expect": "ok"
+ },
+ "125-valid-mod-env-calc.hard": {
+  "expect": "ok"
+ },
+ "126-valid-mod-env-middleware.hard": {
+  "expect": "ok"
+ },
+ "127-valid-mod-env-socket.hard": {
+  "expect": "ok"
+ },
+ "128-valid-mod-env-test.hard": {
+  "expect": "ok"
+ },
+ "129-valid-mod-time-route.hard": {
+  "expect": "ok"
+ },
+ "130-valid-mod-time-calc.hard": {
+  "expect": "ok"
+ },
+ "131-valid-mod-time-middleware.hard": {
+  "expect": "ok"
+ },
+ "132-valid-mod-time-socket.hard": {
+  "expect": "ok"
+ },
+ "133-valid-mod-time-test.hard": {
+  "expect": "ok"
+ },
+ "134-valid-mod-runtime-route.hard": {
+  "expect": "ok"
+ },
+ "135-valid-mod-runtime-calc.hard": {
+  "expect": "ok"
+ },
+ "136-valid-mod-runtime-middleware.hard": {
+  "expect": "ok"
+ },
+ "137-valid-mod-runtime-socket.hard": {
+  "expect": "ok"
+ },
+ "138-valid-mod-runtime-test.hard": {
+  "expect": "ok"
+ },
+ "139-valid-globals-pad0.hard": {
+  "expect": "ok"
+ },
+ "140-valid-globals-pad1.hard": {
+  "expect": "ok"
+ },
+ "141-valid-globals-pad2.hard": {
+  "expect": "ok"
+ },
+ "142-valid-globals-pad3.hard": {
+  "expect": "ok"
+ },
+ "143-valid-globals-pad4.hard": {
+  "expect": "ok"
+ },
+ "144-valid-globals-pad5.hard": {
+  "expect": "ok"
+ },
+ "145-valid-globals-pad6.hard": {
+  "expect": "ok"
+ },
+ "146-valid-globals-pad7.hard": {
+  "expect": "ok"
+ },
+ "147-valid-globals-pad8.hard": {
+  "expect": "ok"
+ },
+ "148-valid-globals-pad9.hard": {
+  "expect": "ok"
+ }
+}

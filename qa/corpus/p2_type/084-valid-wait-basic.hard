@@ -1,0 +1,5 @@
+calc wn() => Num { <- 42 }
+GET "/" :: {
+    x <- wait wn()
+    <- x
+}

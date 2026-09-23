@@ -1,0 +1,5 @@
+socket "/s13" { connect :: { <- env.get("PATH", "") }
+}
+GET "/" :: {
+    <- 1
+}

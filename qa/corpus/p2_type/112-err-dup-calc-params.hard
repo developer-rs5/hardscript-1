@@ -1,0 +1,4 @@
+calc d(Num x, Num x) => Num { <- x }
+GET "/" :: {
+    <- 1
+}

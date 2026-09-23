@@ -1,0 +1,9 @@
+calc ci() => Int { <- 1 }
+calc cs() => Str { <- "x" }
+calc cb() => Bool { <- 1 == 1 }
+calc cl() => List { <- [1] }
+calc co() => Obj { <- { "a": 1 } }
+calc cn() => Num { }
+GET "/" :: {
+    <- 1
+}

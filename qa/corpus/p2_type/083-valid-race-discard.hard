@@ -1,0 +1,5 @@
+calc slow(Num x) => Num { <- x }
+GET "/" :: {
+    race [ slow(1), 2 ]
+    <- 1
+}

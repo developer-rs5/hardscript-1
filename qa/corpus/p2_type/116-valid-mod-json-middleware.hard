@@ -1,0 +1,6 @@
+before gm2 :: { <- json.stringify({ "a": 1 })
+    <- 1
+}
+GET "/" :: {
+    <- 1
+}

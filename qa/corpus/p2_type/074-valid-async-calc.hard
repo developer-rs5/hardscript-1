@@ -1,0 +1,4 @@
+async calc az(Num a) => Num { <- a }
+GET "/" :: {
+    <- 1
+}

@@ -1,0 +1,5 @@
+g <- 10
+calc gc(Num x) => Num { <- x + g }
+GET "/" :: {
+    <- 1
+}

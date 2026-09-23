@@ -1,0 +1,5 @@
+model M = a [ x => Int, ]
+model M = b [ y => Int, ]
+GET "/" :: {
+    <- 1
+}

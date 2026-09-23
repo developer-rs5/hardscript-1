@@ -1,0 +1,6 @@
+calc f(Num x) => Num {
+    <- nope
+}
+GET "/" :: {
+    <- 1
+}

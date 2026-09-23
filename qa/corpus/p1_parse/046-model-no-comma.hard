@@ -1,0 +1,4 @@
+model M = m [
+  id => Int #id
+  name => Str
+]

@@ -1,0 +1,4 @@
+GET "/s/:v" :: (v = Str) {
+    v <- "shadow"
+    <- v
+}

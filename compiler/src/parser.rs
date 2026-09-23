@@ -5,6 +5,8 @@ use crate::token::{Kw, Span, Sym, Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    depth: usize,
+    fatal: bool,
     pub imports: Vec<Module>,
     pub app_port: Option<i64>,
     pub models: Vec<ModelDef>,
@@ -15,11 +17,28 @@ pub struct Parser {
     pub tests: Vec<TestDef>,
 }
 
+/// Maximum recursion depth for `parse_expr`, `parse_unary` and `parse_block`,
+/// chosen below the stack limit where deep nesting would abort the compiler
+/// process with a stack overflow. Dev builds are unoptimized with much larger
+/// frames (measured overflow at ~450 nested parens), so the limit is
+/// deliberately conservative; the formatter/codegen also recurse over the AST.
+const MAX_DEPTH: usize = 256;
+
+/// Maximum number of operators/members folded into one expression by the
+/// iterative (loop-built) parse paths (`parse_or` … `parse_postfix`). These
+/// build left-deep ASTs that (a) overflow the stack when later traversed
+/// (type check, codegen, recursive drop) and (b) make `g++ -O2` degrade
+/// super-linearly on the emitted C++ (a 2047-member chain took >25 s to
+/// compile). Unbounded chains are rejected with a diagnostic.
+const MAX_CHAIN: usize = 256;
+
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Parser {
         Parser {
             toks,
             pos: 0,
+            depth: 0,
+            fatal: false,
             imports: Vec::new(),
             app_port: None,
             models: Vec::new(),
@@ -29,6 +48,39 @@ impl Parser {
             middlewares: Vec::new(),
             tests: Vec::new(),
         }
+    }
+
+    fn enter_depth(&mut self, what: &str) -> Result<(), Vec<Diag>> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            self.depth = 0;
+            self.fatal = true;
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("{what} nesting too deep (limit {MAX_DEPTH})"),
+                self.span(),
+                format!("Simplify the nesting below {MAX_DEPTH} levels."),
+            )]);
+        }
+        Ok(())
+    }
+
+    fn exit_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn chain_ok(&mut self, count: usize) -> Result<(), Vec<Diag>> {
+        if count > MAX_CHAIN {
+            self.fatal = true;
+            self.depth = 0;
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("expression too long (over {MAX_CHAIN} operands)"),
+                self.span(),
+                "Break the expression into smaller pieces or use variables.",
+            )]);
+        }
+        Ok(())
     }
 
     fn peek(&self) -> &Tok {
@@ -154,6 +206,9 @@ impl Parser {
                         Ok(None) => {}
                         Err(e) => {
                             errs.extend(e);
+                            if self.fatal {
+                                break;
+                            }
                             self.advance();
                             self.recover();
                         }
@@ -241,7 +296,10 @@ impl Parser {
                 self.middlewares.push((name.clone(), body.clone()));
                 Ok(Some(Stmt::Middleware { name, body, span: sp }))
             }
-            Tok::Kw(Kw::Calc) => self.parse_func(false).map(Some),
+            Tok::Kw(Kw::Calc) => {
+                self.advance();
+                self.parse_func(false).map(Some)
+            }
             Tok::Kw(Kw::Async) => {
                 self.advance();
                 if !self.eat_kw(Kw::Calc) {
@@ -364,6 +422,13 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Vec<Diag>> {
+        self.enter_depth("block")?;
+        let r = self.parse_block_inner();
+        self.exit_depth();
+        r
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Vec<Stmt>, Vec<Diag>> {
         let sp = self.span();
         self.expect_sym(Sym::LBrace, "to start a block")?;
         let mut stmts = Vec::new();
@@ -647,12 +712,18 @@ impl Parser {
     // ---------- expressions ----------
 
     fn parse_expr(&mut self) -> Result<Expr, Vec<Diag>> {
-        self.parse_or()
+        self.enter_depth("expression")?;
+        let r = self.parse_or();
+        self.exit_depth();
+        r
     }
 
     fn parse_or(&mut self) -> Result<Expr, Vec<Diag>> {
         let mut lhs = self.parse_and()?;
+        let mut k = 0usize;
         while *self.peek() == Tok::Sym(Sym::OrOr) {
+            k += 1;
+            self.chain_ok(k)?;
             let sp = self.span();
             self.advance();
             let rhs = self.parse_and()?;
@@ -663,7 +734,10 @@ impl Parser {
 
     fn parse_and(&mut self) -> Result<Expr, Vec<Diag>> {
         let mut lhs = self.parse_cmp()?;
+        let mut k = 0usize;
         while *self.peek() == Tok::Sym(Sym::AndAnd) {
+            k += 1;
+            self.chain_ok(k)?;
             let sp = self.span();
             self.advance();
             let rhs = self.parse_cmp()?;
@@ -674,6 +748,7 @@ impl Parser {
 
     fn parse_cmp(&mut self) -> Result<Expr, Vec<Diag>> {
         let mut lhs = self.parse_add()?;
+        let mut k = 0usize;
         loop {
             let op = match self.peek() {
                 Tok::Sym(Sym::EqEq) => BinOp::Eq,
@@ -684,6 +759,8 @@ impl Parser {
                 Tok::Sym(Sym::Ge) => BinOp::Ge,
                 _ => break,
             };
+            k += 1;
+            self.chain_ok(k)?;
             let sp = self.span();
             self.advance();
             let rhs = self.parse_add()?;
@@ -694,12 +771,15 @@ impl Parser {
 
     fn parse_add(&mut self) -> Result<Expr, Vec<Diag>> {
         let mut lhs = self.parse_mul()?;
+        let mut k = 0usize;
         loop {
             let op = match self.peek() {
                 Tok::Sym(Sym::Plus) => BinOp::Add,
                 Tok::Sym(Sym::Minus) => BinOp::Sub,
                 _ => break,
             };
+            k += 1;
+            self.chain_ok(k)?;
             let sp = self.span();
             self.advance();
             let rhs = self.parse_mul()?;
@@ -710,6 +790,7 @@ impl Parser {
 
     fn parse_mul(&mut self) -> Result<Expr, Vec<Diag>> {
         let mut lhs = self.parse_unary()?;
+        let mut k = 0usize;
         loop {
             let op = match self.peek() {
                 Tok::Sym(Sym::Star) => BinOp::Mul,
@@ -717,6 +798,8 @@ impl Parser {
                 Tok::Sym(Sym::Percent) => BinOp::Mod,
                 _ => break,
             };
+            k += 1;
+            self.chain_ok(k)?;
             let sp = self.span();
             self.advance();
             let rhs = self.parse_unary()?;
@@ -726,6 +809,13 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, Vec<Diag>> {
+        self.enter_depth("expression")?;
+        let r = self.parse_unary_inner();
+        self.exit_depth();
+        r
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, Vec<Diag>> {
         if *self.peek() == Tok::Sym(Sym::Minus) {
             let sp = self.span();
             self.advance();
@@ -750,14 +840,19 @@ impl Parser {
 
     fn parse_postfix(&mut self) -> Result<Expr, Vec<Diag>> {
         let mut e = self.parse_atom()?;
+        let mut k = 0usize;
         loop {
             match *self.peek() {
                 Tok::Sym(Sym::Dot) => {
+                    k += 1;
+                    self.chain_ok(k)?;
                     self.advance();
                     let (name, sp) = self.member_name()?;
                     e = Expr::Member(Box::new(e), name, sp);
                 }
                 Tok::Sym(Sym::LParen) => {
+                    k += 1;
+                    self.chain_ok(k)?;
                     let sp = self.span();
                     self.advance();
                     let mut args = Vec::new();
@@ -774,6 +869,8 @@ impl Parser {
                     e = Expr::Call { callee: Box::new(e), args, span: sp };
                 }
                 Tok::Sym(Sym::LBracket) => {
+                    k += 1;
+                    self.chain_ok(k)?;
                     let sp = self.span();
                     self.advance();
                     let idx = self.parse_expr()?;

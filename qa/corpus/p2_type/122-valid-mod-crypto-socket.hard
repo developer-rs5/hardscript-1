@@ -1,0 +1,5 @@
+socket "/s8" { connect :: { <- crypto.sha256bin("x") }
+}
+GET "/" :: {
+    <- 1
+}

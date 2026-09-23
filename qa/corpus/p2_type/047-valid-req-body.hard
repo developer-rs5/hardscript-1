@@ -1,0 +1,3 @@
+POST "/b" :: (body = Obj) {
+    <- body.field
+}

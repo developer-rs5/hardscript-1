@@ -1,0 +1,5 @@
+socket "/s23" { connect :: { <- runtime.platform() }
+}
+GET "/" :: {
+    <- 1
+}

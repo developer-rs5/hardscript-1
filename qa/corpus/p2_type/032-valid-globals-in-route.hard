@@ -1,0 +1,6 @@
+g1 <- 1
+g2 <- g1 + 1
+GET "/" :: {
+    <- g2
+}
+calc add(Num x, Num y) => Num { <- x + y }

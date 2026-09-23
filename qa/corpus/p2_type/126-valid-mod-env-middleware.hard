@@ -1,0 +1,6 @@
+before gm12 :: { <- env.get("PATH", "")
+    <- 1
+}
+GET "/" :: {
+    <- 1
+}

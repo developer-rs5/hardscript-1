@@ -1,0 +1,5 @@
+examples/auth/main.hard
+examples/chat/main.hard
+examples/hello-world/main.hard
+examples/postgres/main.hard
+examples/rest-api/main.hard

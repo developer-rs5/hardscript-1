@@ -1,0 +1,3 @@
+GET "/" :: {
+    <- missing_calc(2)
+}

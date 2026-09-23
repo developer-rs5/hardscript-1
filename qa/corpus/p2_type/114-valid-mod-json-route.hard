@@ -1,0 +1,3 @@
+GET "/" :: {
+    <- json.stringify({ "a": 1 })
+}

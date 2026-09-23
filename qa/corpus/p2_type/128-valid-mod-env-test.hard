@@ -1,0 +1,4 @@
+test "t14" { expect 1 == 1 || env.get("PATH", "") }
+GET "/" :: {
+    <- 1
+}

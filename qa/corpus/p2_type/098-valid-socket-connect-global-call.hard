@@ -1,0 +1,6 @@
+calc sc() => Str { <- "ok" }
+g <- 1
+socket "/s" { message(d) :: { <- sc() } }
+GET "/" :: {
+    <- 1
+}

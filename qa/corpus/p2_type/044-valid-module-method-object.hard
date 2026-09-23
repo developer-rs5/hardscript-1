@@ -1,0 +1,4 @@
+GET "/" :: {
+    a <- json.parse("{\"a\":1}")
+    <- json.keys(a)
+}

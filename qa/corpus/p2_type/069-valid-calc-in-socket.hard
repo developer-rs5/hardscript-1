@@ -1,0 +1,5 @@
+calc f(Num x) => Num { <- x + 1 }
+socket "/s" { connect :: { <- f(1) } }
+GET "/" :: {
+    <- 1
+}

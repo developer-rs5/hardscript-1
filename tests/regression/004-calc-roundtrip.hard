@@ -1,0 +1,5 @@
+app @3031
+calc add(Num a, Num b) => Num { <- a + b }
+GET "/" :: {
+    <- add(add(10, 1), add(2, 3))
+}

@@ -1,0 +1,5 @@
+calc f(Num x) => Num { <- x }
+calc f(Num y) => Num { <- y }
+GET "/" :: {
+    <- 1
+}

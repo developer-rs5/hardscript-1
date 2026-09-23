@@ -1,0 +1,4 @@
+test "t4" { expect 1 == 1 || json.stringify({ "a": 1 }) }
+GET "/" :: {
+    <- 1
+}

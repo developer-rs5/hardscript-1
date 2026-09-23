@@ -1,0 +1,6 @@
+calc cf6() => Num {
+    <- crypto.sha256bin("x")
+}
+GET "/" :: {
+    <- 1
+}

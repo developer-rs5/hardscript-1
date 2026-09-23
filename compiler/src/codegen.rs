@@ -597,7 +597,10 @@ impl Codegen {
                     return "hs::Val::nil()".to_string();
                 }
                 let args_cpp: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
-                format!("hs::fn_{}({})", safe_id(name), args_cpp.join(", "))
+                // User calc functions are emitted as global `static ... fn_x` in
+                // the generated TU, so call them unqualified (`using namespace
+                // hs;` is active at that point). `hs::fn_x` would not resolve.
+                format!("fn_{}({})", safe_id(name), args_cpp.join(", "))
             }
             _ => {
                 self.err("cannot call this expression", span);

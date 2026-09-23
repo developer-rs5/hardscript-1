@@ -1,0 +1,2 @@
+calc f(x) => Int { x }
+calc f(y) => Int { y }

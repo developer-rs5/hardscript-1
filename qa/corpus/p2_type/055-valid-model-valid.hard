@@ -1,0 +1,7 @@
+model M = t [
+    id => Int #id,
+    n => Str,
+]
+GET "/" :: {
+    <- 1
+}

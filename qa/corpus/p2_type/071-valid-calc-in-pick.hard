@@ -1,0 +1,7 @@
+calc f(Num x) => Num { <- x + 1 }
+calc h(Num w) => Num {
+    <- pick w { 1 => 2, * => 3 }
+}
+GET "/" :: {
+    <- 1
+}

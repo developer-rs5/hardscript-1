@@ -1,0 +1,5 @@
+socket "/s3" { connect :: { <- json.stringify({ "a": 1 }) }
+}
+GET "/" :: {
+    <- 1
+}

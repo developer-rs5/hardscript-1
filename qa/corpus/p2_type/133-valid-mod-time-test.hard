@@ -1,0 +1,4 @@
+test "t19" { expect 1 == 1 || time.iso(time.now()) }
+GET "/" :: {
+    <- 1
+}

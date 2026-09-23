@@ -1,0 +1,7 @@
+a <- "x"
+b <- json.stringify(a)
+c <- [a, b]
+calc comb() => List { <- [a, b, c] }
+GET "/" :: {
+    <- 1
+}

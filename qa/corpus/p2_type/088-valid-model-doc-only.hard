@@ -1,0 +1,7 @@
+model U = users [
+    id => Int #id,
+    name => Str #unique,
+]
+GET "/" :: {
+    <- 1
+}

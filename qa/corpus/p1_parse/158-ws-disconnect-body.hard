@@ -1,0 +1,5 @@
+ws: socket "/s" {
+    disconnect {
+        websocket.leave()
+    }
+}

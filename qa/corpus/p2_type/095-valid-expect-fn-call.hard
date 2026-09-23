@@ -1,0 +1,5 @@
+calc add(Num x, Num y) => Num { <- x + y }
+GET "/" :: {
+    expect add(1, 2) == 3
+    <- 1
+}

@@ -1,0 +1,3 @@
+test "aha" {
+    expect 1 == 1
+}

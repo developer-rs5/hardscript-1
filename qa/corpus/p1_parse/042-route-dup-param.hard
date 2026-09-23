@@ -1,0 +1,2 @@
+GET "/x" :: (id = Str) { p <- id }
+GET "/x" :: (id = Str) { p <- id }

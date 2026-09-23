@@ -1,0 +1,6 @@
+calc cf1() => Num {
+    <- json.stringify({ "a": 1 })
+}
+GET "/" :: {
+    <- 1
+}

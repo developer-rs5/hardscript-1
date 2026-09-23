@@ -1,0 +1,5 @@
+ws: socket "/s" {
+    connect {
+        websocket.join("g1")
+    }
+}

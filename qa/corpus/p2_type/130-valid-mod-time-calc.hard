@@ -1,0 +1,6 @@
+calc cf16() => Num {
+    <- time.iso(time.now())
+}
+GET "/" :: {
+    <- 1
+}

@@ -1,0 +1,4 @@
+test "t24" { expect 1 == 1 || runtime.platform() }
+GET "/" :: {
+    <- 1
+}

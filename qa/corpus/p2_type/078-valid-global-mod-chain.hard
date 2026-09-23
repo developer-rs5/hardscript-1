@@ -1,0 +1,4 @@
+k <- "k"
+GET "/t" :: {
+    <- crypto.hmac(k, "data")
+}

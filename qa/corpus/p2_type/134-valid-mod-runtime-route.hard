@@ -1,0 +1,3 @@
+GET "/" :: {
+    <- runtime.platform()
+}

@@ -1,0 +1,5 @@
+calc f2(Num x) => Num { <- x }
+GET "/" :: {
+    race [ f2(nope2) ]
+    <- 1
+}

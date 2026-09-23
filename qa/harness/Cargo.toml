@@ -1,0 +1,13 @@
+[package]
+name = "hs-qa-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+hs-compiler = { path = "../../compiler" }
+
+[profile.release]
+opt-level = 2

@@ -1,0 +1,5 @@
+socket "/s18" { connect :: { <- time.iso(time.now()) }
+}
+GET "/" :: {
+    <- 1
+}

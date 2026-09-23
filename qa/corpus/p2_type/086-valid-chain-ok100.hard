@@ -1,0 +1,4 @@
+x <- 1
+GET "/" :: {
+    <- 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1x + 1
+}

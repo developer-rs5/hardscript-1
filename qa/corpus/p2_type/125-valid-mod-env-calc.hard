@@ -1,0 +1,6 @@
+calc cf11() => Num {
+    <- env.get("PATH", "")
+}
+GET "/" :: {
+    <- 1
+}

@@ -1,0 +1,3 @@
+GET "/u/:id" :: (id = Str) {
+    <- id
+}

@@ -1,0 +1,6 @@
+before gm22 :: { <- runtime.platform()
+    <- 1
+}
+GET "/" :: {
+    <- 1
+}

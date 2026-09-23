@@ -1,0 +1,5 @@
+g <- 1
+socket "/s" { message(d) :: { g <- g + 1 } }
+GET "/" :: {
+    <- 1
+}

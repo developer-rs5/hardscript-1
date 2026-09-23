@@ -1,0 +1,2 @@
+model M = m [ id => Int #id, ]
+model M = n [ id => Int #id, ]

@@ -1,0 +1,4 @@
+test "t9" { expect 1 == 1 || crypto.sha256bin("x") }
+GET "/" :: {
+    <- 1
+}

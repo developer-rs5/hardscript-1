@@ -1,0 +1,2 @@
+model M = m [ id => Int #id, ]
+GET "/" :: { x <- 1 }

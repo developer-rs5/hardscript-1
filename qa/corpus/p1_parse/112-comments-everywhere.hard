@@ -1,0 +1,9 @@
+# top
+# GET blocked
+app @81 # port
+
+model Table = t [ # comment
+  id => Int #id,# c
+  name => Str, # n
+]
+secret <- 1 # x

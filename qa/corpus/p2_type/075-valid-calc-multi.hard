@@ -1,0 +1,6 @@
+calc m1(Num a) => Num { <- a }
+calc m2(Num a) => Num { <- m1(a) + 1 }
+calc m3(Num a) => Num { <- m2(m1(a)) }
+GET "/" :: {
+    <- 1
+}

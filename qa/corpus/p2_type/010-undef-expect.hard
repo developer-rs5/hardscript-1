@@ -1,0 +1,6 @@
+test "t" {
+    expect nope == 1
+}
+GET "/" :: {
+    <- 1
+}

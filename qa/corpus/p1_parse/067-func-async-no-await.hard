@@ -1,0 +1,1 @@
+async calc f() => Int { <- 55 }

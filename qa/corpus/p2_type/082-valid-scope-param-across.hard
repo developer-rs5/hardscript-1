@@ -1,0 +1,4 @@
+calc toU(Str s) => Str { <- s }
+GET "/n/:u" :: (u = Str) {
+    <- toU(u)
+}
