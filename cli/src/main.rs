@@ -23,6 +23,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_crypto.hpp"),
     ),
     (
+        "hs_runtime_arena.hpp",
+        include_str!("../../runtime/hs_runtime_arena.hpp"),
+    ),
+    (
         "hs_runtime_http.hpp",
         include_str!("../../runtime/hs_runtime_http.hpp"),
     ),

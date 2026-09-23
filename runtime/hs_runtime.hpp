@@ -23,6 +23,7 @@
 #include "hs_runtime_value.hpp"
 #include "hs_runtime_io.hpp"
 #include "hs_runtime_crypto.hpp"
+#include "hs_runtime_arena.hpp"
 #include "hs_runtime_http.hpp"
 #include "hs_runtime_sched.hpp"
 #include "hs_runtime_postgres.hpp"

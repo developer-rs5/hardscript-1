@@ -1,6 +1,7 @@
 #ifndef HS_RUNTIME_HTTP_HPP
 #define HS_RUNTIME_HTTP_HPP
 #include "hs_runtime_value.hpp"
+#include "hs_runtime_arena.hpp"
 // ===========================================================================
 // HTTP
 // ===========================================================================
@@ -336,26 +337,26 @@ static bool send_all(int fd, const std::string& data) {
 
 // Write the status line + headers straight to the socket, then the body:
 // the response bytes are never glued into one contiguous copy, so a large
-// body transfers in linear time with zero intermediate allocation.
-static bool http_respond(int fd, const Response& r, bool keep) {
-    std::string head;
-    head.reserve(160 + r.headers.size() * 40);
-    head += "HTTP/1.1 ";
-    head += std::to_string(r.status);
-    head += ' ';
-    head += http_reason(r.status);
-    head += "\r\nContent-Type: ";
-    head += r.ctype;
-    head += "\r\nContent-Length: ";
-    head += std::to_string(r.body.size());
-    head += "\r\nConnection: ";
-    head += (keep && g_hs_keepalive) ? "keep-alive" : "close";
-    head += "\r\nServer: hardscript/";
-    head += HS_VERSION_STRING;
-    head += "\r\n";
-    for (auto& h : r.headers) { head += h.first; head += ": "; head += h.second; head += "\r\n"; }
-    head += "\r\n";
-    if (!send_all(fd, head.data(), head.size())) return false;
+// body transfers in linear time with zero intermediate allocation. The head
+// is serialized into an arena-backed buffer (request-scoped, reset after).
+static bool http_respond(int fd, const Response& r, bool keep, hs::Arena::Str& out) {
+    out.reset();
+    out.append("HTTP/1.1 ");
+    out.append(std::to_string(r.status));
+    out.append(' ');
+    out.append(http_reason(r.status));
+    out.append("\r\nContent-Type: ");
+    out.append(r.ctype);
+    out.append("\r\nContent-Length: ");
+    out.append(std::to_string(r.body.size()));
+    out.append("\r\nConnection: ");
+    out.append((keep && g_hs_keepalive) ? "keep-alive" : "close");
+    out.append("\r\nServer: hardscript/");
+    out.append(HS_VERSION_STRING);
+    out.append("\r\n");
+    for (auto& h : r.headers) { out.append(h.first); out.append(": "); out.append(h.second); out.append("\r\n"); }
+    out.append("\r\n");
+    if (!send_all(fd, out.data, out.len)) return false;
     if (!r.body.empty() && !send_all(fd, r.body.data(), r.body.size())) return false;
     return true;
 }
@@ -612,6 +613,10 @@ static bool hs_parse_request(const std::string& buf, Request& req, size_t& consu
 static void handle_connection(int fd, Server& srv) {
     ++g_hs_conn;
     struct ConnGuard { ~ConnGuard() { g_hs_conn.fetch_sub(1); } } conn_guard;
+    thread_local hs::Arena arena;
+    thread_local hs::Arena::Str head;
+    arena.reset();
+    head.a = &arena;
     std::string buf;
     buf.reserve(4096);
     unsigned long long nreq = 0;
@@ -685,7 +690,8 @@ static void handle_connection(int fd, Server& srv) {
         } catch (const std::exception& e) {
             r = Response::error(500, std::string("error: ") + e.what());
         }
-        if (!http_respond(fd, r, keep)) break;
+        if (!http_respond(fd, r, keep, head)) break;
+        arena.reset(); // request arena: reclaimed for the next request
         buf.erase(0, consumed); // drop the consumed request, keep pipelined tail
         ++nreq;
         if (g_hs_stop.load() || nreq >= kMaxRequestsPerConn || !g_hs_keepalive || !keep) break;
@@ -716,7 +722,22 @@ inline void Server::listen() {
     fflush(stdout);
     hs_install_shutdown_signals();
     for (;;) {
-        if (g_hs_stop.load()) break;
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof pfd);
+        pfd.fd = sfd;
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, 250); // periodic wake so shutdown can break
+        if (pr == 0) {
+            if (g_hs_stop.load()) break;
+            continue;
+        }
+        if (pr < 0) {
+            if (errno == EINTR) {
+                if (g_hs_stop.load()) break;
+                continue;
+            }
+            break;
+        }
         struct sockaddr_in ca;
         socklen_t clen = sizeof ca;
         int cfd = accept(sfd, (struct sockaddr*)&ca, &clen);
