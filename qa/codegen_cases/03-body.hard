@@ -1,0 +1,4 @@
+app @3031
+POST "/b" :: (body = Obj) {
+    <- body.x
+}

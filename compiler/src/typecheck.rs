@@ -98,6 +98,7 @@ impl Checker {
                 }
                 Stmt::Middleware { body, .. } => {
                     let mut scope = self.base_scope(true);
+                    scope.insert("req".into(), Span::new(0, 0));
                     self.scan_block(body, &mut scope);
                 }
                 Stmt::Socket(s) => {

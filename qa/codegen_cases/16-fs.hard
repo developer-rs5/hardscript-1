@@ -1,0 +1,5 @@
+app @3031
+GET "/" :: {
+    fs.write("/tmp/hs_snap.txt", "snap")
+    <- fs.read("/tmp/hs_snap.txt")
+}

@@ -1,0 +1,6 @@
+app @3031
+model U = users [
+    id => Int #id,
+    name => Str #unique,
+]
+GET "/" :: { <- "ok" }

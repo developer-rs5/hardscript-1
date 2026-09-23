@@ -1,0 +1,8 @@
+app @3031
+calc add(Num a, Num b) => Num { <- a + b }
+calc fib(Num n) => Num {
+    ?(n < 2) { <- n }
+    <- fib(n - 1) + fib(n - 2)
+}
+GET "/add" :: { <- add(20, 22) }
+GET "/fib" :: { <- fib(10) }

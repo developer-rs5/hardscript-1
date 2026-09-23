@@ -1,0 +1,7 @@
+app @3031
+calc slow(Num x) => Num { <- x }
+GET "/" :: {
+    a <- wait slow(6)
+    race [ slow(1), 2 ]
+    <- a
+}

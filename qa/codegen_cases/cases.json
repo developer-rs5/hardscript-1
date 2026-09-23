@@ -1,0 +1,143 @@
+{
+ "01-hello": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "02-param": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/u/42"
+   },
+   {
+    "m": "GET",
+    "p": "/u/abc"
+   }
+  ]
+ },
+ "03-body": {
+  "routes": [
+   {
+    "d": "{\"x\": 7}",
+    "m": "POST",
+    "p": "/b"
+   }
+  ]
+ },
+ "04-calc": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/add"
+   },
+   {
+    "m": "GET",
+    "p": "/fib"
+   }
+  ]
+ },
+ "05-globals": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "06-modules": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/crypto"
+   },
+   {
+    "m": "GET",
+    "p": "/json"
+   }
+  ]
+ },
+ "07-middleware": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "08-loop": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "09-pick": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "10-wait-race": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "11-expect": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "12-struct": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "13-strings": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "14-logic": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "15-model": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ },
+ "16-fs": {
+  "routes": [
+   {
+    "m": "GET",
+    "p": "/"
+   }
+  ]
+ }
+}

@@ -1,0 +1,2 @@
+GET /add => 42
+GET /fib => 55

@@ -1,0 +1,5 @@
+app @3031
+GET "/crypto" :: {
+    <- crypto.sha256bin("abc")
+}
+GET "/json" :: { <- json.stringify({ "a": 1 }) }

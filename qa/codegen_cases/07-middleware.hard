@@ -1,0 +1,7 @@
+app @3031
+before gate :: {
+    ?(false) { <- { "error": "denied" } }
+}
+GET "/" :: {
+    <- "ok"
+}
