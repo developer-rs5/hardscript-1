@@ -637,7 +637,7 @@ impl Codegen {
                 Some(format!("hs::Val::text(hs::sha256_bin({}))", self.ttx(args, 0)))
             }
             (_, _) if module == "crypto" && name == "sha1" => {
-                Some(format!("hs::Val::text(hs::sha1_bin({}))", self.ttx(args, 0)))
+                Some(format!("hs::Val::text(hs::sha1_hex({}))", self.ttx(args, 0)))
             }
             (_, _) if module == "crypto" && name == "md5" => {
                 Some(format!("hs::Val::text(hs::md5_hex({}))", self.ttx(args, 0)))

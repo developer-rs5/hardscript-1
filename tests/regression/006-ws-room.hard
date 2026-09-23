@@ -1,0 +1,12 @@
+app @3031
+socket "/s" {
+    connect :: {
+        websocket.join("room")
+    }
+    message(d) :: {
+        websocket.broadcast_room("room", "echo:" + d)
+    }
+    disconnect :: {
+    }
+}
+GET "/" :: { <- 1 }

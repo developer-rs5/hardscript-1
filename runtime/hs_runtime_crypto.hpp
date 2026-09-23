@@ -5,6 +5,7 @@
 // Crypto
 // ===========================================================================
 inline uint32_t rol32(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+inline uint32_t ror32(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 
 inline void sha256_blocks(uint32_t* h, const uint8_t* p) {
     static const uint32_t K[64] = {
@@ -21,17 +22,17 @@ inline void sha256_blocks(uint32_t* h, const uint8_t* p) {
     for (int i = 0; i < 16; i++)
         w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) | ((uint32_t)p[i * 4 + 2] << 8) | p[i * 4 + 3];
     for (int i = 16; i < 64; i++) {
-        uint32_t s0 = rol32(w[i - 15], 7) ^ rol32(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = rol32(w[i - 2], 17) ^ rol32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        uint32_t s0 = ror32(w[i - 15], 7) ^ ror32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ror32(w[i - 2], 17) ^ ror32(w[i - 2], 19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
     uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
     uint32_t e = h[4], f = h[5], g = h[6], hh = h[7];
     for (int i = 0; i < 64; i++) {
-        uint32_t S1 = rol32(e, 6) ^ rol32(e, 11) ^ rol32(e, 25);
+        uint32_t S1 = ror32(e, 6) ^ ror32(e, 11) ^ ror32(e, 25);
         uint32_t ch = (e & f) ^ (~e & g);
         uint32_t t1 = hh + S1 + ch + K[i] + w[i];
-        uint32_t S0 = rol32(a, 2) ^ rol32(a, 13) ^ rol32(a, 22);
+        uint32_t S0 = ror32(a, 2) ^ ror32(a, 13) ^ ror32(a, 22);
         uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
         uint32_t t2 = S0 + maj;
         hh = g; g = f; f = e; e = d + t1;
@@ -165,6 +166,14 @@ inline std::string sha1_bin(const std::string& data) {
     std::string out;
     for (int i = 0; i < 5; i++)
         for (int b = 24; b >= 0; b -= 8) out += (char)((h[i] >> b) & 0xff);
+    return out;
+}
+inline std::string sha1_hex(const std::string& data) {
+    const std::string bin = sha1_bin(data);
+    const char* hex = "0123456789abcdef";
+    std::string out;
+    for (unsigned char c : bin)
+        out += hex[c >> 4], out += hex[c & 15];
     return out;
 }
 inline std::string md5_hex(const std::string& data) {

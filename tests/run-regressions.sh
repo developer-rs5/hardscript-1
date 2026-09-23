@@ -47,6 +47,30 @@ for f in "$DIR"/*.hard; do
         continue
     fi
 
+    # ws case: build, run, then run the websocket scenario checker
+    if [ "$kind" = "ws" ]; then
+        cp "$f" "$TMP/prog.hard"
+        if ! (cd "$TMP" && "$HARD" build prog.hard) >/dev/null 2>&1; then
+            echo "regression: FAIL ${base##*/} (build failed, wanted ok)"
+            FAILED=$((FAILED+1))
+            rm -rf "$TMP"
+            continue
+        fi
+        "$TMP/.hard/prog" >/dev/null 2>&1 &
+        PID=$!
+        sleep 0.6
+        if python3 "$DIR/ws_check.py" "$PORT" >/tmp/hs-ws-check.out 2>&1; then
+            echo "regression: PASS ${base##*/} (ws scenario: $(cat /tmp/hs-ws-check.out))"
+        else
+            echo "regression: FAIL ${base##*/} (ws scenario: $(cat /tmp/hs-ws-check.out))"
+            FAILED=$((FAILED+1))
+        fi
+        kill "$PID" 2>/dev/null || true
+        wait "$PID" 2>/dev/null || true
+        rm -rf "$TMP"
+        continue
+    fi
+
     # ok case: build, run, assert routes
     cp "$f" "$TMP/prog.hard"
     if ! (cd "$TMP" && "$HARD" build prog.hard) >/dev/null 2>&1; then

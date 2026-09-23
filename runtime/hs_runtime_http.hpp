@@ -211,8 +211,18 @@ static void send_all(int fd, const std::string& data) {
     size_t off = 0;
     while (off < data.size()) {
         ssize_t n = send(fd, data.data() + off, data.size() - off, MSG_NOSIGNAL);
-        if (n <= 0) break;
-        off += (size_t)n;
+        if (n > 0) { off += (size_t)n; continue; }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd p;
+                memset(&p, 0, sizeof p);
+                p.fd = fd;
+                p.events = POLLOUT;
+                if (poll(&p, 1, 500) > 0) continue;
+            }
+        }
+        break; // peer gone or persistently unreadable -> abandon
     }
 }
 
@@ -284,10 +294,13 @@ inline void ws_join(const std::string& client_id, const std::string& room) {
 inline void ws_leave(const std::string& client_id) {
     std::lock_guard<std::mutex> lk(ws_bcast_mutex());
     auto it = ws_client_room().find(client_id);
-    if (it != ws_client_room().end()) {
-        ws_rooms().erase(it->second);
-        ws_client_room().erase(it);
+    if (it == ws_client_room().end()) return;
+    auto rit = ws_rooms().find(it->second);
+    if (rit != ws_rooms().end()) {
+        rit->second.erase(client_id);
+        if (rit->second.empty()) ws_rooms().erase(rit);
     }
+    ws_client_room().erase(it);
 }
 
 inline void ws_broadcast(const std::string& payload) {
@@ -437,11 +450,14 @@ static void handle_connection(int fd, Server& srv) {
             resp += "Connection: Upgrade\r\n";
             resp += "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
             send_all(fd, resp);
-            if (ws.on_open) ws.on_open(req);
             std::string client_id = random_hex(8);
-            ws_clients()[client_id] = fd;
+            {
+                std::lock_guard<std::mutex> lk(ws_bcast_mutex());
+                ws_clients()[client_id] = fd;
+            }
             ws_cur() = client_id;
             ws_cur_fd() = fd;
+            if (ws.on_open) ws.on_open(req);
             // frame loop
             std::string acc;
             char wbuf[8192];
@@ -473,7 +489,10 @@ static void handle_connection(int fd, Server& srv) {
                 if (base > 0) acc.erase(0, base);
             }
             ws_leave(client_id);
-            ws_clients().erase(client_id);
+            {
+                std::lock_guard<std::mutex> lk(ws_bcast_mutex());
+                ws_clients().erase(client_id);
+            }
             ws_cur().clear();
             ws_cur_fd() = -1;
             if (ws.on_close) ws.on_close();

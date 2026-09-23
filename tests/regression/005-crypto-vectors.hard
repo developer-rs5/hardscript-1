@@ -1,0 +1,4 @@
+app @3031
+GET "/sha256abc" :: { <- crypto.sha256("abc") }
+GET "/sha1abc" :: { <- crypto.sha1("abc") }
+GET "/md5abc" :: { <- crypto.md5("abc") }

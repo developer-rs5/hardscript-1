@@ -1,0 +1,151 @@
+app @3031
+
+GET "/" :: {
+    <- "root"
+}
+GET "/r0" :: { <- 0 }
+GET "/r1" :: { <- 1 }
+GET "/r2" :: { <- 2 }
+GET "/r3" :: { <- 3 }
+GET "/r4" :: { <- 4 }
+GET "/r5" :: { <- 5 }
+GET "/r6" :: { <- 6 }
+GET "/r7" :: { <- 7 }
+GET "/r8" :: { <- 8 }
+GET "/r9" :: { <- 9 }
+GET "/r10" :: { <- 10 }
+GET "/r11" :: { <- 11 }
+GET "/r12" :: { <- 12 }
+GET "/r13" :: { <- 13 }
+GET "/r14" :: { <- 14 }
+GET "/r15" :: { <- 15 }
+GET "/r16" :: { <- 16 }
+GET "/r17" :: { <- 17 }
+GET "/r18" :: { <- 18 }
+GET "/r19" :: { <- 19 }
+GET "/r20" :: { <- 20 }
+GET "/r21" :: { <- 21 }
+GET "/r22" :: { <- 22 }
+GET "/r23" :: { <- 23 }
+GET "/r24" :: { <- 24 }
+GET "/r25" :: { <- 25 }
+GET "/r26" :: { <- 26 }
+GET "/r27" :: { <- 27 }
+GET "/r28" :: { <- 28 }
+GET "/r29" :: { <- 29 }
+GET "/r30" :: { <- 30 }
+GET "/r31" :: { <- 31 }
+GET "/r32" :: { <- 32 }
+GET "/r33" :: { <- 33 }
+GET "/r34" :: { <- 34 }
+GET "/r35" :: { <- 35 }
+GET "/r36" :: { <- 36 }
+GET "/r37" :: { <- 37 }
+GET "/r38" :: { <- 38 }
+GET "/r39" :: { <- 39 }
+GET "/r40" :: { <- 40 }
+GET "/r41" :: { <- 41 }
+GET "/r42" :: { <- 42 }
+GET "/r43" :: { <- 43 }
+GET "/r44" :: { <- 44 }
+GET "/r45" :: { <- 45 }
+GET "/r46" :: { <- 46 }
+GET "/r47" :: { <- 47 }
+GET "/r48" :: { <- 48 }
+GET "/r49" :: { <- 49 }
+GET "/r50" :: { <- 50 }
+GET "/r51" :: { <- 51 }
+GET "/r52" :: { <- 52 }
+GET "/r53" :: { <- 53 }
+GET "/r54" :: { <- 54 }
+GET "/r55" :: { <- 55 }
+GET "/r56" :: { <- 56 }
+GET "/r57" :: { <- 57 }
+GET "/r58" :: { <- 58 }
+GET "/r59" :: { <- 59 }
+GET "/r60" :: { <- 60 }
+GET "/r61" :: { <- 61 }
+GET "/r62" :: { <- 62 }
+GET "/r63" :: { <- 63 }
+GET "/r64" :: { <- 64 }
+GET "/r65" :: { <- 65 }
+GET "/r66" :: { <- 66 }
+GET "/r67" :: { <- 67 }
+GET "/r68" :: { <- 68 }
+GET "/r69" :: { <- 69 }
+GET "/r70" :: { <- 70 }
+GET "/r71" :: { <- 71 }
+GET "/r72" :: { <- 72 }
+GET "/r73" :: { <- 73 }
+GET "/r74" :: { <- 74 }
+GET "/r75" :: { <- 75 }
+GET "/r76" :: { <- 76 }
+GET "/r77" :: { <- 77 }
+GET "/r78" :: { <- 78 }
+GET "/r79" :: { <- 79 }
+GET "/r80" :: { <- 80 }
+GET "/r81" :: { <- 81 }
+GET "/r82" :: { <- 82 }
+GET "/r83" :: { <- 83 }
+GET "/r84" :: { <- 84 }
+GET "/r85" :: { <- 85 }
+GET "/r86" :: { <- 86 }
+GET "/r87" :: { <- 87 }
+GET "/r88" :: { <- 88 }
+GET "/r89" :: { <- 89 }
+GET "/r90" :: { <- 90 }
+GET "/r91" :: { <- 91 }
+GET "/r92" :: { <- 92 }
+GET "/r93" :: { <- 93 }
+GET "/r94" :: { <- 94 }
+GET "/r95" :: { <- 95 }
+GET "/r96" :: { <- 96 }
+GET "/r97" :: { <- 97 }
+GET "/r98" :: { <- 98 }
+GET "/r99" :: { <- 99 }
+GET "/u/:id" :: (id = Str) {
+    <- { "id": id }
+}
+GET "/sum/:a/:b" :: (a = Str, b = Str) {
+    <- { "s": a + b }
+}
+POST "/echo" :: (body = Obj) {
+    <- body
+}
+POST "/elev" :: (body = Obj) {
+    <- body.x
+}
+GET "/fs" :: {
+    fs.write("/tmp/hs_rt_test.txt", "hello")
+    fs.append("/tmp/hs_rt_test.txt", " world")
+    s1 <- fs.size("/tmp/hs_rt_test.txt")
+    rd <- fs.read("/tmp/hs_rt_test.txt")
+    ex <- fs.exists("/tmp/hs_rt_test.txt")
+    fs.write("/tmp/hs_rt_big.txt", crypto.random_hex(2 * 1024 * 1024))
+    big <- fs.size("/tmp/hs_rt_big.txt")
+    fs.remove("/tmp/hs_rt_test.txt")
+    <- { "rd": rd, "sz": s1, "ex": ex, "big": big }
+}
+
+GET "/sha" :: { <- crypto.sha256("abc") }
+GET "/sha0" :: { <- crypto.sha256("") }
+GET "/sha-a" :: { <- crypto.sha256("a") }
+GET "/shafox" :: { <- crypto.sha256("The quick brown fox jumps over the lazy dog") }
+GET "/shalong" :: { <- crypto.sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") }
+GET "/sha1abc" :: { <- crypto.sha1("abc") }
+GET "/md5abc" :: { <- crypto.md5("abc") }
+GET "/hmac" :: { <- crypto.hmac("key", "The quick brown fox jumps over the lazy dog") }
+GET "/b64" :: { <- crypto.base64("hello") }
+GET "/jwt" :: { <- jwt.sign({ "sub": "1" }, "hs-secret") }
+GET "/jwtv" :: (t = Str) { <- jwt.verify(t, "hs-secret") }
+GET "/sec" :: { <- time.now() }
+socket "/s" {
+    connect :: {
+        websocket.join("room")
+    }
+    message(d) :: {
+        websocket.broadcast_room("room", "echo:" + d)
+    }
+    disconnect :: { }
+}
+
