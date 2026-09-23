@@ -18,6 +18,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -211,8 +212,8 @@ inline std::string to_text_dbg(const Val& v) {
 }
 inline std::string Val::to_text_dbg() const { return ::hs::to_text_dbg(*this); }
 
-// JSON parser
-inline Val parse_json(const std::string& s) {
+// JSON parser (zero-copy: works directly on stored bytes)
+inline Val parse_json(std::string_view s) {
     size_t p = 0;
     auto ws = [&]() { while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++; };
     std::function<std::string()> parse_str = [&]() -> std::string {
@@ -306,7 +307,7 @@ inline Val parse_json(const std::string& s) {
                 else if (d == '.' || d == 'e' || d == 'E' || d == '+' || d == '-') { if (d == '.') isf = true; p++; }
                 else break;
             }
-            std::string num = s.substr(start, p - start);
+            std::string num{s.substr(start, p - start)};
             if (isf) {
                 try { return Val::flt(std::stod(num)); }
                 catch (...) { throw std::runtime_error("invalid number in JSON: " + num); }
@@ -324,6 +325,7 @@ inline Val parse_json(const std::string& s) {
     if (p != s.size()) throw std::runtime_error("trailing data after JSON value");
     return v;
 }
+inline Val parse_json(const std::string& s) { return parse_json(std::string_view(s)); }
 
 // ===========================================================================
 // Operators

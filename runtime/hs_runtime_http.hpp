@@ -18,43 +18,100 @@ inline void hs_install_shutdown_signals() {
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 }
+
+// Per-milestone keep-alive toggle. M1.5 flips this and the request loop in
+// handle_connection() closes over it; the parser is keep-alive aware from M1.1.
+static constexpr bool g_hs_keepalive = false;
+static constexpr size_t kMaxRequestBytes = 16 * 1024 * 1024;
+static constexpr unsigned long long kMaxRequestsPerConn = 10000;
+
+// ---------------------------------------------------------------------------
+// Zero-allocation helpers
+// ---------------------------------------------------------------------------
+inline char fold_ascii(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+inline bool fold_eq(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (fold_ascii(a[i]) != fold_ascii(b[i])) return false;
+    }
+    return true;
+}
+inline uint64_t hs_fold_hash(std::string_view s) {
+    uint64_t h = 1469598103934665603ull; // FNV-1a, case-folded
+    for (char c : s) { h ^= (uint8_t)fold_ascii(c); h *= 1099511628211ull; }
+    return h;
+}
+
+// A single header stored as zero-copy views into the connection buffer.
+// `hkey` is the FNV-1a case-folded hash of `name` for O(1) lookups.
+struct Hdr {
+    uint64_t hkey = 0;
+    std::string_view name;
+    std::string_view value;
+};
+
 struct Request {
-    std::string method;
-    std::string path;    // decoded path, no query
-    std::string query;
-    std::string body;
-    std::map<std::string, std::string> headers;  // lowercased keys
+    std::string method;   // small copy (verb), fine
+    std::string_view path;    // decoded path, no query — view into conn buffer
+    std::string_view query;   // raw query string — view into conn buffer
+    std::string_view body;    // request body — view into conn buffer
+    std::vector<Hdr> headers; // lowercased-key lookup via fold hashing
     std::map<std::string, std::string> params;
 
+    void clear_views() {
+        path = {};
+        query = {};
+        body = {};
+        headers.clear();
+        params.clear();
+    }
+    void add_header(std::string_view n, std::string_view v) {
+        headers.push_back({ hs_fold_hash(n), n, v });
+    }
     std::string header(const std::string& name) const {
-        std::string k = name;
-        std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-        auto it = headers.find(k);
-        return it == headers.end() ? "" : it->second;
+        uint64_t h = hs_fold_hash(name);
+        for (auto& hd : headers) {
+            if (hd.hkey == h && fold_eq(hd.name, name)) return std::string(hd.value);
+        }
+        return "";
+    }
+    bool header_eq(std::string_view name, std::string_view value) const {
+        uint64_t h = hs_fold_hash(name);
+        for (auto& hd : headers) {
+            if (hd.hkey == h && fold_eq(hd.name, name)) return fold_eq(hd.value, value);
+        }
+        return false;
     }
     std::string q(const std::string& key) const {
-        std::string qq = query;
+        std::string_view qq = query;
         std::string out;
-        size_t i = 0;
-        while (i <= qq.size()) {
-            size_t amp = qq.find('&', i);
-            std::string pair = qq.substr(i, amp == std::string::npos ? qq.size() - i : amp - i);
+        while (true) {
+            size_t amp = qq.find('&');
+            std::string_view pair = qq.substr(0, amp == std::string_view::npos ? qq.size() : amp);
             size_t eqpos = pair.find('=');
-            std::string k = pair.substr(0, eqpos);
+            std::string_view k = pair.substr(0, eqpos);
             if (k == key) {
-                std::string v = eqpos == std::string::npos ? "" : pair.substr(eqpos + 1);
+                std::string_view v = eqpos == std::string_view::npos ? std::string_view{} : pair.substr(eqpos + 1);
+                out.reserve(v.size());
                 for (size_t j = 0; j < v.size(); j++) {
                     if (v[j] == '+' ) out += ' ';
                     else if (v[j] == '%' && j + 2 < v.size()) {
-                        auto hv = [](char c) { if (c >= '0' && c <= '9') return c - '0'; if (c >= 'a' && c <= 'f') return c - 'a' + 10; if (c >= 'A' && c <= 'F') return c - 'A' + 10; return 0; };
+                        auto hv = [](char c) {
+                            if (c >= '0' && c <= '9') return c - '0';
+                            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                            return 0;
+                        };
                         out += (char)((hv(v[j + 1]) << 4) | hv(v[j + 2]));
                         j += 2;
                     } else out += v[j];
                 }
                 return out;
             }
-            if (amp == std::string::npos) break;
-            i = amp + 1;
+            if (amp == std::string_view::npos) break;
+            qq.remove_prefix(amp + 1);
         }
         return "";
     }
@@ -115,6 +172,22 @@ struct Route {
     Handler handler;
 };
 
+// split a path into at most `cap` segments, zero copies (views into `p`).
+// returns segment count, or (size_t)-1 when the path is too deep for `cap`.
+static size_t split_sv(std::string_view p, std::string_view* out, size_t cap) {
+    size_t n = 0;
+    size_t i = 0;
+    while (true) {
+        while (i < p.size() && p[i] == '/') i++;
+        if (i >= p.size()) break;
+        size_t st = i;
+        while (i < p.size() && p[i] != '/') i++;
+        if (n >= cap) return (size_t)-1;
+        out[n++] = p.substr(st, i - st);
+    }
+    return n;
+}
+
 struct Server {
     std::vector<Middleware> middlewares;
     std::vector<Route> routes;
@@ -125,52 +198,66 @@ struct Server {
         routes.push_back({ method, path, std::move(h) });
     }
 
-    static std::vector<std::string> split(const std::string& p) {
-        std::vector<std::string> out;
-        std::string cur;
-        for (char c : p) {
-            if (c == '/') { if (!cur.empty()) { out.push_back(cur); cur.clear(); } }
-            else cur += c;
-        }
-        if (!cur.empty()) out.push_back(cur);
-        return out;
-    }
-
-    // returns index of matching route or -1
-    int match(const std::string& method, const std::string& path, Request& req) const {
-        std::vector<std::string> got = split(path);
+    // returns index of matching route or -1. Zero heap allocation on the
+    // common path: segments live on the stack and params are collected only
+    // when a parameterised route actually matches.
+    int match(const std::string& method, std::string_view path, Request& req) const {
+        std::string_view got[32];
+        size_t gn = split_sv(path, got, 32);
+        if (gn == (size_t)-1) return -1;
         for (size_t i = 0; i < routes.size(); i++) {
             const Route& r = routes[i];
             if (r.method != method) continue;
-            std::vector<std::string> want = split(r.path);
-            if (want.size() != got.size()) continue;
+            std::string_view want[32];
+            size_t wn = split_sv(r.path, want, 32);
+            if (wn == (size_t)-1 || wn != gn) continue;
             bool ok = true;
-            std::map<std::string, std::string> params;
-            for (size_t k = 0; k < want.size(); k++) {
-                if (!want[k].empty() && want[k][0] == ':') params[want[k].substr(1)] = got[k];
-                else if (want[k] != got[k]) { ok = false; break; }
+            struct { std::string_view k, v; } pbuf[16];
+            size_t pn = 0;
+            for (size_t k = 0; k < wn; k++) {
+                if (!want[k].empty() && want[k][0] == ':') {
+                    if (pn >= 16) { ok = false; break; }
+                    pbuf[pn].k = want[k].substr(1);
+                    pbuf[pn].v = got[k];
+                    pn++;
+                } else if (want[k] != got[k]) { ok = false; break; }
             }
-            if (ok) { req.params = std::move(params); return (int)i; }
+            if (ok) {
+                if (pn) {
+                    req.params.clear();
+                    for (size_t k = 0; k < pn; k++) req.params[std::string(pbuf[k].k)] = std::string(pbuf[k].v);
+                }
+                return (int)i;
+            }
         }
         return -1;
     }
 
     Response dispatch(Request& req) {
-        std::function<Response(size_t)> run = [&](size_t mi) -> Response {
-            if (mi < middlewares.size()) {
-                Middleware& mw = middlewares[mi];
-                std::function<Response()> next = [&]() { return run(mi + 1); };
-                return mw(req, next);
-            }
-            int ri = match(req.method, req.path, req);
-            if (ri < 0) return Response::error(404, "not found");
-            try {
-                return routes[(size_t)ri].handler(req);
-            } catch (const std::exception& e) {
-                return Response::error(500, std::string("internal error: ") + e.what());
-            }
-        };
         try {
+            if (middlewares.empty()) {
+                int ri = match(req.method, req.path, req);
+                if (ri < 0) return Response::error(404, "not found");
+                try {
+                    return routes[(size_t)ri].handler(req);
+                } catch (const std::exception& e) {
+                    return Response::error(500, std::string("internal error: ") + e.what());
+                }
+            }
+            std::function<Response(size_t)> run = [&](size_t mi) -> Response {
+                if (mi < middlewares.size()) {
+                    Middleware& mw = middlewares[mi];
+                    std::function<Response()> next = [&]() { return run(mi + 1); };
+                    return mw(req, next);
+                }
+                int ri = match(req.method, req.path, req);
+                if (ri < 0) return Response::error(404, "not found");
+                try {
+                    return routes[(size_t)ri].handler(req);
+                } catch (const std::exception& e) {
+                    return Response::error(500, std::string("internal error: ") + e.what());
+                }
+            };
             return run(0);
         } catch (const std::exception& e) {
             return Response::error(500, std::string("middleware error: ") + e.what());
@@ -181,11 +268,12 @@ struct Server {
     Val call(const std::string& method, const std::string& raw_url, const Val& body) {
         Request req;
         size_t qpos = raw_url.find('?');
-        req.path = qpos == std::string::npos ? raw_url : raw_url.substr(0, qpos);
-        req.query = qpos == std::string::npos ? "" : raw_url.substr(qpos + 1);
+        req.path = std::string_view(raw_url).substr(0, qpos);
+        req.query = qpos == std::string::npos ? std::string_view{} : std::string_view(raw_url).substr(qpos + 1);
         req.method = method;
-        req.headers["content-type"] = "application/json";
-        req.body = body.is_str() ? body.sv : to_json(body);
+        std::string body_str = body.is_str() ? body.sv : to_json(body);
+        req.body = body_str;
+        req.add_header("content-type", "application/json");
         Response r = dispatch(req);
         Val out = Val::object({});
         out.set("status", Val::int_(r.status));
@@ -221,10 +309,11 @@ static std::string http_reason(int status) {
     }
 }
 
-static void send_all(int fd, const std::string& data) {
+static bool send_all(int fd, const char* data, size_t len) {
+    bool ok = true;
     size_t off = 0;
-    while (off < data.size()) {
-        ssize_t n = send(fd, data.data() + off, data.size() - off, MSG_NOSIGNAL);
+    while (off < len) {
+        ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
         if (n > 0) { off += (size_t)n; continue; }
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -236,21 +325,39 @@ static void send_all(int fd, const std::string& data) {
                 if (poll(&p, 1, 500) > 0) continue;
             }
         }
+        ok = false;
         break; // peer gone or persistently unreadable -> abandon
     }
+    return ok;
+}
+static bool send_all(int fd, const std::string& data) {
+    return send_all(fd, data.data(), data.size());
 }
 
-static Response http_respond(int fd, const Response& r) {
-    std::string out = "HTTP/1.1 " + std::to_string(r.status) + " " + http_reason(r.status) + "\r\n";
-    out += "Content-Type: " + r.ctype + "\r\n";
-    out += "Content-Length: " + std::to_string(r.body.size()) + "\r\n";
-    out += "Connection: close\r\n";
-    out += "Server: hardscript/" + std::string(HS_VERSION_STRING) + "\r\n";
-    for (auto& h : r.headers) out += h.first + ": " + h.second + "\r\n";
-    out += "\r\n";
-    out += r.body;
-    send_all(fd, out);
-    return r;
+// Write the status line + headers straight to the socket, then the body:
+// the response bytes are never glued into one contiguous copy, so a large
+// body transfers in linear time with zero intermediate allocation.
+static bool http_respond(int fd, const Response& r, bool keep) {
+    std::string head;
+    head.reserve(160 + r.headers.size() * 40);
+    head += "HTTP/1.1 ";
+    head += std::to_string(r.status);
+    head += ' ';
+    head += http_reason(r.status);
+    head += "\r\nContent-Type: ";
+    head += r.ctype;
+    head += "\r\nContent-Length: ";
+    head += std::to_string(r.body.size());
+    head += "\r\nConnection: ";
+    head += (keep && g_hs_keepalive) ? "keep-alive" : "close";
+    head += "\r\nServer: hardscript/";
+    head += HS_VERSION_STRING;
+    head += "\r\n";
+    for (auto& h : r.headers) { head += h.first; head += ": "; head += h.second; head += "\r\n"; }
+    head += "\r\n";
+    if (!send_all(fd, head.data(), head.size())) return false;
+    if (!r.body.empty() && !send_all(fd, r.body.data(), r.body.size())) return false;
+    return true;
 }
 
 // WebSocket frame send
@@ -358,9 +465,11 @@ static size_t ws_frame(const std::string& buf, size_t off, std::string& payload_
         pos += 4;
     }
     if (pos + len > buf.size()) return 0;
-    std::string payload = buf.substr(pos, len);
+    // masked payload is unmasked in place, reusing the connection buffer
+    std::string_view payload(buf.data() + pos, len);
+    payload_out.assign(payload);
     if (masked) {
-        for (size_t i = 0; i < payload.size(); i++) payload[i] ^= mask[i % 4];
+        for (size_t i = 0; i < payload_out.size(); i++) payload_out[i] ^= mask[i % 4];
     }
     size_t consumed = (pos + len) - off;
     (void)fin;
@@ -376,14 +485,13 @@ static size_t ws_frame(const std::string& buf, size_t off, std::string& payload_
     } else if (opcode == 0x9) { // ping -> pong
         std::string pong;
         pong += (char)0x8A;
-        pong += (char)payload.size();
-        pong += payload;
+        pong += (char)payload_out.size();
+        pong += payload_out;
         send_all(fd, pong);
         payload_out.clear();
     } else if (opcode == 0xA) { // pong
         payload_out.clear();
     } else { // 1 text, 2 binary
-        payload_out = payload;
     }
     return consumed;
 }
@@ -397,134 +505,192 @@ inline void ws_reply(const std::string& payload) {
     if (fd >= 0) ws_send(fd, payload, false);
 }
 
+// ---------------------------------------------------------------------------
+// Request-level parser: grows `buf` until exactly one full request is buffered
+// (read-block with poll; zero-copy; no per-header allocations).
+// ---------------------------------------------------------------------------
+static size_t hs_content_length(std::string_view head) {
+    size_t p = 0;
+    while (p < head.size()) {
+        size_t e = head.find("\r\n", p);
+        if (e == std::string_view::npos) e = head.size();
+        std::string_view line = head.substr(p, e - p);
+        size_t c = line.find(':');
+        if (c != std::string_view::npos) {
+            std::string_view k = line.substr(0, c);
+            if (fold_eq(k, "content-length")) {
+                std::string_view v = line.substr(c + 1);
+                while (!v.empty() && v.front() <= ' ') v.remove_prefix(1);
+                size_t cl = 0;
+                for (char ch : v) {
+                    if (ch < '0' || ch > '9') break;
+                    cl = cl * 10 + (size_t)(ch - '0');
+                }
+                return cl;
+            }
+        }
+        if (e == head.size()) break;
+        p = e + 2;
+    }
+    return 0;
+}
+
+// Read until a complete request (headers + Content-Length body) is buffered.
+// Returns false on EOF / error / oversized / idle timeout.
+static bool hs_fill_request(int fd, std::string& buf, int idle_ms) {
+    static thread_local char chunk[16384];
+    for (;;) {
+        size_t hend = buf.find("\r\n\r\n");
+        if (hend != std::string::npos) {
+            size_t cl = hs_content_length(std::string_view(buf.data(), hend));
+            if (buf.size() >= hend + 4 + cl) return true;
+        }
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof pfd);
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, idle_ms);
+        if (pr <= 0) return false;
+        ssize_t n = recv(fd, chunk, sizeof chunk, 0);
+        if (n <= 0) return false;
+        buf.append(chunk, (size_t)n);
+        if (buf.size() > kMaxRequestBytes) return false;
+    }
+}
+
+// Parse one request out of `buf` without copying header/query/body bytes.
+// `consumed` = bytes of buf belonging to this request.
+// `keep_alive` = whether the connection may be reused.
+// On success returns true; on a malformed request line false.
+static bool hs_parse_request(const std::string& buf, Request& req, size_t& consumed, bool& keep_alive) {
+    size_t hend = buf.find("\r\n\r\n");
+    if (hend == std::string::npos) { consumed = 0; keep_alive = false; return false; }
+    size_t eol = buf.find("\r\n");
+    if (eol == std::string::npos || eol > hend) eol = hend;
+    std::string_view rl(buf.data(), eol);
+    size_t sp1 = rl.find(' ');
+    size_t sp2 = rl.rfind(' ');
+    if (sp1 == std::string_view::npos || sp2 <= sp1) { consumed = 0; keep_alive = false; return false; }
+    std::string_view target = rl.substr(sp1 + 1, sp2 - sp1 - 1);
+    std::string_view proto = rl.substr(sp2 + 1);
+
+    req.method.assign(rl.substr(0, sp1));
+    size_t qpos = target.find('?');
+    req.path = target.substr(0, qpos);
+    req.query = qpos == std::string_view::npos ? std::string_view{} : target.substr(qpos + 1);
+
+    size_t p = eol + 2;
+    size_t cl = 0;
+    while (p < hend) {
+        size_t e = buf.find("\r\n", p);
+        if (e == std::string::npos || e > hend) e = hend;
+        std::string_view line(buf.data() + p, e - p);
+        size_t c = line.find(':');
+        if (c != std::string_view::npos) {
+            std::string_view k = line.substr(0, c);
+            std::string_view v = line.substr(c + 1);
+            while (!v.empty() && v.front() == ' ') v.remove_prefix(1);
+            req.add_header(k, v);
+            if (fold_eq(k, "content-length")) {
+                for (char ch : v) {
+                    if (ch < '0' || ch > '9') break;
+                    cl = cl * 10 + (size_t)(ch - '0');
+                }
+            }
+        }
+        p = e + 2;
+    }
+
+    req.body = cl ? std::string_view(buf.data() + hend + 4, cl)
+                  : std::string_view{};
+    consumed = hend + 4 + cl;
+    // Persistent by default for HTTP/1.1; explicit Connection: close opts out.
+    keep_alive = fold_eq(proto, "HTTP/1.1") && !fold_eq(req.header("connection"), "close");
+    return true;
+}
+
 static void handle_connection(int fd, Server& srv) {
     ++g_hs_conn;
     struct ConnGuard { ~ConnGuard() { g_hs_conn.fetch_sub(1); } } conn_guard;
     std::string buf;
-    char chunk[4096];
-    struct pollfd pfd;
-    memset(&pfd, 0, sizeof pfd);
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-    // read headers
-    while (buf.find("\r\n\r\n") == std::string::npos) {
-        int pr = poll(&pfd, 1, 5000);
-        if (pr <= 0) break;
-        ssize_t n = recv(fd, chunk, sizeof chunk, 0);
-        if (n <= 0) break;
-        buf.append(chunk, (size_t)n);
-        if (buf.size() > 16 * 1024 * 1024) break;
-    }
-    size_t hend = buf.find("\r\n\r\n");
-    if (hend == std::string::npos) { close(fd); return; }
-    std::string head = buf.substr(0, hend);
-    std::string body = buf.substr(hend + 4);
-    // request line
-    size_t eol = head.find("\r\n");
-    std::string rl = eol == std::string::npos ? head : head.substr(0, eol);
-    size_t sp1 = rl.find(' ');
-    size_t sp2 = rl.rfind(' ');
-    if (sp1 == std::string::npos || sp2 == sp1) { close(fd); return; }
-    Request req;
-    req.method = rl.substr(0, sp1);
-    std::string target = rl.substr(sp1 + 1, sp2 - sp1 - 1);
-    size_t qpos = target.find('?');
-    req.path = qpos == std::string::npos ? target : target.substr(0, qpos);
-    req.query = qpos == std::string::npos ? "" : target.substr(qpos + 1);
-    // headers
-    size_t p = eol == std::string::npos ? head.size() : eol + 2;
-    size_t cl = 0;
-    while (p < head.size()) {
-        size_t e = head.find("\r\n", p);
-        if (e == std::string::npos) e = head.size();
-        std::string line = head.substr(p, e - p);
-        size_t c = line.find(':');
-        if (c != std::string::npos) {
-            std::string k = line.substr(0, c);
-            std::string v = line.substr(c + 1);
-            while (!v.empty() && v[0] == ' ') v.erase(v.begin());
-            while (!v.empty() && (v.back() == '\r' || v.back() == '\n')) v.pop_back();
-            std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-            req.headers[k] = v;
-            if (k == "content-length") cl = (size_t)strtoull(v.c_str(), nullptr, 10);
-        }
-        p = e + 2;
-    }
-    while (body.size() < cl) {
-        ssize_t n = recv(fd, chunk, sizeof chunk, 0);
-        if (n <= 0) break;
-        body.append(chunk, (size_t)n);
-    }
-    if (req.headers["upgrade"] == "websocket") {
-        // websocket upgrade
-        for (auto& ws : ws_registry()) {
-            if (ws.path != req.path) continue;
-            std::string key = req.headers["sec-websocket-key"];
-            std::string accept = base64_encode(sha1_bin(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
-            std::string resp = "HTTP/1.1 101 Switching Protocols\r\n";
-            resp += "Upgrade: websocket\r\n";
-            resp += "Connection: Upgrade\r\n";
-            resp += "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
-            send_all(fd, resp);
-            std::string client_id = random_hex(8);
-            {
-                std::lock_guard<std::mutex> lk(ws_bcast_mutex());
-                ws_clients()[client_id] = fd;
-            }
-            ws_cur() = client_id;
-            ws_cur_fd() = fd;
-            if (ws.on_open) ws.on_open(req);
-            // frame loop
-            std::string acc;
-            char wbuf[8192];
-            bool open = true;
-            while (open) {
-                struct pollfd wp;
-                memset(&wp, 0, sizeof wp);
-                wp.fd = fd;
-                wp.events = POLLIN;
-                int pr = poll(&wp, 1, 10000);
-                if (pr <= 0) break;
-                ssize_t n = recv(fd, wbuf, sizeof wbuf, 0);
-                if (n <= 0) break;
-                acc.append(wbuf, (size_t)n);
-                size_t base = 0;
-                std::string payload;
-                while (base < acc.size()) {
-                    size_t r = ws_frame(acc, base, payload, true, fd);
-                    if (r == 0) break;
-                    if (r & (1ULL << 63)) { open = false; break; }
-                    base += r;
-                    if (ws.on_msg && !(base == 0 && payload.empty())) {
-                        if (!payload.empty() || true) {
-                            if (ws.on_msg) ws.on_msg(payload, false);
-                        }
-                    }
-                    payload.clear();
+    buf.reserve(4096);
+    unsigned long long nreq = 0;
+    for (;;) {
+        if (!hs_fill_request(fd, buf, 5000)) break; // EOF / timeout / error
+        Request req;
+        size_t consumed = 0;
+        bool keep = false;
+        if (!hs_parse_request(buf, req, consumed, keep)) break;
+        if (req.header_eq("upgrade", "websocket")) {
+            // websocket upgrade
+            for (auto& ws : ws_registry()) {
+                if (ws.path != req.path) continue;
+                std::string key = req.header("sec-websocket-key");
+                std::string accept = base64_encode(sha1_bin(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
+                std::string resp = "HTTP/1.1 101 Switching Protocols\r\n";
+                resp += "Upgrade: websocket\r\n";
+                resp += "Connection: Upgrade\r\n";
+                resp += "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+                send_all(fd, resp);
+                std::string client_id = random_hex(8);
+                {
+                    std::lock_guard<std::mutex> lk(ws_bcast_mutex());
+                    ws_clients()[client_id] = fd;
                 }
-                if (base > 0) acc.erase(0, base);
+                ws_cur() = client_id;
+                ws_cur_fd() = fd;
+                if (ws.on_open) ws.on_open(req);
+                // frame loop
+                std::string acc;
+                char wbuf[8192];
+                bool open = true;
+                while (open) {
+                    struct pollfd wp;
+                    memset(&wp, 0, sizeof wp);
+                    wp.fd = fd;
+                    wp.events = POLLIN;
+                    int pr = poll(&wp, 1, 10000);
+                    if (pr <= 0) break;
+                    ssize_t n = recv(fd, wbuf, sizeof wbuf, 0);
+                    if (n <= 0) break;
+                    acc.append(wbuf, (size_t)n);
+                    size_t base = 0;
+                    std::string payload;
+                    while (base < acc.size()) {
+                        size_t r = ws_frame(acc, base, payload, true, fd);
+                        if (r == 0) break;
+                        if (r & (1ULL << 63)) { open = false; break; }
+                        base += r;
+                        if (ws.on_msg && !payload.empty()) ws.on_msg(payload, false);
+                        payload.clear();
+                    }
+                    if (base > 0) acc.erase(0, base);
+                }
+                ws_leave(client_id);
+                {
+                    std::lock_guard<std::mutex> lk(ws_bcast_mutex());
+                    ws_clients().erase(client_id);
+                }
+                ws_cur().clear();
+                ws_cur_fd() = -1;
+                if (ws.on_close) ws.on_close();
+                close(fd);
+                return;
             }
-            ws_leave(client_id);
-            {
-                std::lock_guard<std::mutex> lk(ws_bcast_mutex());
-                ws_clients().erase(client_id);
-            }
-            ws_cur().clear();
-            ws_cur_fd() = -1;
-            if (ws.on_close) ws.on_close();
-            close(fd);
-            return;
+            // no ws route — fall through to 404
         }
-        // no ws route — fall through to 404
+        Response r;
+        try {
+            r = srv.dispatch(req);
+        } catch (const std::exception& e) {
+            r = Response::error(500, std::string("error: ") + e.what());
+        }
+        if (!http_respond(fd, r, keep)) break;
+        buf.erase(0, consumed); // drop the consumed request, keep pipelined tail
+        ++nreq;
+        if (g_hs_stop.load() || nreq >= kMaxRequestsPerConn || !g_hs_keepalive || !keep) break;
+        // keep-alive: loop and read the next request on the same socket
     }
-    req.body = body;
-    Response r;
-    try {
-        r = srv.dispatch(req);
-    } catch (const std::exception& e) {
-        r = Response::error(500, std::string("error: ") + e.what());
-    }
-    http_respond(fd, r);
     close(fd);
 }
 
