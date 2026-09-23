@@ -1,0 +1,18 @@
+app @3031
+
+GET "/" :: {
+    <- { ok: "home" }
+}
+
+GET "/users" :: {
+    <- { ok: "list" }
+}
+
+POST "/users" :: {
+    <- { ok: "created" }
+}
+
+GET "/about" :: {
+    <- { ok: "about" }
+}
+

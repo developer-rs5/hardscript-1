@@ -1,0 +1,3 @@
+ok
+GET /users/42 = {"id":"42"}
+GET /users/a-b_c/9 = {"id":"a-b_c/9"}

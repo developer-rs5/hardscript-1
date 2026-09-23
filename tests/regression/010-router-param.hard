@@ -1,0 +1,6 @@
+app @3031
+
+GET "/users/:id" :: (id = Str) {
+    <- { id: id }
+}
+

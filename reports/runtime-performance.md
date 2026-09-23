@@ -50,7 +50,8 @@ idle RSS ≤ 3 MB.
 | 6ab1a74 | ms1.3 grow-on-demand worker pool | 0.000 alloc/req; 7897 conn/req RPS |
 | b2d7b3f | ms1.7 -O3 -flto -march=native -fvisibility=hidden | no regression; ~30.7k keep-alive |
 | c8d265b | ms1.8 phase-1 runtime report | baseline + milestone log written |
-| *next* | ms1.4 streaming JSON encoder | JSON bodies stream into the arena Str (single send, no temp std::string / ostringstream / per-byte snprintf) |
+| 844db3e | ms1.4 streaming JSON encoder | JSON bodies stream into the arena Str (single send, no temp std::string / ostringstream / per-byte snprintf); keep-alive ~30k → 39.7k RPS |
+| *next* | ms1.6 trie-based router | static O(1) (23 ns at 5k routes), param/wild O(depth), wildcard support, 0 alloc/100k dispatch; linear matcher was 40–85 µs at 5k routes |
 
 ## Quality gates
 

@@ -79,6 +79,17 @@ struct Request {
     std::string_view body;    // request body — view into conn buffer
     std::vector<Hdr> headers; // lowercased-key lookup via fold hashing
     std::map<std::string, std::string> params;
+    // ms1.6: zero-copy param views filled by the router (values point into
+    // req.path, valid for the duration of dispatch).
+    std::pair<std::string_view, std::string_view> pv[16] = {};
+    size_t pv_n = 0;
+
+    // Zero-copy param accessor: returns a view into the request path.
+    std::string_view pview(const std::string_view name) const {
+        for (size_t i = 0; i < pv_n; i++)
+            if (pv[i].first == name) return pv[i].second;
+        return {};
+    }
 
     void clear_views() {
         path = {};
@@ -196,12 +207,6 @@ struct Response {
 using Handler = std::function<Response(const Request&)>;
 using Middleware = std::function<Response(const Request&, const std::function<Response()>& next)>;
 
-struct Route {
-    std::string method;
-    std::string path; // "/users/:id"
-    Handler handler;
-};
-
 // split a path into at most `cap` segments, zero copies (views into `p`).
 // returns segment count, or (size_t)-1 when the path is too deep for `cap`.
 static size_t split_sv(std::string_view p, std::string_view* out, size_t cap) {
@@ -218,47 +223,232 @@ static size_t split_sv(std::string_view p, std::string_view* out, size_t cap) {
     return n;
 }
 
+// ===========================================================================
+// ms1.6 router: open-addressing static table + literal/param/wildcard trie.
+// Dispatch is read-only and zero-allocation: static hits are O(1), trie walks
+// are O(depth) with bounded backtracking (literal > param > wildcard).
+// ===========================================================================
+
+enum Method : uint8_t { M_ANY = 0, M_GET = 1, M_POST = 2, M_PUT = 3, M_DELETE = 4,
+                        M_PATCH = 5, M_HEAD = 6, M_OPTIONS = 7 };
+
+static uint8_t method_id(const char* m, size_t n) {
+    if (n == 3 && m[0] == 'G' && m[1] == 'E' && m[2] == 'T') return M_GET;
+    if (n == 4 && m[0] == 'P' && m[1] == 'O' && m[2] == 'S' && m[3] == 'T') return M_POST;
+    if (n == 3 && m[0] == 'P' && m[1] == 'U' && m[2] == 'T') return M_PUT;
+    if (n == 6 && m[0] == 'D' && m[1] == 'E' && m[2] == 'L' && m[3] == 'E' &&
+        m[4] == 'T' && m[5] == 'E') return M_DELETE;
+    if (n == 5 && m[0] == 'P' && m[1] == 'A' && m[2] == 'T' && m[3] == 'C' &&
+        m[4] == 'H') return M_PATCH;
+    if (n == 4 && m[0] == 'H' && m[1] == 'E' && m[2] == 'A' && m[3] == 'D') return M_HEAD;
+    if (n == 7 && m[0] == 'O' && m[1] == 'P' && m[2] == 'T' && m[3] == 'I' &&
+        m[4] == 'O' && m[5] == 'N' && m[6] == 'S') return M_OPTIONS;
+    return M_ANY;
+}
+
+static uint64_t fnv1a(uint8_t mid, std::string_view s) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    h = (h ^ (uint64_t)mid) * 0x100000001b3ull;
+    for (unsigned char c : s) h = (h ^ (uint64_t)c) * 0x100000001b3ull;
+    return h;
+}
+
+struct Route {
+    std::string method;
+    std::string path; // "/users/:id"
+    uint8_t m_id = M_ANY;
+    Handler handler;
+};
+
+struct StaticSlot {
+    uint64_t hash = 0;
+    int32_t route = -1; // <0 == empty slot
+};
+
+struct RouterNode {
+    std::vector<std::pair<std::string, int>> lit; // literal edges, sorted by key
+    int param = -1;                               // ':name' child (one segment)
+    int wild = -1;                                // '*name' child (rest of path)
+    std::string pname;                            // param/wild segment name, stored on child
+    std::vector<int> term;                        // routes terminating here, registration order
+};
+
 struct Server {
     std::vector<Middleware> middlewares;
     std::vector<Route> routes;
     int port = 3000;
 
+    // ms1.6 router tables (read-only during dispatch)
+    std::vector<StaticSlot> stat; // open-addressing, power-of-two capacity
+    size_t stat_cap = 0;
+    size_t stat_n = 0;
+    std::vector<RouterNode> nodes; // nodes[0] = root, built incrementally in handle()
+
     void before(Middleware m) { middlewares.push_back(std::move(m)); }
+
     void handle(const std::string& method, const std::string& path, Handler h) {
-        routes.push_back({ method, path, std::move(h) });
+        uint8_t mid = method_id(method.data(), method.size());
+        int idx = (int)routes.size();
+        routes.push_back({ method, path, mid, std::move(h) });
+        if (nodes.empty()) nodes.emplace_back(); // root
+        if (path.find(':') == std::string::npos && path.find('*') == std::string::npos)
+            insert_static();
+        else
+            insert_trie(idx);
     }
 
-    // returns index of matching route or -1. Zero heap allocation on the
-    // common path: segments live on the stack and params are collected only
-    // when a parameterised route actually matches.
+    void grow_static() {
+        size_t ncap = stat_cap ? stat_cap * 2 : 16;
+        std::vector<StaticSlot> nx(ncap);
+        for (auto& s : stat) {
+            if (s.route < 0) continue;
+            size_t i = s.hash & (ncap - 1);
+            while (nx[i].route >= 0) i = (i + 1) & (ncap - 1);
+            nx[i] = s;
+        }
+        stat.swap(nx);
+        stat_cap = ncap;
+    }
+
+    void insert_static() {
+        const Route& r = routes.back();
+        if (stat_cap == 0 || stat_n * 10 >= stat_cap * 7) grow_static(); // load <= 0.7
+        uint64_t h = fnv1a(r.m_id, r.path);
+        size_t i = h & (stat_cap - 1);
+        for (;;) {
+            StaticSlot& s = stat[i];
+            if (s.route < 0) { s.hash = h; s.route = (int32_t)(routes.size() - 1); stat_n++; return; }
+            const Route& old = routes[(size_t)s.route];
+            if (s.hash == h && old.m_id == r.m_id && old.path == r.path) return; // first wins
+            i = (i + 1) & (stat_cap - 1);
+        }
+    }
+
+    int trie_ensure_literal(int node, std::string_view key) {
+        RouterNode& n = nodes[(size_t)node];
+        auto it = std::lower_bound(n.lit.begin(), n.lit.end(), key,
+            [](const std::pair<std::string, int>& a, std::string_view b) { return std::string_view(a.first) < b; });
+        if (it != n.lit.end() && std::string_view(it->first) == key) return it->second;
+        std::string ks(key); // copy key before any realloc
+        nodes.emplace_back();
+        int child = (int)nodes.size() - 1;
+        RouterNode& n2 = nodes[(size_t)node]; // re-fetch: emplace_back may have moved nodes
+        auto it2 = std::lower_bound(n2.lit.begin(), n2.lit.end(), std::string_view(ks),
+            [](const std::pair<std::string, int>& a, std::string_view b) { return std::string_view(a.first) < b; });
+        n2.lit.insert(it2, { std::move(ks), child });
+        return child;
+    }
+
+    void insert_trie(int idx) {
+        const Route& r = routes[(size_t)idx];
+        std::string_view segs[32];
+        size_t gn = split_sv(r.path, segs, 32);
+        if (gn == (size_t)-1 || gn == 0) return;
+        int node = 0;
+        for (size_t k = 0; k < gn; k++) {
+            std::string_view s = segs[k];
+            if (!s.empty() && s[0] == ':') {
+                if (nodes[(size_t)node].param < 0) {
+                    nodes.emplace_back();
+                    nodes[(size_t)node].param = (int)nodes.size() - 1;
+                }
+                node = nodes[(size_t)node].param;
+                nodes[(size_t)node].pname = std::string(s.substr(1));
+            } else if (!s.empty() && s[0] == '*') {
+                if (nodes[(size_t)node].wild < 0) {
+                    nodes.emplace_back();
+                    nodes[(size_t)node].wild = (int)nodes.size() - 1;
+                }
+                int wc = nodes[(size_t)node].wild;
+                nodes[(size_t)wc].pname = std::string(s.substr(1));
+                nodes[(size_t)wc].term.push_back(idx);
+                return; // wildcard consumes the rest of the path
+            } else {
+                node = trie_ensure_literal(node, s);
+            }
+        }
+        nodes[(size_t)node].term.push_back(idx);
+    }
+
+    // Depth-first trie walk with bounded backtracking. Precedence: literal >
+    // param > wildcard, so /users/me beats /users/:id and both beat
+    // /files/*path. Zero heap allocation: captured params are views either
+    // into the request path (values) or the route pattern (names).
+    bool trie_walk(int node, std::string_view* got, size_t gn, size_t k, uint8_t mid,
+                   std::pair<std::string_view, std::string_view>* vp, size_t& vpn, int& out) const {
+        if (k == gn) {
+            for (int rt : nodes[(size_t)node].term) {
+                const Route& r = routes[(size_t)rt];
+                if (r.m_id == M_ANY || r.m_id == mid) { out = rt; return true; }
+            }
+            return false;
+        }
+        const RouterNode& n = nodes[(size_t)node];
+        std::string_view seg = got[k];
+        auto it = std::lower_bound(n.lit.begin(), n.lit.end(), seg,
+            [](const std::pair<std::string, int>& a, std::string_view b) { return std::string_view(a.first) < b; });
+        if (it != n.lit.end() && std::string_view(it->first) == seg) {
+            if (trie_walk(it->second, got, gn, k + 1, mid, vp, vpn, out)) return true;
+        }
+        if (n.param >= 0 && vpn < 16) {
+            const RouterNode& pc = nodes[(size_t)n.param];
+            vp[vpn] = { std::string_view(pc.pname), seg };
+            vpn++;
+            if (trie_walk(n.param, got, gn, k + 1, mid, vp, vpn, out)) return true;
+            vpn--;
+        }
+        if (n.wild >= 0) {
+            const RouterNode& wc = nodes[(size_t)n.wild];
+            const char* end = got[gn - 1].data() + got[gn - 1].size();
+            std::string_view rest(seg.data(), (size_t)(end - seg.data()));
+            while (!rest.empty() && rest.front() == '/') rest.remove_prefix(1);
+            vp[vpn] = { std::string_view(wc.pname), rest };
+            vpn++;
+            for (int rt : wc.term) {
+                const Route& r = routes[(size_t)rt];
+                if (r.m_id == M_ANY || r.m_id == mid) { out = rt; return true; }
+            }
+            vpn--;
+        }
+        return false;
+    }
+
+    // returns index of matching route or -1. Zero heap allocation during
+    // dispatch; zero-copy params (views). Static paths hit the open-addressing
+    // table in O(1); parameterized/wildcard paths walk the trie in O(depth).
     int match(const std::string& method, std::string_view path, Request& req) const {
+        uint8_t mid = method_id(method.data(), method.size());
         std::string_view got[32];
         size_t gn = split_sv(path, got, 32);
         if (gn == (size_t)-1) return -1;
-        for (size_t i = 0; i < routes.size(); i++) {
-            const Route& r = routes[i];
-            if (r.method != method) continue;
-            std::string_view want[32];
-            size_t wn = split_sv(r.path, want, 32);
-            if (wn == (size_t)-1 || wn != gn) continue;
-            bool ok = true;
-            struct { std::string_view k, v; } pbuf[16];
-            size_t pn = 0;
-            for (size_t k = 0; k < wn; k++) {
-                if (!want[k].empty() && want[k][0] == ':') {
-                    if (pn >= 16) { ok = false; break; }
-                    pbuf[pn].k = want[k].substr(1);
-                    pbuf[pn].v = got[k];
-                    pn++;
-                } else if (want[k] != got[k]) { ok = false; break; }
-            }
-            if (ok) {
-                if (pn) {
-                    req.params.clear();
-                    for (size_t k = 0; k < pn; k++) req.params[std::string(pbuf[k].k)] = std::string(pbuf[k].v);
+
+        if (stat_cap) {
+            uint64_t h = fnv1a(mid, path);
+            size_t i = h & (stat_cap - 1);
+            for (size_t probe = 0; probe <= stat_cap + 1; probe++) {
+                const StaticSlot& s = stat[i];
+                if (s.route < 0) break; // empty slot: not a static route
+                if (s.hash == h) {
+                    const Route& r = routes[(size_t)s.route];
+                    if (r.m_id == mid && r.path == path) {
+                        req.pv_n = 0;
+                        return s.route;
+                    }
                 }
-                return (int)i;
+                i = (i + 1) & (stat_cap - 1);
             }
+        }
+
+        if (nodes.empty()) return -1;
+        std::pair<std::string_view, std::string_view> vp[16];
+        size_t vpn = 0;
+        int ri = -1;
+        if (trie_walk(0, got, gn, 0, mid, vp, vpn, ri)) {
+            for (size_t k = 0; k < vpn; k++)
+                req.params[std::string(vp[k].first)] = std::string(vp[k].second);
+            req.pv_n = vpn;
+            for (size_t k = 0; k < vpn; k++) req.pv[k] = vp[k];
+            return ri;
         }
         return -1;
     }
