@@ -1,0 +1,6 @@
+bring http
+
+app @3000
+
+GET "/" :: {
+   <- { "ok": true }

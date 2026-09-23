@@ -1,0 +1,12 @@
+bring http
+
+app @3000
+
+GET "/" :: {
+    <- { "ok": true }
+}
+
+test "boom" {
+    res <- GET "/" {{ }}
+    expect res.status == 999
+}

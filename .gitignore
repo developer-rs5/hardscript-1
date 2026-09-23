@@ -53,3 +53,13 @@ qa/benchmark/go/hs_bench_rust
 qa/benchmark/rust/target/
 qa/benchmark/*/0.nheqminer
 qa/benchmark/2557
+
+# cli_matrix run artifacts (regenerable via qa/cli_matrix/gen_matrix.py)
+qa/cli_matrix/cases/
+qa/cli_matrix/results.tsv
+qa/cli_matrix/results.json
+
+# Phase5 CLI matrix regenerable outputs
+qa/cli_matrix/cases/
+qa/cli_matrix/results.tsv
+qa/cli_matrix/results.json
