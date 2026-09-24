@@ -73,6 +73,7 @@ fn main() {
         "add" => cmd_add(rest),
         "bench" => cmd_bench(rest),
         "hir" => cmd_hir(rest),
+        "opt" => cmd_opt(rest),
         "--version" | "-V" => println!("hard {VERSION}"),
         "--help" | "-h" | "help" => help(),
         other => {
@@ -98,6 +99,7 @@ fn help() {
          \x20 hard doctor                  Check the toolchain (g++, runtime)\n\
          \x20 hard bench [file]            Release-build and report timings\n\
          \x20 hard hir   [file]            Print the lowered HIR (debugging)\n\
+         \x20 hard opt   [file]            Optimize and show before/after (debugging)\n\
          \x20 hard help                    Show this help\n\
          \n\
          Files default to main.hard in the current directory."
@@ -326,6 +328,18 @@ fn cmd_hir(rest: &[String]) {
     };
     match hs_compiler::hir_string(&src, target.to_str().unwrap_or("").to_string()) {
         Ok(hir) => print!("{hir}"),
+        Err(diags) => report(&diags),
+    }
+}
+
+fn cmd_opt(rest: &[String]) {
+    let (target, _) = find_target(rest);
+    let src = match std::fs::read_to_string(&target) {
+        Ok(s) => s,
+        Err(e) => die(&format!("cannot read {}: {e}", target.display())),
+    };
+    match hs_compiler::opt_string(&src, target.to_str().unwrap_or("").to_string()) {
+        Ok(out) => print!("{out}"),
         Err(diags) => report(&diags),
     }
 }

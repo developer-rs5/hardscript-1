@@ -130,6 +130,29 @@ for f in "$DIR"/*.hard; do
         continue
     fi
 
+    # opt case: optimize to a fixpoint and compare the full report (before/
+    # after trees + per-pass stats). Deterministic, so byte-identical output.
+    if [ "$kind" = "opt" ]; then
+        cp "$f" "$TMP/prog.hard"
+        out=$(cd "$TMP" && "$HARD" opt prog.hard 2>&1)
+        ec=$?
+        if [ "$ec" -ne 0 ]; then
+            echo "regression: FAIL ${base##*/} (opt failed: $(echo "$out" | head -1))"
+            FAILED=$((FAILED+1))
+            rm -rf "$TMP"
+            continue
+        fi
+        want=$(printf '%s\n' "${lines[@]:1}")
+        if [ "$out" = "$want" ]; then
+            echo "regression: PASS ${base##*/} ($(echo "$out" | sed -n 3p))"
+        else
+            echo "regression: FAIL ${base##*/} (opt mismatch)"
+            FAILED=$((FAILED+1))
+        fi
+        rm -rf "$TMP"
+        continue
+    fi
+
     # ok case: build, run, assert routes
     cp "$f" "$TMP/prog.hard"
     if ! (cd "$TMP" && "$HARD" build prog.hard) >/dev/null 2>&1; then

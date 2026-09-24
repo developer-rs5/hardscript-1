@@ -17,6 +17,7 @@ pub mod fmt;
 pub mod hir;
 pub mod lexer;
 pub mod optimizer;
+pub mod optimize;
 pub mod parser;
 pub mod token;
 pub mod typecheck;
@@ -79,6 +80,20 @@ pub fn lower_hir(src: &str, path: impl Into<String>) -> Result<hir::HirProgram, 
 /// This is the output of `hard hir` and the snapshot fixtures.
 pub fn hir_string(src: &str, path: impl Into<String>) -> Result<String, Vec<Diag>> {
     Ok(lower_hir(src, path)?.render())
+}
+
+/// Optimize a source program to a fixpoint and render before / after trees plus
+/// per-pass statistics. This is the output of `hard opt`; the optimizer is
+/// pure and never affects codegen.
+pub fn opt_string(src: &str, path: impl Into<String>) -> Result<String, Vec<Diag>> {
+    let mut p = lower_hir(src, path)?;
+    let before = p.render();
+    let stats = optimize::run(&mut p);
+    let after = p.render();
+    Ok(format!(
+        "=== before ===\n{before}\n=== after ===\n{after}\n=== optimizer ===\n{}",
+        stats.summary()
+    ))
 }
 
 /// Run the escape analysis over a source program (frontend + optimizer, the

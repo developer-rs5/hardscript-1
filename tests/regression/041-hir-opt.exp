@@ -1,0 +1,103 @@
+opt
+=== before ===
+program
+  bring http @1:1
+  app @3031 @2:1
+  const v#0 "seed" = @4:1
+    int #0 8 @4:10
+  fn #1 "five" -> Int @6:6
+    block #2 @6:6
+      return @7:5
+        int #3 5 @7:8
+  route #4 "GET /echo/:tag" @10:1
+    param v#1 "tag" :Str @10:22
+    param v#2 "body" [body] @10:33
+    block #5 @10:1
+      var v#3 "dead" = @11:5
+        binary #6 * @11:15
+          int #7 2 @11:13
+          ident #8 "seed" v#0 @11:17
+      const v#4 "base" = @12:5
+        int #9 40 @12:14
+      var v#5 "n" = @13:5
+        ident #10 "tag" v#1 @13:10
+      var v#6 "copied" = @14:5
+        ident #11 "n" v#5 @14:15
+      var v#7 "total" = @15:5
+        binary #12 + @15:19
+          ident #13 "base" v#4 @15:14
+          int #14 2 @15:21
+      if @16:5
+        cond
+          bool #15 true @16:7
+        block #16 @16:5
+          return @17:9
+            binary #17 + @17:27
+              binary #18 + @17:19
+                ident #19 "copied" v#6 @17:12
+                ident #20 "total" v#7 @17:21
+              call #21 @17:33
+                ident #22 "five" ? @17:29
+        block #23 @16:5
+          return @19:9
+            int #24 0 @19:12
+      var v#8 "anyway" = @21:5
+        ident #25 "total" v#7 @21:15
+      loop v#9 "v" over @22:5
+        list #26 @22:15
+          int #27 1 @22:16
+          int #28 2 @22:19
+          int #29 3 @22:22
+        block #30 @22:5
+      return @24:5
+        ident #31 "anyway" v#8 @24:8
+
+=== after ===
+program
+  bring http @1:1
+  app @3031 @2:1
+  const v#0 "seed" = @4:1
+    int #0 8 @4:10
+  fn #1 "five" -> Int @6:6
+    block #2 @6:6
+      expr @7:8
+        int #3 5 @7:8
+  route #4 "GET /echo/:tag" @10:1
+    param v#1 "tag" :Str @10:22
+    param v#2 "body" [body] @10:33
+    block #5 @10:1
+      var v#7 "total" = @15:5
+        int #12 42 @15:19
+      expr @24:8
+        ident #31 "total" v#7 @24:8
+
+=== optimizer ===
+  fold_constants           1
+  dead_code                6
+  propagate_constants      1
+  propagate_copies         3
+  inline_small_functions   1
+  tail_returns             4
+  remove_unreachable       1
+  simplify_booleans        0
+  simplify_loops           1
+  total                    18
+  log:
+    dead_code: binding v#3 "dead"
+    propagate_constants: v#4 => 40
+    propagate_copies: v#5 => "tag"
+    propagate_copies: v#6 => "n"
+    propagate_copies: v#8 => "total"
+    inline_small_functions: five (1 nodes)
+    tail_returns: "5"
+    tail_returns: "n + total + 5"
+    tail_returns: "0"
+    tail_returns: "total"
+    remove_unreachable: ?(true) collapses to then
+    simplify_loops: empty loop v#9
+    fold_constants: 40 + 2 => 42
+    dead_code: binding v#4 "base"
+    dead_code: binding v#6 "copied"
+    dead_code: expr n + total + 5
+    dead_code: binding v#8 "anyway"
+    dead_code: binding v#5 "n"
