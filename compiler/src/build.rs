@@ -233,6 +233,10 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
     let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
 
     let mut merged: Vec<crate::ast::Stmt> = Vec::new();
+    // Per-statement module provenance (project-root-relative) for Diagnostics
+    // V2: lets "declared here" related spans point into the declaring file,
+    // e.g. `models/user.hard:5:5` instead of the merged root path.
+    let mut merged_files: Vec<Option<String>> = Vec::new();
     let mut outcomes = Vec::new();
     let mut modules: Vec<crate::manifest::ModuleEntry> = Vec::new();
     let mut root_path = target
@@ -246,6 +250,7 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
             Ok((stmts, outcome, bytes)) => {
                 let mut stmts = stmts.clone();
                 stmts.retain(|s| !matches!(s, crate::ast::Stmt::Import { .. }));
+                merged_files.extend(stmts.iter().map(|_| Some(n.rel.clone())));
                 merged.append(&mut stmts);
                 if *id == graph.root {
                     // Relative, not absolute: diagnostic/expect locations must
@@ -286,7 +291,7 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
     let optimize_ms = t_opt.elapsed().as_secs_f64() * 1000.0;
 
     let t_tc = Instant::now();
-    let mut errs = typecheck::check(&prog);
+    let mut errs = typecheck::check_with(&prog, &merged_files);
     let typecheck_ms = t_tc.elapsed().as_secs_f64() * 1000.0;
 
     errs.retain(|d| d.kind == ErrorKind::Type);

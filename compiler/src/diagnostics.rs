@@ -1,40 +1,192 @@
-//! Source-aware diagnostics rendering.
+//! Source-aware diagnostics rendering (Diagnostics V2).
 //!
-//! [`Diag`] carries a span (line + column into the source `path`). This module
-//! produces the classic compiler-code-frame alongside the message:
+//! [`Diag`] carries a primary span (line + column into its `location`) and an
+//! optional list of [`Related`] spans that may point into other files. This
+//! module renders the classic rustc-style code frame for every span:
 //!
 //! ```text
-//!  12 |     res <- GET "/" { }
-//!     |            ^^^
+//! error[HS0104]: `user_id` is not defined
+//!    --> auth.hard:18:12
+//!     |
+//!  18 |     <- user_id
+//!     |        ^^^^^^^
+//!     |
+//!     = expected: a defined name or module function
+//!     = received: `user_id`
+//! help: Define `user_id <- ...` before use.
 //! ```
 //!
-//! `frame` returns `None` when the diagnostic has no span or the source does
-//! not contain the referenced line (e.g. end-of-file diagnostics).
+//! Output is byte-deterministic for a given input, `NO_COLOR` / `HARD_COLOR`
+//! select the color mode, and long source lines are truncated around the
+//! caret (a single diagnostic must never flood the terminal).
 
-use crate::error::Diag;
+use crate::error::{is_warning, Diag};
+use std::io::IsTerminal;
 
 /// Long source lines (deep nesting!) are truncated around the caret so a
 /// single diagnostic cannot flood the terminal with a 100 kB line.
 const MAX_LINE_CHARS: usize = 200;
 const TRUNC_MARGIN: usize = 40;
 
-/// Render a source code frame for a diagnostic, if possible.
-pub fn frame(d: &Diag, src: &str) -> Option<String> {
-    let sp = d.span?;
-    let line = src.lines().nth(sp.line.checked_sub(1)?)?;
-    let mut out = String::new();
+// ANSI SGR sequences. Kept as constants so the mappings are the single
+// source of truth for color output.
+const RED: &str = "\x1b[1;31m";
+const YELLOW: &str = "\x1b[1;33m";
+const BLUE: &str = "\x1b[1;34m";
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
 
-    let gutter = sp.line.to_string().len().max(1);
-    let pad = " ".repeat(gutter);
-    let col = sp.col.saturating_sub(1);
-    let caret_col = col.min(line.chars().count().max(1) - 1);
-    let caret = " ".repeat(caret_col) + "^";
+/// Color mode. `render_error` resolves `Auto` once from the environment and
+/// the stderr terminal state:
+///   * any non-empty `NO_COLOR` disables color,
+///   * `HARD_COLOR=1|0` forces it on or off,
+///   * otherwise color is used iff stderr is a TTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
 
-    out.push_str(&format!("{pad} |\n"));
-    if line.chars().count() <= MAX_LINE_CHARS {
-        out.push_str(&format!("{} | {line}\n", sp.line));
-        out.push_str(&format!("{pad} | {caret}\n"));
+/// Resolve the effective color flag from the environment and stderr.
+pub fn detect_color(mode: ColorMode) -> bool {
+    match mode {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => {
+            if let Ok(v) = std::env::var("NO_COLOR") {
+                if !v.is_empty() {
+                    return false;
+                }
+            }
+            match std::env::var("HARD_COLOR").as_deref() {
+                Ok("1") | Ok("true") | Ok("always") => return true,
+                Ok("0") | Ok("false") | Ok("never") => return false,
+                _ => {}
+            }
+            std::io::stderr().is_terminal()
+        }
+    }
+}
+
+/// Severity word + caret color for a catalog code.
+fn severity(code: u16) -> (&'static str, &'static str) {
+    if is_warning(code) {
+        ("warning", YELLOW)
     } else {
+        ("error", RED)
+    }
+}
+
+/// Render a list of diagnostics to a deterministic string, choosing color
+/// automatically. This is the entry point used by the CLI's `report`.
+pub fn render_error(diags: &[Diag]) -> String {
+    render_v2(diags, detect_color(ColorMode::Auto))
+}
+
+/// Render with an explicit color flag (used by tests and tooling).
+pub fn render_v2(diags: &[Diag], color: bool) -> String {
+    let mut out = String::new();
+    for (i, d) in diags.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        render_one(d, color, &mut out);
+    }
+    out
+}
+
+fn paint(color: bool, code: &str, body: &str) -> String {
+    if color {
+        format!("{code}{body}{RESET}")
+    } else {
+        body.to_string()
+    }
+}
+
+/// The first line of a diagnostic: `error[HS0104]: message`.
+fn header_line(d: &Diag, color: bool, out: &mut String) {
+    let (word, caret_color) = severity(d.code);
+    let severity = paint(color, caret_color, word);
+    let code = if color {
+        format!("{DIM}[{}]{RESET}", crate::catalog::format(d.code))
+    } else {
+        format!("[{}]", crate::catalog::format(d.code))
+    };
+    out.push_str(&format!("{severity}{code}: {}\n", d.message));
+}
+
+/// Load the source lines for a location (path + line). Returns `None` when
+/// the file cannot be read (module errors and I/O failures routinely have no
+/// readable primary source).
+fn source_line(location: &Option<String>, line: usize) -> Option<String> {
+    let path = location.as_ref()?;
+    let src = std::fs::read_to_string(path).ok()?;
+    src.lines().nth(line.checked_sub(1)?).map(|l| l.to_string())
+}
+
+/// Width of the gutter (number of digits) across every line referenced by
+/// the primary and related spans of this diagnostic.
+fn gutter_width(d: &Diag) -> usize {
+    let mut w = 1;
+    if let Some(sp) = d.span {
+        w = w.max(sp.line.to_string().len());
+    }
+    for r in &d.related {
+        if let Some(sp) = &r.span {
+            w = w.max(sp.line.to_string().len());
+        }
+    }
+    w
+}
+
+/// How wide the caret should be. Reads the source at the span column and,
+/// when the token there is a word, underlines the whole identifier; otherwise
+/// a single caret under the position.
+fn caret_len(line: &str, col: usize) -> usize {
+    let mut chars = line.chars().skip(col.saturating_sub(1)).peekable();
+    match chars.peek() {
+        Some(c) if c.is_alphanumeric() || *c == '_' => {
+            let mut n = 0;
+            for c in chars {
+                if c.is_alphanumeric() || c == '_' {
+                    n += 1;
+                } else {
+                    break;
+                }
+            }
+            n.max(1)
+        }
+        _ => 1,
+    }
+}
+
+/// One code frame: `--> path:line:col` + the source line + caret underline.
+/// The `-->` header always prints (the location is meaningful even when the
+/// source is gone); the source lines only render when the file is readable.
+fn frame(location: &Option<String>, span: crate::token::Span, w: usize, color: bool, d: &Diag, out: &mut String) {
+    let left_pad = "  ";
+    let path = location.as_deref().unwrap_or("<unknown>");
+    out.push_str(&format!("   --> {path}:{}:{}\n", span.line, span.col));
+
+    let Some(line) = source_line(location, span.line) else {
+        return;
+    };
+    let caret_color = if color { severity(d.code).1 } else { "" };
+
+    out.push_str(&format!("{left_pad}{:>w$} |\n", ""));
+    if line.chars().count() <= MAX_LINE_CHARS {
+        let cl = caret_len(&line, span.col);
+        let caret_col = (span.col.saturating_sub(1)).min(line.chars().count().max(1) - 1);
+        let caret = if color {
+            format!("{caret_color}{}{RESET}", "^".repeat(cl))
+        } else {
+            "^".repeat(cl)
+        };
+        out.push_str(&format!("{left_pad}{:>w$} | {line}\n", span.line));
+        out.push_str(&format!("{left_pad}{:>w$} | {}{}\n", "", " ".repeat(caret_col), caret));
+    } else {
+        let caret_col = span.col.saturating_sub(1);
         let lo = caret_col.saturating_sub(TRUNC_MARGIN);
         let chars: Vec<char> = line.chars().collect();
         let hi = (caret_col + TRUNC_MARGIN).min(chars.len());
@@ -42,21 +194,152 @@ pub fn frame(d: &Diag, src: &str) -> Option<String> {
         let lead = if lo > 0 { "… " } else { "" };
         let trail = if hi < chars.len() { " …" } else { "" };
         let rel = caret_col - lo;
-        out.push_str(&format!("{} | {lead}{snippet}{trail}\n", sp.line));
-        out.push_str(&format!("{pad} | {}{}\n", " ".repeat(lead.len() + rel), "^"));
+        let caret = if color {
+            format!("{caret_color}^{RESET}")
+        } else {
+            "^".to_string()
+        };
+        out.push_str(&format!("{left_pad}{:>w$} | {lead}{snippet}{trail}\n", span.line));
+        out.push_str(&format!(
+            "{left_pad}{:>w$} | {}{}\n",
+            "",
+            " ".repeat(lead.len() + rel),
+            caret
+        ));
     }
-    Some(out)
+    out.push_str(&format!("{left_pad}{:>w$} |\n", ""));
 }
 
-/// Render a code frame for every diagnostic in a list that has both a span
-/// and a resolvable source line.
-pub fn frames_all(diags: &[Diag], src: &str) -> String {
-    let mut out = String::new();
-    for d in diags {
-        if let Some(f) = frame(d, src) {
-            out.push_str(&f);
-            out.push('\n');
+fn render_one(d: &Diag, color: bool, out: &mut String) {
+    header_line(d, color, out);
+
+    let w = gutter_width(d);
+    if d.span.is_some() {
+        frame(&d.location, d.span.unwrap(), w, color, d, out);
+    }
+
+    // every note / expected / received line is rendered at the frame depth
+    let indent = "    ";
+    for n in &d.notes {
+        out.push_str(&format!("{indent}= {n}\n"));
+    }
+    if let Some(e) = &d.expected {
+        out.push_str(&format!("{indent}= expected: {e}\n"));
+    }
+    if let Some(r) = &d.received {
+        out.push_str(&format!("{indent}= received: {r}\n"));
+    }
+
+    // related spans ("first declared here", cross-file declarations, ...)
+    for r in &d.related {
+        if let Some(label) = &r.label {
+            out.push_str(&format!("{indent}= {label}\n"));
+        }
+        if r.span.is_some() {
+            frame(&r.location, r.span.unwrap(), w, color, d, out);
         }
     }
-    out
+
+    if let Some(help) = &d.help {
+        let label = paint(color, BLUE, "help: ");
+        out.push_str(&format!("{label}{help}\n"));
+    } else if let Some(s) = &d.suggestion {
+        let label = paint(color, BLUE, "help: ");
+        out.push_str(&format!("{label}{s}\n"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog as cat;
+    use crate::error::{Diag, ErrorKind, Related};
+    use crate::token::Span;
+
+    fn diag() -> Diag {
+        Diag::new(ErrorKind::Type, "`x` is not defined", Span::new(3, 5), "Define it.")
+            .with_code(cat::UNDEFINED_VARIABLE)
+            .with_expected("a defined name")
+            .with_received("`x`")
+    }
+
+    #[test]
+    fn renders_header_with_code() {
+        let out = render_v2(&[diag()], false);
+        assert!(
+            out.starts_with("error[HS0104]: `x` is not defined\n"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn renders_frame_with_relocation() {
+        let path = std::env::temp_dir().join("hs_diag_frame.hard");
+        std::fs::write(&path, "one\ntwo\nthis_is_user_id <- 1;\nfour\n").unwrap();
+        let mut d = diag();
+        d.location = Some(path.to_string_lossy().to_string());
+        let out = render_v2(&[d], false);
+        let loc = path.to_string_lossy();
+        assert!(out.contains(&format!("--> {loc}:3:5")), "got: {out}");
+        assert!(out.contains("^^^"), "identifier underlined, got: {out}");
+        assert!(out.contains("= expected: a defined name"), "got: {out}");
+        assert!(out.contains("help: Define it."), "got: {out}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn no_span_still_prints_header_and_help() {
+        let out = render_v2(&[diag().with_code(cat::NATIVE_COMPILE_FAILED)], false);
+        assert!(out.starts_with("error[HS0502]: `x` is not defined\n"), "got: {out}");
+    }
+
+    #[test]
+    fn warning_severity_from_code() {
+        let d = diag().with_code(cat::W_UNUSED_VARIABLE);
+        let out = render_v2(&[d], false);
+        assert!(out.starts_with("warning[HS2001]: `x` is not defined\n"), "got: {out}");
+    }
+
+    #[test]
+    fn no_color_stays_plain_and_deterministic() {
+        let a = render_v2(&[diag()], false);
+        let b = render_v2(&[diag()], false);
+        assert_eq!(a, b);
+        assert!(!a.contains('\x1b'));
+    }
+
+    #[test]
+    fn color_mode_is_forced() {
+        assert!(detect_color(ColorMode::Always));
+        assert!(!detect_color(ColorMode::Never));
+    }
+
+    #[test]
+    fn related_span_renders_label_and_frame() {
+        let path = std::env::temp_dir().join("hs_diag_rel.hard");
+        std::fs::write(&path, "model User = users [\n  id => Int,\n]\n").unwrap();
+        let mut d = diag();
+        d.code = cat::UNDEFINED_VARIABLE;
+        d.location = Some(path.to_string_lossy().to_string());
+        d.related.push(Related {
+            location: Some(path.to_string_lossy().to_string()),
+            span: Some(Span::new(2, 3)),
+            label: Some("field `id` declared here".to_string()),
+        });
+        let out = render_v2(&[d], false);
+        assert!(out.contains("= field `id` declared here"), "got: {out}");
+        assert!(out.matches("   --> ").count() >= 2, "two frames expected, got: {out}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn related_span_same_line_aligns_gutter_width() {
+        let mut d = diag();
+        d.related.push(Related {
+            location: None,
+            span: Some(Span::new(12, 1)),
+            label: None,
+        });
+        assert_eq!(gutter_width(&d), 2);
+    }
 }

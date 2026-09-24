@@ -1,4 +1,4 @@
-use hs_compiler::{compile_to_cpp, fmt, frontend, render_all, Diag};
+use hs_compiler::{compile_to_cpp, fmt, frontend, Diag};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -700,15 +700,7 @@ fn write(path: &Path, content: &str) {
 }
 
 fn report(diags: &[Diag]) {
-    let src = diags
-        .iter()
-        .filter_map(|d| d.location.as_ref())
-        .find_map(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default();
-    eprint!("{}", render_all(diags));
-    if !src.is_empty() {
-        eprint!("{}", hs_compiler::diagnostics::frames_all(diags, &src));
-    }
+    eprint!("{}", hs_compiler::diagnostics::render_error(diags));
     std::process::exit(1);
 }
 
