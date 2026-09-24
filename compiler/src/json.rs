@@ -38,6 +38,20 @@ impl Json {
         }
     }
 
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_num(&self) -> Option<i64> {
+        match self {
+            Json::Num(n) => Some(*n),
+            _ => None,
+        }
+    }
+
     pub fn to_string(&self) -> String {
         let mut out = String::new();
         self.write(&mut out);

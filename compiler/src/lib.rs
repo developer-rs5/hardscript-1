@@ -8,6 +8,8 @@
 //! [`compile_to_cpp`] (parse + typecheck + codegen).
 
 pub mod ast;
+pub mod astser;
+pub mod cache;
 pub mod codegen;
 pub mod diagnostics;
 pub mod docs;
