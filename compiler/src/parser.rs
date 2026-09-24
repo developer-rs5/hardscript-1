@@ -20,6 +20,11 @@ pub struct Parser {
     pub funcs: Vec<FunDef>,
     pub middlewares: Vec<(String, Vec<Stmt>)>,
     pub tests: Vec<TestDef>,
+    /// Non-fatal parse errors recovered inside statement regions (blocks,
+    /// route/func/middleware/test bodies). Collected here so one bad statement
+    /// no longer swallows the rest of its enclosing region or the whole file;
+    /// surfaced at program level alongside the region's own error.
+    na_errs: Vec<Diag>,
 }
 
 /// Maximum recursion depth for `parse_expr`, `parse_unary` and `parse_block`,
@@ -53,6 +58,7 @@ impl Parser {
             funcs: Vec::new(),
             middlewares: Vec::new(),
             tests: Vec::new(),
+            na_errs: Vec::new(),
         }
     }
 
@@ -239,6 +245,7 @@ impl Parser {
                 }
             }
         }
+        errs.append(&mut self.na_errs);
         if errs.is_empty() {
             Ok(Program { stmts, path: String::new() })
         } else {
@@ -247,8 +254,27 @@ impl Parser {
     }
 
     fn recover(&mut self) {
-        while !matches!(self.peek(), Tok::Eof | Tok::Sym(Sym::RBrace)) {
-            self.advance();
+        if self.fatal {
+            return;
+        }
+        self.sync();
+    }
+
+    /// Resync the scan to the next plausible statement boundary so recovery
+    /// stays inside the current region instead of abandoning the file. A token
+    /// is a plausible start when it introduces a statement: any keyword, an
+    /// identifier/declaration, a literal, or an expression-opening symbol.
+    /// `}` / EOF are terminators because they close (or end) the region.
+    fn sync(&mut self) {
+        loop {
+            match self.peek() {
+                Tok::Eof | Tok::Sym(Sym::RBrace) => return,
+                Tok::Kw(_) | Tok::Ident(_) | Tok::Str(_) | Tok::Int(_) | Tok::Float(_)
+                | Tok::Sym(Sym::Q) | Tok::Sym(Sym::LParen) | Tok::Sym(Sym::Minus) => return,
+                _ => {
+                    self.advance();
+                }
+            }
         }
     }
 
@@ -532,9 +558,25 @@ None => Err(vec![Diag::new(
                 )
                 .with_code(cat::UNEXPECTED_EOI)]);
             }
-            match self.parse_stmt()? {
-                Some(s) => stmts.push(s),
-                None => {}
+            // Region-scoped recovery: a non-fatal statement error is confined
+            // to its own statement; we report it, resync to the next statement
+            // start and keep the rest of the block (and file) parseable.
+            let before = self.pos;
+            match self.parse_stmt() {
+                Ok(Some(s)) => stmts.push(s),
+                Ok(None) => {}
+                Err(e) => {
+                    if self.fatal {
+                        return Err(e);
+                    }
+                    self.na_errs.extend(e);
+                    // Guarantee forward progress even when the resync target
+                    // is itself a failing statement start token.
+                    if self.pos == before {
+                        self.advance();
+                    }
+                    self.sync();
+                }
             }
         }
         self.expect_sym(Sym::RBrace, "to close a block")?;
@@ -1217,4 +1259,66 @@ pub fn scan_imports(src: &str) -> ScanImports {
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_errs(src: &str) -> Vec<Diag> {
+        match crate::frontend(src, "t.hard") {
+            Ok(_) => Vec::new(),
+            Err(d) => d,
+        }
+    }
+
+    #[test]
+    fn junk_between_statements_reports_all_regions() {
+        // Two junk statements separated by a valid route: region-scoped
+        // recovery must resync at the `GET` and report a diagnostic for
+        // each junk line instead of abandoning the file after the first.
+        let src = "app @3000\n@@@\nGET \"/a\" :: { <- 1 }\n@@@\n";
+        let errs = parse_errs(src);
+        assert_eq!(errs.len(), 2, "expected two region errors, got {errs:?}");
+        assert!(errs[0].message.contains("expected"), "got {}", errs[0].message);
+        assert!(errs[1].message.contains("expected"), "got {}", errs[1].message);
+    }
+
+    #[test]
+    fn bad_statement_inside_block_keeps_region_alive() {
+        // An invalid statement inside a route body must not swallow the
+        // following statements in the same block: the three junk `?` tokens
+        // each become their own isolated error, `<- 2` keeps parsing, and the
+        // trailing model region stays intact (no `unexpected end of file`).
+        let src = "model User = users [\n  id => Int,\n]\n\
+                   GET \"/a\" :: {\n  <- 1\n  ?\n  ?\n  ?\n  <- 2\n}\n\
+                   model Account = accounts [\n  id => Int,\n]\n";
+        let errs = parse_errs(src);
+        assert_eq!(errs.len(), 3, "expected three region errors, got {errs:?}");
+        assert!(
+            !errs.iter().any(|d| d.message.contains("end of file")),
+            "region was swallowed: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn fatal_limit_still_aborts() {
+        // Run on a large-stack thread: triggering the depth guard recurses
+        // ~256 frames which can exceed the default test-thread stack.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let src = format!("app @3000\n{}", "(".repeat(260));
+                let errs = parse_errs(&src);
+                assert_eq!(errs.len(), 1);
+                assert!(
+                    errs[0].message.contains("nesting too deep"),
+                    "got {}",
+                    errs[0].message
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
