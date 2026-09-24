@@ -27,6 +27,7 @@ pub mod optimizer;
 pub mod optimize;
 pub mod parser;
 pub mod sha256;
+pub mod suggest;
 pub mod token;
 pub mod typecheck;
 

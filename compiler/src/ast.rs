@@ -21,6 +21,21 @@ pub enum Module {
 }
 
 impl Module {
+    /// All builtin module names, in catalog order. Shared by the parser's
+    /// "unknown module" diagnostics (did-you-mean candidates) and the catalog.
+    pub const NAMES: &[&str] = &[
+        "http",
+        "postgres",
+        "websocket",
+        "crypto",
+        "json",
+        "fs",
+        "jwt",
+        "env",
+        "runtime",
+        "time",
+    ];
+
     pub fn from_name(s: &str, span: Span) -> Option<Module> {
         match s {
             "http" => Some(Module::Http),

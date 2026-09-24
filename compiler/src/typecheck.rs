@@ -256,6 +256,18 @@ impl Checker {
                             .with_help(format!(
                                 "Access the field through the model, e.g. `{model}(..).{name}`."
                             ));
+                    } else {
+                        // No exact model-field match: offer a "did you mean"
+                        // candidate computed over everything in scope plus all
+                        // declared model fields, when the edit distance says a
+                        // typo is plausible.
+                        let mut cands: Vec<String> = scope.keys().cloned().collect();
+                        cands.extend(self.models.values().flat_map(|m| m.fields.iter().map(|f| f.name.clone())));
+                        if let Some(cand) = crate::suggest::closest(name, &cands).filter(|c| c.as_str() != name) {
+                            d = d.with_help(format!(
+                                "Maybe you meant `{cand}`? If not, declare the variable before use."
+                            ));
+                        }
                     }
                     self.diags.push(d);
                 }
@@ -270,11 +282,21 @@ impl Checker {
                     let known = self.funcs.contains_key(&name.clone()) || scope.contains_key(name);
                     let is_boot = name == "_" || name == "expect";
                     if !known && !is_boot {
+                        let fallback = format!(
+                            "Define `calc {name}(..) => .. {{ .. }}` before calling it, or use a module function like `json.parse(..)`."
+                        );
+                        let cands = self
+                            .funcs
+                            .keys()
+                            .map(|k| k.strip_prefix("calc ").unwrap_or(k).to_string())
+                            .chain(scope.keys().cloned())
+                            .collect::<Vec<_>>();
+                        let suggestion = crate::suggest::did_you_mean(name, &cands, fallback);
                         self.err_code(
                             cat::UNDEFINED_FUNCTION,
                             format!("call to undefined function `{name}`"),
                             *csp,
-                            format!("Define `calc {name}(..) => .. {{ .. }}` before calling it, or use a module function like `json.parse(..)`."),
+                            suggestion,
                         );
                     }
                 } else if let Expr::Member(base, field, _) = callee.as_ref() {

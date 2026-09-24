@@ -450,7 +450,11 @@ impl Parser {
                     ErrorKind::Module,
                     format!("unknown module 'std.{mod_name}'"),
                     sp,
-                    "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.",
+                    crate::suggest::did_you_mean(
+                        &mod_name,
+                        &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                        "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.".to_string(),
+                    ),
                 )
                 .with_code(cat::UNKNOWN_MODULE)]),
             };
@@ -464,7 +468,11 @@ None => Err(vec![Diag::new(
                     ErrorKind::Module,
                     format!("unknown module '{name}'"),
                     sp,
-                    "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
+                    crate::suggest::did_you_mean(
+                        &name,
+                        &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                        "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.".to_string(),
+                    ),
                 )
                 .with_code(cat::UNKNOWN_MODULE)]),
         }
@@ -493,7 +501,11 @@ None => Err(vec![Diag::new(
                 ErrorKind::Module,
                 format!("unknown module '{path}'"),
                 sp,
-                "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time, or a local import like `bring \"./utils\"`.",
+                crate::suggest::did_you_mean(
+                    name,
+                    &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time, or a local import like `bring \"./utils\"`.".to_string(),
+                ),
             )
             .with_code(cat::UNKNOWN_MODULE)]),
         }
