@@ -53,6 +53,10 @@ pub struct Diag {
     pub code: u16,
     /// A short "how to fix" line (rendered as a `help:` footer).
     pub help: Option<String>,
+    /// When set, the diagnostic is rendered as a hard error even though its
+    /// catalog code lies in the warning range. `--deny` uses this to escalate
+    /// a warning to a build failure without changing its code.
+    pub promote: bool,
     /// Secondary spans shown under the primary location.
     pub related: Vec<Related>,
 }
@@ -78,6 +82,7 @@ impl Diag {
             received: None,
             code: catalog::default_for(kind),
             help: None,
+            promote: false,
             related: Vec::new(),
         }
     }
@@ -94,6 +99,7 @@ impl Diag {
             received: None,
             code: catalog::default_for(kind),
             help: None,
+            promote: false,
             related: Vec::new(),
         }
     }
@@ -108,6 +114,13 @@ impl Diag {
     /// Attach a short "how to fix" line shown as a `help:` footer.
     pub fn with_help(mut self, h: impl Into<String>) -> Diag {
         self.help = Some(h.into());
+        self
+    }
+
+    /// Escalate a warning to hard-error severity (used by `--deny`). Leaves
+    /// the catalog code untouched; only the rendered label/color change.
+    pub fn with_promote(mut self) -> Diag {
+        self.promote = true;
         self
     }
 

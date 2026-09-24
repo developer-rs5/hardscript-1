@@ -30,6 +30,7 @@ pub mod sha256;
 pub mod suggest;
 pub mod token;
 pub mod typecheck;
+pub mod warn;
 
 pub use error::{render_all, Diag, ErrorKind};
 pub use lexer::Lexer;

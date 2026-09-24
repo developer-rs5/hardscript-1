@@ -69,9 +69,12 @@ pub fn detect_color(mode: ColorMode) -> bool {
     }
 }
 
-/// Severity word + caret color for a catalog code.
-fn severity(code: u16) -> (&'static str, &'static str) {
-    if is_warning(code) {
+/// Severity word + caret color for a catalog code. A promoted diagnostic
+/// (escalated by `--deny`) renders as a hard error.
+fn severity(d: &Diag) -> (&'static str, &'static str) {
+    if d.promote {
+        ("error", RED)
+    } else if is_warning(d.code) {
         ("warning", YELLOW)
     } else {
         ("error", RED)
@@ -106,7 +109,7 @@ fn paint(color: bool, code: &str, body: &str) -> String {
 
 /// The first line of a diagnostic: `error[HS0104]: message`.
 fn header_line(d: &Diag, color: bool, out: &mut String) {
-    let (word, caret_color) = severity(d.code);
+    let (word, caret_color) = severity(d);
     let severity = paint(color, caret_color, word);
     let code = if color {
         format!("{DIM}[{}]{RESET}", crate::catalog::format(d.code))
@@ -172,7 +175,7 @@ fn frame(location: &Option<String>, span: crate::token::Span, w: usize, color: b
     let Some(line) = source_line(location, span.line) else {
         return;
     };
-    let caret_color = if color { severity(d.code).1 } else { "" };
+    let caret_color = if color { severity(d).1 } else { "" };
 
     out.push_str(&format!("{left_pad}{:>w$} |\n", ""));
     if line.chars().count() <= MAX_LINE_CHARS {

@@ -89,6 +89,9 @@ pub struct Plan {
     pub cpp: Option<String>,
     pub outcomes: Vec<ModuleFrontOutcome>,
     pub timings: StageTimings,
+    /// Static warnings (Diagnostics V2 M3.4.4) from the warning engine.
+    /// Empty on a warm path (nothing was re-analyzed).
+    pub warnings: Vec<Diag>,
     pub warm_eligible: bool,
     pub prev: Option<BuildManifest>,
     pub flags: Vec<String>,
@@ -176,6 +179,7 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
             cpp: None,
             outcomes: Vec::new(),
             timings: StageTimings { discover_ms, ..Default::default() },
+            warnings: Vec::new(),
             warm_eligible: true,
             prev: None,
             flags: opts.flags.clone(),
@@ -283,6 +287,13 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
 
     let mut prog = Program { stmts: merged, path: root_path };
 
+    // Static warnings (M3.4.4): analyzed on the UN-optimized tree so they
+    // reflect what the user wrote (the optimizer legitimately rewrites away
+    // bindings and branches the source still references). Emitted regardless
+    // of later stage failures; the CLI surfaces them only on successful
+    // builds, and `--deny` decides whether any escalate to hard errors.
+    let warnings = crate::warn::analyze(&prog, &merged_files);
+
     let t_merge = Instant::now();
     let merge_ms = t_merge.elapsed().as_secs_f64() * 1000.0;
 
@@ -324,6 +335,7 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
             typecheck_ms,
             codegen_ms,
         },
+        warnings,
         warm_eligible: false,
         prev,
         flags: opts.flags.clone(),

@@ -164,6 +164,10 @@ fn cmd_new(args: &[String]) {
 
 fn cmd_build(rest: &[String]) {
     let (jobs, rest) = jobs_arg(rest);
+    let (policy, rest) = match warning_policy_arg(&rest) {
+        Ok(p) => p,
+        Err(e) => die(&e),
+    };
     let (target, _) = find_target(&rest);
     if std::env::var("HARD_ESCAPE_REPORT").is_ok() {
         match report_escape(target.as_path()) {
@@ -176,7 +180,7 @@ fn cmd_build(rest: &[String]) {
         }
     } else {
         let opts = build_options(false, jobs);
-        match incremental_build(&target, &opts) {
+        match incremental_build(&target, &opts, &policy) {
             Ok(lines) => {
                 for l in lines {
                     println!("{l}");
@@ -185,6 +189,44 @@ fn cmd_build(rest: &[String]) {
             Err(diags) => report(&diags),
         }
     }
+}
+
+/// Extract `--warnings <spec>` / `--deny <spec>` (and `=` forms) from the
+/// argument list. Last value wins for each flag. Returns the policy plus the
+/// remaining arguments.
+fn warning_policy_arg(rest: &[String]) -> Result<(hs_compiler::warn::WarningPolicy, Vec<String>), String> {
+    let mut enabled = None;
+    let mut deny = None;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = &rest[i];
+        if a == "--warnings" || a == "--deny" {
+            let flag = a.as_str();
+            let val = rest.get(i + 1).ok_or_else(|| format!("{flag} needs a value"))?;
+            if flag == "--warnings" {
+                enabled = Some(val.clone());
+            } else {
+                deny = Some(val.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--warnings=") {
+            enabled = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--deny=") {
+            deny = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    let policy = hs_compiler::warn::parse_policy(enabled.as_deref(), deny.as_deref())?;
+    Ok((policy, out))
 }
 
 /// Extract `-j N` / `--jobs N` from the argument list (parallel front-end
@@ -251,9 +293,25 @@ fn build_options(release: bool, jobs: usize) -> hs_compiler::build::BuildOptions
 fn incremental_build(
     target: &Path,
     opts: &hs_compiler::build::BuildOptions,
+    policy: &hs_compiler::warn::WarningPolicy,
 ) -> Result<Vec<String>, Vec<Diag>> {
     let pp = PathBuf::from(target);
-    let plan = hs_compiler::build::plan(&pp, opts, true)?;
+    let mut plan = hs_compiler::build::plan(&pp, opts, true)?;
+
+    // Static warnings (M3.4.4): printed to stderr so the deterministic
+    // stdout build summary is untouched. `--deny` escalates to a hard fail.
+    let warnings = std::mem::take(&mut plan.warnings);
+    let (shown, promoted) = policy.filter(warnings);
+    if !promoted.is_empty() {
+        // The promoted set is a subset of `shown`; the `Err` path re-renders
+        // it with its hard-error label, so don't double-print here.
+        return Err(promoted);
+    }
+    if !shown.is_empty() {
+        let color = hs_compiler::diagnostics::detect_color(hs_compiler::diagnostics::ColorMode::Auto);
+        eprint!("{}", hs_compiler::diagnostics::render_v2(&shown, color));
+    }
+
     let mut lines = vec![format!("built {}", plan.bin_path.display())];
 
     if plan.warm_eligible {
