@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::catalog as cat;
 use crate::error::{Diag, ErrorKind};
 use crate::lexer::Lexer;
 use crate::token::{Kw, Span, Sym, Tok, Token};
@@ -65,7 +66,8 @@ impl Parser {
                 format!("{what} nesting too deep (limit {MAX_DEPTH})"),
                 self.span(),
                 format!("Simplify the nesting below {MAX_DEPTH} levels."),
-            )]);
+            )
+            .with_code(cat::NESTING_TOO_DEEP)]);
         }
         Ok(())
     }
@@ -83,7 +85,8 @@ impl Parser {
                 format!("expression too long (over {MAX_CHAIN} operands)"),
                 self.span(),
                 "Break the expression into smaller pieces or use variables.",
-            )]);
+            )
+            .with_code(cat::EXPRESSION_TOO_LONG)]);
         }
         Ok(())
     }
@@ -136,7 +139,8 @@ impl Parser {
                 format!("expected '{}' {ctx}", s.as_str()),
                 sp,
                 format!("Add the missing '{}'.", s.as_str()),
-            )])
+            )
+            .with_code(cat::EXPECTED_TOKEN)])
         }
     }
 
@@ -155,7 +159,8 @@ impl Parser {
                 "Use a name like `users`, `total`, or `handle_request`.",
             )
             .with_expected("an identifier")
-            .with_received(format!("`{other}`"))]),
+            .with_received(format!("`{other}`"))
+            .with_code(cat::EXPECTED_TOKEN)]),
         }
     }
 
@@ -177,7 +182,8 @@ impl Parser {
                 format!("expected a name after `.`"),
                 sp,
                 "Use a name like `users`, `total`, or `handle_request`.",
-            )]),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]),
         }
     }
 
@@ -202,7 +208,8 @@ impl Parser {
                         "unexpected closing `}`",
                         sp,
                         "Remove the extra `}` or close the block where it belongs.",
-                    ));
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN));
                     self.advance();
                 }
                 Tok::Kw(_) | Tok::Ident(_) | Tok::Sym(_) => {
@@ -226,7 +233,8 @@ impl Parser {
                         "unexpected token",
                         sp,
                         "Remove the token or write a complete statement.",
-                    ));
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN));
                     self.advance();
                 }
             }
@@ -257,7 +265,8 @@ impl Parser {
                         format!("expected a module name or path after `bring`, found {other}"),
                         sp,
                         "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
-                    )]),
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)]),
                 }
             }
             Tok::Kw(Kw::App) => {
@@ -271,7 +280,8 @@ impl Parser {
                             "expected a port number after `app @`",
                             self.span(),
                             "Use `app @3000`.",
-                        )])
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
                     }
                 };
                 self.app_port = Some(port);
@@ -310,7 +320,8 @@ impl Parser {
                         "expected `calc` after `async`",
                         self.span(),
                         "Write `async calc name(...) => ... { ... }`.",
-                    )]);
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)]);
                 }
                 self.parse_func(true).map(Some)
             }
@@ -328,7 +339,8 @@ impl Parser {
                             "expected a test name string after `test`",
                             self.span(),
                             "Write `test \"Name\" { ... }`.",
-                        )])
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
                     }
                 };
                 let body = self.parse_block()?;
@@ -435,11 +447,12 @@ impl Parser {
                     Ok(Some(Stmt::Bring(m, sp)))
                 }
                 None => Err(vec![Diag::new(
-                    ErrorKind::Parse,
+                    ErrorKind::Module,
                     format!("unknown module 'std.{mod_name}'"),
                     sp,
                     "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.",
-                )]),
+                )
+                .with_code(cat::UNKNOWN_MODULE)]),
             };
         }
         match Module::from_name(&name, sp) {
@@ -447,12 +460,13 @@ impl Parser {
                 self.imports.push(m.clone());
                 Ok(Some(Stmt::Bring(m, sp)))
             }
-            None => Err(vec![Diag::new(
-                ErrorKind::Parse,
-                format!("unknown module '{name}'"),
-                sp,
-                "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
-            )]),
+None => Err(vec![Diag::new(
+                    ErrorKind::Module,
+                    format!("unknown module '{name}'"),
+                    sp,
+                    "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
+                )
+                .with_code(cat::UNKNOWN_MODULE)]),
         }
     }
 
@@ -476,11 +490,12 @@ impl Parser {
                 Ok(Some(Stmt::Bring(m, sp)))
             }
             None => Err(vec![Diag::new(
-                ErrorKind::Parse,
+                ErrorKind::Module,
                 format!("unknown module '{path}'"),
                 sp,
                 "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time, or a local import like `bring \"./utils\"`.",
-            )]),
+            )
+            .with_code(cat::UNKNOWN_MODULE)]),
         }
     }
 
@@ -502,7 +517,8 @@ impl Parser {
                     "unexpected end of file inside block",
                     sp,
                     "Close the block with `}`.",
-                )]);
+                )
+                .with_code(cat::UNEXPECTED_EOI)]);
             }
             match self.parse_stmt()? {
                 Some(s) => stmts.push(s),
@@ -534,7 +550,8 @@ impl Parser {
                         "unexpected end of file inside model",
                         sp,
                         "Close the model with `]`.",
-                    )])
+                    )
+                    .with_code(cat::UNEXPECTED_EOI)])
                 }
                 _ => {}
             }
@@ -582,7 +599,8 @@ impl Parser {
                     format!("expected a path string after {method}"),
                     self.span(),
                     format!("Use {method} \"/users\" :: {{ ... }}."),
-                )])
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
             }
         };
         let params = if self.eat_sym(Sym::DColon) {
@@ -649,7 +667,8 @@ impl Parser {
                     "expected a path string after `socket`",
                     self.span(),
                     "Use `socket \"/chat\" { ... }`.",
-                )])
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
             }
         };
         self.expect_sym(Sym::LBrace, "to start a socket block")?;
@@ -693,7 +712,8 @@ impl Parser {
                         "nested socket blocks are not allowed",
                         self.span(),
                         "Define each socket at the top level.",
-                    )])
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN)])
                 }
                 _ => {
                     return Err(vec![Diag::new(
@@ -701,7 +721,8 @@ impl Parser {
                         "unexpected keyword inside socket block",
                         self.span(),
                         "Only connect / message / disconnect blocks are allowed here.",
-                    )])
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN)])
                 }
             }
         }
@@ -1007,7 +1028,8 @@ impl Parser {
                                 "expected a key in object literal",
                                 self.span(),
                                 "Write `{ name : \"value\" }`.",
-                            )])
+                            )
+                            .with_code(cat::EXPECTED_TOKEN)])
                         }
                     };
                     self.expect_sym(Sym::Colon, "after object key")?;
@@ -1067,7 +1089,15 @@ impl Parser {
                 self.advance();
                 let path = match self.advance().tok {
                     Tok::Str(s) => s,
-                    _ => return Err(vec![Diag::new(ErrorKind::Parse, "expected HTTP path string", self.span(), "")]),
+                    _ => {
+                        return Err(vec![Diag::new(
+                            ErrorKind::Parse,
+                            "expected HTTP path string",
+                            self.span(),
+                            "",
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
+                    }
                 };
                 let body = if *self.peek() == Tok::Sym(Sym::LBrace) {
                     self.advance();
@@ -1089,7 +1119,8 @@ impl Parser {
                 "expected a value",
                 sp,
                 "Write a literal, variable, or expression.",
-            )]),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]),
         }
     }
 }

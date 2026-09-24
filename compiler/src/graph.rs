@@ -210,7 +210,8 @@ impl Discovery {
                 format!("import chain too deep (limit {MAX_MODULE_DEPTH}) at '{key}'"),
                 crate::token::Span::new(line, 0),
                 "Break the import chain into a flatter dependency graph.",
-            )]);
+            )
+            .with_code(crate::catalog::IMPORT_CHAIN_TOO_DEEP)]);
         }
 
         let abs = self.project_root.join(&key);
@@ -223,7 +224,8 @@ impl Discovery {
                     crate::token::Span::new(line, 0),
                     format!("Looked for {} (relative to {}).", abs.display(), self.project_root.display()),
                 )
-                .with_location(self.project_root.join(key.clone()).display().to_string())])
+                .with_location(self.project_root.join(key.clone()).display().to_string())
+                .with_code(crate::catalog::MODULE_NOT_FOUND)])
             }
         };
 
@@ -303,6 +305,7 @@ impl Discovery {
             crate::token::Span::new(1, 0),
             "Remove the circular `bring` between these modules (e.g. move the shared code into a third module).",
         )
+        .with_code(crate::catalog::IMPORT_CYCLE)
     }
 }
 

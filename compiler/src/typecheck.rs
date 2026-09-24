@@ -3,6 +3,7 @@
 //! Everything is reported as [`Diag`]s with friendly suggestions.
 
 use crate::ast::*;
+use crate::catalog as cat;
 use crate::error::{Diag, ErrorKind};
 use crate::token::Span;
 use std::collections::HashMap;
@@ -29,15 +30,18 @@ fn declare_unique(
     span: Span,
 ) {
     if let Some(prev) = map.get(name) {
-        diags.push(Diag::new(
-            ErrorKind::Type,
-            format!("duplicate declaration of `{name}`"),
-            span,
-            format!(
-                "Rename one of them; the first is declared at {}:{}.",
-                prev.line, prev.col
-            ),
-        ));
+        diags.push(
+            Diag::new(
+                ErrorKind::Type,
+                format!("duplicate declaration of `{name}`"),
+                span,
+                format!(
+                    "Rename one of them; the first is declared at {}:{}.",
+                    prev.line, prev.col
+                ),
+            )
+            .with_code(cat::DUPLICATE_DECL),
+        );
     } else {
         map.insert(name.to_string(), span);
     }
@@ -50,8 +54,10 @@ struct Checker {
 }
 
 impl Checker {
-    fn err(&mut self, msg: String, span: Span, suggestion: String) {
-        self.diags.push(Diag::new(ErrorKind::Type, msg, span, suggestion));
+    /// Push a type diagnostic with the granular catalog code (every site
+    /// names the exact code; see [`crate::catalog`]).
+    fn err_code(&mut self, code: u16, msg: String, span: Span, suggestion: String) {
+        self.diags.push(Diag::new(ErrorKind::Type, msg, span, suggestion).with_code(code));
     }
 
     fn collect(&mut self, prog: &Program) {
@@ -202,7 +208,8 @@ impl Checker {
                             ),
                         )
                         .with_expected(format!("a defined name or module function"))
-                        .with_received(format!("`{name}`")),
+                        .with_received(format!("`{name}`"))
+                        .with_code(cat::UNDEFINED_VARIABLE),
                     );
                 }
             }
@@ -216,7 +223,8 @@ impl Checker {
                     let known = self.funcs.contains_key(&name.clone()) || scope.contains_key(name);
                     let is_boot = name == "_" || name == "expect";
                     if !known && !is_boot {
-                        self.err(
+                        self.err_code(
+                            cat::UNDEFINED_FUNCTION,
                             format!("call to undefined function `{name}`"),
                             *csp,
                             format!("Define `calc {name}(..) => .. {{ .. }}` before calling it, or use a module function like `json.parse(..)`."),

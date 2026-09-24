@@ -215,7 +215,8 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
                         format!("cannot start worker pool: {e}"),
                         crate::token::Span::new(1, 0),
                         "Lower -j or free OS resources.",
-                    )]
+                    )
+                    .with_code(crate::catalog::INTERNAL_COMPILER)]
                 })?;
             pool.install(|| {
                 jobs_list
@@ -346,7 +347,8 @@ fn load_module(
             format!("cannot read {}: {e}", n.path.display()),
             crate::token::Span::new(1, 0),
             "The module file must exist and be readable.",
-        )]
+        )
+        .with_code(crate::catalog::IO_ERROR)]
     })?;
     let prog = crate::frontend(&src, n.path.display().to_string())?;
     let encoded = crate::astser::serialize_stmts(&prog.stmts).unwrap_or_default();
@@ -366,7 +368,8 @@ fn load_module(
                 format!("cannot write build cache: {e}"),
                 crate::token::Span::new(1, 0),
                 "Check that .hard/cache is writable.",
-            )]
+            )
+            .with_code(crate::catalog::IO_ERROR)]
         })?;
     Ok((prog.stmts, ParseOutcome::Parsed, encoded.len() as u64))
 }

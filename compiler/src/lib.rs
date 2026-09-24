@@ -11,6 +11,7 @@ pub mod ast;
 pub mod astser;
 pub mod build;
 pub mod cache;
+pub mod catalog;
 pub mod codegen;
 pub mod diagnostics;
 pub mod docs;

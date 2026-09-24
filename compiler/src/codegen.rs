@@ -77,7 +77,8 @@ impl Codegen {
             msg,
             span,
             "This construct is not supported by the compiler yet.",
-        ));
+        )
+        .with_code(crate::catalog::INTERNAL_COMPILER));
     }
 
     fn run(&mut self, prog: &Program) {
