@@ -161,24 +161,159 @@ fn cmd_new(args: &[String]) {
 }
 
 fn cmd_build(rest: &[String]) {
-    let (target, _) = find_target(rest);
-    match compile(target.as_path()) {
-        Ok((_, bin)) => {
-            if std::env::var("HARD_ESCAPE_REPORT").is_ok() {
-                match report_escape(target.as_path()) {
-                    Ok(lines) => {
-                        for l in lines {
-                            println!("{l}");
-                        }
-                    }
-                    Err(diags) => report(&diags),
+    let (jobs, rest) = jobs_arg(rest);
+    let (target, _) = find_target(&rest);
+    if std::env::var("HARD_ESCAPE_REPORT").is_ok() {
+        match report_escape(target.as_path()) {
+            Ok(lines) => {
+                for l in lines {
+                    println!("{l}");
                 }
-            } else {
-                println!("built {}", bin.display());
+            }
+            Err(diags) => report(&diags),
+        }
+    } else {
+        let opts = build_options(false, jobs);
+        match incremental_build(&target, &opts) {
+            Ok(lines) => {
+                for l in lines {
+                    println!("{l}");
+                }
+            }
+            Err(diags) => report(&diags),
+        }
+    }
+}
+
+/// Extract `-j N` / `--jobs N` from the argument list (parallel front-end
+/// workers; unlimited on the native stage which stays single, whole-program).
+fn jobs_arg(rest: &[String]) -> (usize, Vec<String>) {
+    let mut jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = &rest[i];
+        if a == "-j" || a == "--jobs" {
+            if let Some(v) = rest.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                jobs = v.max(1);
+                i += 2;
+                continue;
             }
         }
-        Err(diags) => report(&diags),
+        if let Some(v) = a.strip_prefix("--jobs=") {
+            if let Ok(n) = v.parse::<usize>() {
+                jobs = n.max(1);
+                i += 1;
+                continue;
+            }
+        }
+        out.push(a.clone());
+        i += 1;
     }
+    (jobs, out)
+}
+
+/// Environment stamp inputs shared by the incremental pipeline and `doctor`.
+fn runtime_fingerprint() -> String {
+    let mut acc = String::new();
+    for (name, content) in RUNTIME_FILES {
+        acc.push_str(name);
+        acc.push('\n');
+        acc.push_str(content);
+        acc.push('\n');
+    }
+    hs_compiler::sha256::hex(acc.as_bytes())
+}
+
+fn build_options(release: bool, jobs: usize) -> hs_compiler::build::BuildOptions {
+    let flags = if release {
+        release_flags()
+    } else {
+        vec!["-O2".to_string()]
+    };
+    hs_compiler::build::BuildOptions {
+        compiler: VERSION.to_string(),
+        runtime_sha: runtime_fingerprint(),
+        platform: hs_compiler::build::platform(),
+        flags,
+        jobs,
+        release,
+    }
+}
+
+/// Incremental compile: staged pipeline → g++ → `.hard/build.json`.
+///
+/// Returns the deterministic `built <path>` line plus a cache summary line
+/// (stage timings only when `HARD_TIMED` is set, so summary output stays
+/// deterministic).
+fn incremental_build(
+    target: &Path,
+    opts: &hs_compiler::build::BuildOptions,
+) -> Result<Vec<String>, Vec<Diag>> {
+    let pp = PathBuf::from(target);
+    let plan = hs_compiler::build::plan(&pp, opts, true)?;
+    let mut lines = vec![format!("built {}", plan.bin_path.display())];
+
+    if plan.warm_eligible {
+        let n = plan.graph.order.len();
+        if std::env::var("HARD_TIMED").is_ok() {
+            lines.push(format!(
+                "cache: {n} hit, 0 miss, {n} skipped, 0 compiled (warm)"
+            ));
+        } else {
+            lines.push(format!("cache: {n} hit, 0 miss, {n} skipped, 0 compiled"));
+        }
+        return Ok(lines);
+    }
+
+    let cpp = plan.cpp.clone().unwrap();
+    let build_dir = plan.project_root.join(".hard");
+    std::fs::create_dir_all(&build_dir).unwrap_or_else(|e| die(&e.to_string()));
+    write_runtime(&build_dir);
+    write(&plan.cpp_path, &cpp);
+
+    let t_native = std::time::Instant::now();
+    let mut cmd = std::process::Command::new("g++");
+    cmd.arg("-std=c++17").arg("-pthread").arg("-I").arg(&build_dir);
+    for f in &opts.flags {
+        cmd.arg(f);
+    }
+    cmd.arg(&plan.cpp_path).arg("-o").arg(&plan.bin_path);
+    let out = cmd
+        .output()
+        .unwrap_or_else(|e| die(&format!("could not run g++: {e}")));
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        return Err(vec![Diag::new_nospan(
+            hs_compiler::ErrorKind::Codegen,
+            format!("g++ failed:\n{msg}"),
+        )]);
+    }
+    let native_ms = t_native.elapsed().as_secs_f64() * 1000.0;
+
+    let m = hs_compiler::build::final_manifest(&plan, native_ms, true);
+    m.save(&plan.project_root)
+        .unwrap_or_else(|e| die(&e.to_string()));
+
+    let c = &m.cache;
+    lines.push(format!(
+        "cache: {} hit, {} miss, {} skipped, {} compiled",
+        c.hits, c.misses, c.skipped, c.compiled
+    ));
+    if std::env::var("HARD_TIMED").is_ok() {
+        let d = m.timings.discover_ms;
+        let p = m.timings.parse_ms;
+        let me = m.timings.merge_ms;
+        let o = m.timings.optimize_ms;
+        let tc = m.timings.typecheck_ms;
+        let cg = m.timings.codegen_ms;
+        let na = m.timings.native_ms;
+        let to = m.timings.total_ms;
+        lines.push(format!(
+            "time: discover={d:.1}ms parse={p:.1}ms merge={me:.1}ms opt={o:.1}ms typecheck={tc:.1}ms codegen={cg:.1}ms native={na:.1}ms total={to:.1}ms"
+        ));
+    }
+    Ok(lines)
 }
 
 /// Escape-analysis report mode (`HARD_ESCAPE_REPORT=1`): prints one line per
