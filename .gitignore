@@ -8,6 +8,7 @@ Cargo.lock
 
 # Generated docs
 examples/*/API.md
+API.md
 
 # Generated binaries
 *.o

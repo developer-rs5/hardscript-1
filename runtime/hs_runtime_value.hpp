@@ -322,7 +322,10 @@ struct ValueObj;
 
 class Value {
 public:
-    static constexpr size_t kSso = 14;
+    // Small String Optimization: strings up to kSso bytes live in the value
+    // itself (never allocate); longer strings own a heap std::string. 24 fills
+    // the 32-byte value layout exactly (22-24 per the ms2.2 spec).
+    static constexpr size_t kSso = 24;
 
     Value() = default;
     ~Value() { destroy(); }
@@ -339,14 +342,14 @@ public:
     static Value str(std::string_view s) {
         Value v;
         v.kind_ = ValueKind::String;
-        if (s.size() <= kSso) { std::memcpy(v.u_.sso, s.data(), s.size()); v.sso_n_ = (uint8_t)s.size(); }
-        else { v.own_ = true; v.u_.s = new std::string(s); }
+        if (s.size() <= kSso) { v.fl_ = kInline; v.sso_n_ = (uint8_t)s.size(); std::memcpy(v.u_.sso, s.data(), s.size()); }
+        else { v.fl_ = kOwn; v.u_.s = new std::string(s); }
         return v;
     }
     // Non-owning string (points into a const pool / request buffer).
-    static Value str_view(std::string_view s) { Value v; v.kind_ = ValueKind::String; v.u_.view = {s.data(), s.size()}; return v; }
+    static Value str_view(std::string_view s) { Value v; v.kind_ = ValueKind::String; v.fl_ = kView; v.u_.view = {s.data(), s.size()}; return v; }
     // Non-owning bytes view.
-    static Value bytes(std::string_view s) { Value v; v.kind_ = ValueKind::Bytes; v.u_.view = {s.data(), s.size()}; return v; }
+    static Value bytes(std::string_view s) { Value v; v.kind_ = ValueKind::Bytes; v.fl_ = kView; v.u_.view = {s.data(), s.size()}; return v; }
     // Callable: raw function pointer + a name interned into the const pool
     // (stable address, zero per-value allocation). Out-of-line below.
     static Value fn(void* fp, std::string_view name);
@@ -360,11 +363,14 @@ public:
     double as_f64() const { return kind_ == ValueKind::Float ? u_.f : (double)(kind_ == ValueKind::Int ? u_.i : 0); }
     bool as_bool() const { return kind_ == ValueKind::Bool ? u_.b : false; }
 
+    // UTF-8 safe: SSO copies raw bytes without interpreting them, so a
+    // multibyte sequence is never truncated mid-codepoint on the inline path.
     std::string_view as_str() const {
         if (kind_ != ValueKind::String && kind_ != ValueKind::Bytes) return {};
-        if (own_) return std::string_view(*u_.s);
-        if (sso_n_) return std::string_view(u_.sso, sso_n_);
-        return u_.view.d ? std::string_view(u_.view.d, u_.view.n) : std::string_view();
+        if (fl_ & kOwn) return std::string_view(*u_.s);
+        if (fl_ & kInline) return std::string_view(u_.sso, sso_n_);
+        if (fl_ & kView) return u_.view.d ? std::string_view(u_.view.d, u_.view.n) : std::string_view();
+        return std::string_view();
     }
 
     void* as_fn() const { return kind_ == ValueKind::Function ? u_.fn.fp : nullptr; }
@@ -380,6 +386,8 @@ public:
     void set(std::string key, Value v);
 
 private:
+    enum ST : uint8_t { kOwn = 0x01, kInline = 0x02, kView = 0x04 };
+
     union U {
         U() {}
         int64_t i;
@@ -394,16 +402,17 @@ private:
     };
 
     ValueKind kind_ = ValueKind::Nil;
+    uint8_t fl_ = 0;   // ST storage selector (string only; containers use kind_)
     uint8_t sso_n_ = 0;
-    bool own_ = false;
+    uint8_t pad_ = 0;
     U u_;
 
     // Out-of-line (need complete ValueVec/ValueObj): see after the boxes.
     void destroy() noexcept;
     void copy_from(const Value& o);
     void steal(Value& o) noexcept {
-        kind_ = o.kind_; sso_n_ = o.sso_n_; own_ = o.own_; u_ = o.u_;
-        o.kind_ = ValueKind::Nil; o.sso_n_ = 0; o.own_ = false;
+        kind_ = o.kind_; fl_ = o.fl_; sso_n_ = o.sso_n_; u_ = o.u_;
+        o.kind_ = ValueKind::Nil; o.fl_ = 0; o.sso_n_ = 0;
     }
 };
 
@@ -434,20 +443,21 @@ struct ValueObj {
 
 // Out-of-line members that need the complete box types.
 inline void Value::destroy() noexcept {
-    if (own_) delete u_.s;
+    if (fl_ & kOwn) delete u_.s;
     if (kind_ == ValueKind::Array) delete u_.v;
     if (kind_ == ValueKind::Object) delete u_.o;
-    kind_ = ValueKind::Nil; sso_n_ = 0; own_ = false;
+    kind_ = ValueKind::Nil; fl_ = 0; sso_n_ = 0;
 }
 inline Value Value::arr() { Value v; v.kind_ = ValueKind::Array; v.u_.v = new ValueVec(); return v; }
 inline Value Value::obj() { Value v; v.kind_ = ValueKind::Object; v.u_.o = new ValueObj(); return v; }
 inline void Value::copy_from(const Value& o) {
-    kind_ = o.kind_; sso_n_ = o.sso_n_; own_ = o.own_;
+    kind_ = o.kind_; fl_ = o.fl_; sso_n_ = o.sso_n_;
     switch (kind_) {
         case ValueKind::String:
-            if (own_) u_.s = new std::string(*o.u_.s);
-            else if (sso_n_) { std::memcpy(u_.sso, o.u_.sso, sso_n_); }
-            else u_.view = o.u_.view;
+            if (fl_ & kOwn) u_.s = new std::string(*o.u_.s);
+            else if (fl_ & kInline) { std::memcpy(u_.sso, o.u_.sso, sso_n_); }
+            else if (fl_ & kView) u_.view = o.u_.view;
+            else u_ = o.u_;                       // fully-initialized empty fallback
             break;
         case ValueKind::Bytes: u_.view = o.u_.view; break;
         case ValueKind::Array: u_.v = new ValueVec(*o.u_.v); break;
