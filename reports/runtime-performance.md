@@ -54,6 +54,7 @@ idle RSS ≤ 3 MB.
 | 04d40de | ms1.6 trie-based router | static O(1) (23 ns at 5k routes), param/wild O(depth), wildcard support, 0 alloc/100k dispatch; linear matcher was 40–85 µs at 5k routes |
 | 7371fbd | ms1.9 lazy pool + memory | idle RSS 4.20 → 3.86 MB (1 thread at boot), pool shrink to floor after 5 s idle, big buffers return to OS on worker exit; fixed Arena::Str use-after-free on large keep-alive bodies |
 | *next* | ms2.0 value engine foundation | additive `Value` (tagged union, SSO ≤ 14, inline 4-slot arrays, non-owning views) + immutable `ConstPool`; `http_reason` strings now intern once. Not on the request path — `hs::Val` stays the default. No perf delta expected; see reports/value-foundation.md |
+| *next* | stress lab (ms2.0) | flat to 10k routes (30–38k RPS keep-alive @ c512, 0 err); concurrency up to 1024 no collapse; 1 MB echo 0 err; WS: 5000 clients hold + join, 3.4k msg/s broadcast round-trips @p50 0.68 ms, 0 err. See reports/http-stress.md, reports/websocket-performance.md |
 
 ## Quality gates
 
