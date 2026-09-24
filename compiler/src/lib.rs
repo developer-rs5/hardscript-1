@@ -20,6 +20,7 @@ pub mod graph;
 pub mod hir;
 pub mod json;
 pub mod lexer;
+pub mod manifest;
 pub mod optimizer;
 pub mod optimize;
 pub mod parser;

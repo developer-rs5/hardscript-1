@@ -249,10 +249,14 @@ impl EntryStore {
 
 /// Write `bytes` to `path` via a temp file + rename so a crash mid-write
 /// never leaves a partial file at the final path.
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn atomic_write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_file(path, bytes)
 }
 
 #[cfg(test)]
