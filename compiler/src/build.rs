@@ -21,6 +21,7 @@ use crate::graph::{discover, ModuleGraph};
 use crate::manifest::{BuildManifest, ModuleStatus, Timings};
 use crate::optimizer;
 use crate::typecheck;
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -184,66 +185,83 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
 
     let store = EntryStore::new(&project_root);
     let t_parse = Instant::now();
-    let mut merged: Vec<crate::ast::Stmt> = Vec::new();
-    let mut outcomes = Vec::new();
-    let mut root_path = target.to_string_lossy().into_owned();
-    let mut modules: Vec<crate::manifest::ModuleEntry> = Vec::new();
 
-    for &id in &graph.order {
-        let n = &graph.nodes[id];
-        let key = EntryStore::parse_key(&n.rel, &n.source_sha256, &env_fp);
-        let (stmts, outcome, bytes) = match store.get(&key, &n.source_sha256, &env_fp) {
-            Some(ed) => (ed.stmts, ParseOutcome::Hit, ed.serialized_bytes),
-            None => {
-                let src = std::fs::read_to_string(&n.path).map_err(|e| {
+    // Work items in deterministic (topological) order; parallelism only affects
+    // how fast they complete, never the merge order below.
+    let jobs_list: Vec<(usize, String)> = graph
+        .order
+        .iter()
+        .map(|&id| {
+            let n = &graph.nodes[id];
+            (id, EntryStore::parse_key(&n.rel, &n.source_sha256, &env_fp))
+        })
+        .collect();
+
+    let loaded: Vec<Result<(Vec<crate::ast::Stmt>, ParseOutcome, u64), Vec<Diag>>> =
+        if opts.jobs > 1 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(opts.jobs)
+                .build()
+                .map_err(|e| {
                     vec![Diag::new(
                         ErrorKind::Module,
-                        format!("cannot read {}: {e}", n.path.display()),
+                        format!("cannot start worker pool: {e}"),
                         crate::token::Span::new(1, 0),
-                        "The module file must exist and be readable.",
+                        "Lower -j or free OS resources.",
                     )]
                 })?;
-                let prog = crate::frontend(&src, n.path.display().to_string())?;
-                let encoded = crate::astser::serialize_stmts(&prog.stmts).unwrap_or_default();
-                let ed = EntryData {
+            pool.install(|| {
+                jobs_list
+                    .par_iter()
+                    .map(|(id, key)| load_module(*id, &store, &graph, key, &env_fp))
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            jobs_list
+                .iter()
+                .map(|(id, key)| load_module(*id, &store, &graph, key, &env_fp))
+                .collect()
+        };
+    let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+
+    let mut merged: Vec<crate::ast::Stmt> = Vec::new();
+    let mut outcomes = Vec::new();
+    let mut modules: Vec<crate::manifest::ModuleEntry> = Vec::new();
+    let mut root_path = target.to_string_lossy().into_owned();
+    let mut errs: Vec<Diag> = Vec::new();
+    for (idx, (id, _key)) in jobs_list.iter().enumerate() {
+        let n = &graph.nodes[*id];
+        match &loaded[idx] {
+            Ok((stmts, outcome, bytes)) => {
+                let mut stmts = stmts.clone();
+                stmts.retain(|s| !matches!(s, crate::ast::Stmt::Import { .. }));
+                merged.append(&mut stmts);
+                if *id == graph.root {
+                    root_path = n.path.display().to_string();
+                }
+                outcomes.push(ModuleFrontOutcome {
+                    rel: n.rel.clone(),
+                    outcome: *outcome,
+                    items_bytes: *bytes,
+                });
+                modules.push(crate::manifest::ModuleEntry {
                     rel: n.rel.clone(),
                     source_sha: n.source_sha256.clone(),
-                    env_fp: env_fp.clone(),
-                    stmts: prog.stmts.clone(),
-                    serialized_bytes: encoded.len() as u64,
-                    created_ms: now_ms(),
-                };
-                store
-                    .put(&key, &ed)
-                    .map_err(|e| {
-                        vec![Diag::new(
-                            ErrorKind::Module,
-                            format!("cannot write build cache: {e}"),
-                            crate::token::Span::new(1, 0),
-                            "Check that .hard/cache is writable.",
-                        )]
-                    })?;
-                (prog.stmts, ParseOutcome::Parsed, encoded.len() as u64)
+                    deps: n.deps.iter().map(|d| graph.rel_of(*d).to_string()).collect(),
+                    status: if *outcome == ParseOutcome::Hit {
+                        ModuleStatus::Hit
+                    } else {
+                        ModuleStatus::Miss
+                    },
+                    items_bytes: *bytes,
+                });
             }
-        };
-        let rel = n.rel.clone();
-        let src_sha = n.source_sha256.clone();
-        let mut stmts = stmts;
-        stmts.retain(|s| !matches!(s, crate::ast::Stmt::Import { .. }));
-        merged.append(&mut stmts);
-        if id == graph.root {
-            root_path = n.path.display().to_string();
+            Err(ds) => errs.extend(ds.iter().cloned()),
         }
-        outcomes.push(ModuleFrontOutcome { rel: rel.clone(), outcome, items_bytes: bytes });
-        modules.push(crate::manifest::ModuleEntry {
-            rel: rel.clone(),
-            source_sha: src_sha.clone(),
-            deps: n.deps.iter().map(|d| graph.rel_of(*d).to_string()).collect(),
-            status: if outcome == ParseOutcome::Hit { ModuleStatus::Hit } else { ModuleStatus::Miss },
-            items_bytes: bytes,
-        });
     }
-    let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+    if !errs.is_empty() {
+        return Err(errs);
+    }
 
     let mut prog = Program { stmts: merged, path: root_path };
 
@@ -293,6 +311,52 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
         flags: opts.flags.clone(),
         jobs: opts.jobs,
     })
+}
+
+/// Load one module's parse either from the cache or from source. Safe to call
+/// from any number of parallel workers: distinct modules write distinct cache
+/// keys, and reads that race with no writes are impossible (a module is either
+/// cached or not in any given build).
+fn load_module(
+    id: usize,
+    store: &EntryStore,
+    graph: &ModuleGraph,
+    key: &str,
+    env_fp: &str,
+) -> Result<(Vec<crate::ast::Stmt>, ParseOutcome, u64), Vec<Diag>> {
+    let n = &graph.nodes[id];
+    if let Some(ed) = store.get(key, &n.source_sha256, env_fp) {
+        return Ok((ed.stmts, ParseOutcome::Hit, ed.serialized_bytes));
+    }
+    let src = std::fs::read_to_string(&n.path).map_err(|e| {
+        vec![Diag::new(
+            ErrorKind::Module,
+            format!("cannot read {}: {e}", n.path.display()),
+            crate::token::Span::new(1, 0),
+            "The module file must exist and be readable.",
+        )]
+    })?;
+    let prog = crate::frontend(&src, n.path.display().to_string())?;
+    let encoded = crate::astser::serialize_stmts(&prog.stmts).unwrap_or_default();
+    let ed = EntryData {
+        rel: n.rel.clone(),
+        source_sha: n.source_sha256.clone(),
+        env_fp: env_fp.to_string(),
+        stmts: prog.stmts.clone(),
+        serialized_bytes: encoded.len() as u64,
+        created_ms: now_ms(),
+    };
+    store
+        .put(key, &ed)
+        .map_err(|e| {
+            vec![Diag::new(
+                ErrorKind::Module,
+                format!("cannot write build cache: {e}"),
+                crate::token::Span::new(1, 0),
+                "Check that .hard/cache is writable.",
+            )]
+        })?;
+    Ok((prog.stmts, ParseOutcome::Parsed, encoded.len() as u64))
 }
 
 /// Attach the merged program's file path to any diagnostics lacking one.
@@ -535,5 +599,67 @@ mod tests {
         let p1 = plan(&f.main(), &opts(), false).unwrap();
         let p2 = plan(&f.main(), &opts(), false).unwrap();
         assert_eq!(p1.cpp.unwrap(), p2.cpp.unwrap());
+    }
+
+    #[test]
+    fn parallel_and_serial_are_byte_identical() {
+        let mut files: Vec<(String, String)> = Vec::new();
+        for i in 0..40 {
+            files.push((
+                format!("m{i:02}.hard"),
+                format!("calc v{i:02}() => Int {{ <- {i} }}\n"),
+            ));
+        }
+        let mut imports = String::new();
+        for i in 0..40 {
+            imports.push_str(&format!("bring \"./m{i:02}\"\n"));
+        }
+        files.push(("main.hard".to_string(), format!("{imports}GET \"/\" :: {{ <- {{ n: v00() }} }}\n")));
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let f = Fixture::new(&refs);
+        let mut serial = opts();
+        serial.jobs = 1;
+        let p1 = plan(&f.main(), &serial, false).unwrap();
+        let mut parallel = opts();
+        parallel.jobs = 8;
+        let p2 = plan(&f.main(), &parallel, false).unwrap();
+        assert_eq!(p1.cpp.unwrap(), p2.cpp.unwrap(), "parallelism must not change output");
+        let rels1: Vec<&str> = p1.outcomes.iter().map(|o| o.rel.as_str()).collect();
+        let rels2: Vec<&str> = p2.outcomes.iter().map(|o| o.rel.as_str()).collect();
+        assert_eq!(rels1, rels2, "outcome order is deterministic (topological)");
+        let sha1 = p1.merged_hash;
+        let sha2 = p2.merged_hash;
+        assert_eq!(sha1, sha2);
+    }
+
+    #[test]
+    fn parallel_rebuild_counts_agree_via_manifest() {
+        let mut files: Vec<(String, String)> = Vec::new();
+        for i in 0..16 {
+            files.push((
+                format!("m{i:02}.hard"),
+                format!("calc v{i:02}() => Int {{ <- {i} }}\n"),
+            ));
+        }
+        let mut imports = String::new();
+        for i in 0..16 {
+            imports.push_str(&format!("bring \"./m{i:02}\"\n"));
+        }
+        files.push(("main.hard".to_string(), format!("{imports}GET \"/\" :: {{ <- {{ n: v00() }} }}\n")));
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let f = Fixture::new(&refs);
+        let mut o = opts();
+        o.jobs = 4;
+        let p1 = plan(&f.main(), &o, false).unwrap();
+        assert_eq!(p1.outcomes.len(), 17, "all modules present");
+        assert!(p1.outcomes.iter().all(|m| m.outcome == ParseOutcome::Parsed));
+        let m1 = final_manifest(&p1, 0.0, true);
+        m1.save(&f.dir).unwrap();
+        fs::write(f.dir.join("m07.hard"), "calc v07() => Int { <- 99 }\n").unwrap();
+        let p2 = plan(&f.main(), &o, false).unwrap();
+        let hits = p2.outcomes.iter().filter(|m| m.outcome == ParseOutcome::Hit).count();
+        let misses = p2.outcomes.iter().filter(|m| m.outcome == ParseOutcome::Parsed).count();
+        assert_eq!(hits, 16);
+        assert_eq!(misses, 1);
     }
 }
