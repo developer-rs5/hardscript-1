@@ -125,5 +125,48 @@ for f in "$DIR"/*.hard; do
     rm -rf "$TMP"
 done
 
+# cpp kind: self-asserting C++ fixtures compiled directly against the runtime
+# headers (used for the ms2.0 value-engine foundation). First exp line is
+# "cpp"; the rest is the exact expected stdout (one line per entry).
+ROOT="$(cd "$(dirname "$0")" && pwd)/.."
+for f in "$DIR"/*.cpp; do
+    [ -e "$f" ] || continue
+    base="${f%.cpp}"
+    exp="$base.exp"
+    [ -f "$exp" ] || { echo "regression: missing $exp"; FAILED=$((FAILED+1)); continue; }
+
+    lines=()
+    while IFS= read -r l; do lines+=("$l"); done < "$exp"
+    TOTAL=$((TOTAL+1))
+
+    TMP=/tmp/hs-reg-cpp-$$
+    rm -rf "$TMP"
+    mkdir -p "$TMP"
+
+    if ! g++ -std=c++17 -O1 -pthread -I "$ROOT/runtime" "$f" -o "$TMP/reg" 2>"$TMP/build.err"; then
+        echo "regression: FAIL ${base##*/} (cpp compile failed: $(head -1 "$TMP/build.err"))"
+        FAILED=$((FAILED+1))
+        rm -rf "$TMP"
+        continue
+    fi
+
+    if ! "$TMP/reg" >"$TMP/out" 2>&1; then
+        echo "regression: FAIL ${base##*/} (assertion failed: $(head -1 "$TMP/out"))"
+        FAILED=$((FAILED+1))
+        rm -rf "$TMP"
+        continue
+    fi
+
+    want=$(printf '%s\n' "${lines[@]:1}")
+    got=$(cat "$TMP/out")
+    if [ "$got" = "$want" ]; then
+        echo "regression: PASS ${base##*/} ($(echo "$got" | tr '\n' ' '))"
+    else
+        echo "regression: FAIL ${base##*/} (stdout mismatch: got '$got', want '$want')"
+        FAILED=$((FAILED+1))
+    fi
+    rm -rf "$TMP"
+done
+
 echo "regression: $((TOTAL-FAILED))/$TOTAL passed"
 [ "$FAILED" -eq 0 ] || exit 1

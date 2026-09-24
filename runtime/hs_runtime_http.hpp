@@ -523,8 +523,8 @@ inline constexpr std::pair<int, const char*> kHsReasons[] = {
 };
 static std::string http_reason(int status) {
     for (auto& r : kHsReasons)
-        if (r.first == status) return r.second;
-    return "Status";
+        if (r.first == status) return const_pool().intern(r.second);
+    return const_pool().intern("Status");
 }
 
 static bool send_all(int fd, const char* data, size_t len) {

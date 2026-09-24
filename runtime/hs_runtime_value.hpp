@@ -24,6 +24,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -302,6 +303,373 @@ inline std::string to_text_dbg(const Val& v) {
     }
 }
 inline std::string Val::to_text_dbg() const { return ::hs::to_text_dbg(*this); }
+
+// ===========================================================================
+// ms2.0 Value engine — foundation layer (additive; hs::Val remains the
+// default value type until the Phase-2 rewrite. Everything here is plain
+// C++17 and provides the ValueKind/tagged-union/SSO/small-vector/immutable-
+// constant-pool piece used by the escape-analysis report).
+// ===========================================================================
+
+enum class ValueKind : uint8_t { Null, Bool, I64, F64, Str, Bytes, Arr, Obj };
+
+class Value;
+struct ValueVec;
+struct ValueObj;
+
+class Value {
+public:
+    static constexpr size_t kSso = 14;
+    enum Kind : uint8_t { Null, Bool, I64, F64, Str, Bytes, Arr, Obj };
+
+    Value() = default;
+    ~Value() { destroy(); }
+    Value(const Value& o) { copy_from(o); }
+    Value& operator=(const Value& o) { if (this != &o) { destroy(); copy_from(o); } return *this; }
+    Value(Value&& o) noexcept { steal(o); }
+    Value& operator=(Value&& o) noexcept { if (this != &o) { destroy(); steal(o); } return *this; }
+
+    static Value nil() { return Value(); }
+    static Value boolean(bool b) { Value v; v.kind_ = Bool; v.u_.b = b; return v; }
+    static Value i64(int64_t i) { Value v; v.kind_ = I64; v.u_.i = i; return v; }
+    static Value f64(double f) { Value v; v.kind_ = F64; v.u_.f = f; return v; }
+    static Value str(std::string_view s) {
+        Value v;
+        v.kind_ = Str;
+        if (s.size() <= kSso) { std::memcpy(v.u_.sso, s.data(), s.size()); v.sso_n_ = (uint8_t)s.size(); }
+        else { v.own_ = true; v.u_.s = new std::string(s); }
+        return v;
+    }
+    // Non-owning string (points into a const pool / request buffer).
+    static Value str_view(std::string_view s) { Value v; v.kind_ = Str; v.u_.view = {s.data(), s.size()}; return v; }
+    // Non-owning bytes view.
+    static Value bytes(std::string_view s) { Value v; v.kind_ = Bytes; v.u_.view = {s.data(), s.size()}; return v; }
+    static Value arr();
+    static Value obj();
+
+    Kind kind() const { return kind_; }
+    bool is(Kind k) const { return kind_ == k; }
+
+    int64_t as_i64() const { return kind_ == I64 ? u_.i : (kind_ == F64 ? (int64_t)u_.f : 0); }
+    double as_f64() const { return kind_ == F64 ? u_.f : (double)(kind_ == I64 ? u_.i : 0); }
+    bool as_bool() const { return kind_ == Bool ? u_.b : false; }
+
+    std::string_view as_str() const {
+        if (kind_ != Str && kind_ != Bytes) return {};
+        if (own_) return std::string_view(*u_.s);
+        if (sso_n_) return std::string_view(u_.sso, sso_n_);
+        return u_.view.d ? std::string_view(u_.view.d, u_.view.n) : std::string_view();
+    }
+
+    // Arrays / objects (bodies live after the ValueVec/ValueObj boxes).
+    size_t size() const;
+    const Value* arr_at(size_t i) const;
+    const Value* obj_at(size_t i) const;
+    const std::string& obj_key(size_t i) const;
+    const Value* find(const std::string_view k) const;
+    void push(Value&& v);
+    void set(std::string key, Value v);
+
+    ValueKind value_kind() const {
+        static constexpr ValueKind M[] = { ValueKind::Null, ValueKind::Bool, ValueKind::I64,
+                                           ValueKind::F64, ValueKind::Str, ValueKind::Bytes,
+                                           ValueKind::Arr, ValueKind::Obj };
+        return M[kind_];
+    }
+
+private:
+    union U {
+        U() {}
+        int64_t i;
+        double f;
+        bool b;
+        char sso[kSso];
+        std::string* s;                          // owned long string
+        struct { const char* d; size_t n; } view; // non-owning view
+        ValueVec* v;
+        ValueObj* o;
+    };
+
+    Kind kind_ = Null;
+    uint8_t sso_n_ = 0;
+    bool own_ = false;
+    U u_;
+
+    // Out-of-line (need complete ValueVec/ValueObj): see after the boxes.
+    void destroy() noexcept;
+    void copy_from(const Value& o);
+    void steal(Value& o) noexcept {
+        kind_ = o.kind_; sso_n_ = o.sso_n_; own_ = o.own_; u_ = o.u_;
+        o.kind_ = Null; o.sso_n_ = 0; o.own_ = false;
+    }
+};
+
+// Owned array box: inline slots for the common small case (0 heap growth),
+// falls back to a std::vector only past kSmall elements. Lives behind a
+// pointer inside Value so `Value` stays copyable at any depth.
+struct ValueVec {
+    static constexpr size_t kSmall = 4;
+    Value small_[kSmall];
+    size_t n_ = 0;
+    std::vector<Value> heap_;
+    Value* data() { return n_ <= kSmall ? small_ : heap_.data(); }
+    const Value* data() const { return n_ <= kSmall ? small_ : heap_.data(); }
+    size_t size() const { return n_; }
+};
+
+// Owned object box with the same small-vector behaviour; keys use
+// std::string's own SSO (short keys never allocate).
+struct ValueObj {
+    static constexpr size_t kSmall = 4;
+    std::pair<std::string, Value> small_[kSmall];
+    size_t n_ = 0;
+    std::vector<std::pair<std::string, Value>> heap_;
+    std::pair<std::string, Value>* data() { return n_ <= kSmall ? small_ : heap_.data(); }
+    const std::pair<std::string, Value>* data() const { return n_ <= kSmall ? small_ : heap_.data(); }
+    size_t size() const { return n_; }
+};
+
+// Out-of-line members that need the complete box types.
+inline void Value::destroy() noexcept {
+    if (own_) delete u_.s;
+    if (kind_ == Arr) delete u_.v;
+    if (kind_ == Obj) delete u_.o;
+    kind_ = Null; sso_n_ = 0; own_ = false;
+}
+inline Value Value::arr() { Value v; v.kind_ = Arr; v.u_.v = new ValueVec(); return v; }
+inline Value Value::obj() { Value v; v.kind_ = Obj; v.u_.o = new ValueObj(); return v; }
+inline void Value::copy_from(const Value& o) {
+    kind_ = o.kind_; sso_n_ = o.sso_n_; own_ = o.own_;
+    switch (kind_) {
+        case Str:
+            if (own_) u_.s = new std::string(*o.u_.s);
+            else if (sso_n_) { std::memcpy(u_.sso, o.u_.sso, sso_n_); }
+            else u_.view = o.u_.view;
+            break;
+        case Bytes: u_.view = o.u_.view; break;
+        case Arr: u_.v = new ValueVec(*o.u_.v); break;
+        case Obj: u_.o = new ValueObj(*o.u_.o); break;
+        default: u_ = o.u_; break;  // scalar copy
+    }
+}
+inline size_t Value::size() const { return kind_ == Arr ? u_.v->size() : (kind_ == Obj ? u_.o->size() : 0); }
+inline const Value* Value::arr_at(size_t i) const { return kind_ == Arr && i < u_.v->size() ? u_.v->data() + i : nullptr; }
+inline const Value* Value::obj_at(size_t i) const { return kind_ == Obj && i < u_.o->size() ? &u_.o->data()[i].second : nullptr; }
+inline const std::string& Value::obj_key(size_t i) const { return u_.o->data()[i].first; }
+inline const Value* Value::find(const std::string_view k) const {
+    if (kind_ != Obj) return nullptr;
+    for (size_t i = 0; i < u_.o->size(); i++)
+        if (u_.o->data()[i].first == k) return &u_.o->data()[i].second;
+    return nullptr;
+}
+inline void Value::push(Value&& v) {
+    if (kind_ != Arr) { destroy(); kind_ = Arr; u_.v = new ValueVec(); }
+    ValueVec& box = *u_.v;
+    if (box.n_ < ValueVec::kSmall) { box.small_[box.n_++] = std::move(v); return; }
+    if (box.heap_.empty()) {                       // first spill: migrate inline slots
+        for (size_t i = 0; i < ValueVec::kSmall; i++) box.heap_.push_back(std::move(box.small_[i]));
+        box.heap_.push_back(std::move(v));
+        box.n_ = ValueVec::kSmall + 1;
+    } else {
+        box.heap_.push_back(std::move(v));
+        box.n_++;
+    }
+}
+inline void Value::set(std::string key, Value v) {
+    if (kind_ != Obj) { destroy(); kind_ = Obj; u_.o = new ValueObj(); }
+    ValueObj& box = *u_.o;
+    for (size_t i = 0; i < box.size(); i++)
+        if (box.data()[i].first == key) { box.data()[i].second = std::move(v); return; }
+    if (box.n_ < ValueObj::kSmall) { box.small_[box.n_++] = {std::move(key), std::move(v)}; return; }
+    if (box.heap_.empty()) {
+        for (size_t i = 0; i < ValueObj::kSmall; i++) box.heap_.push_back(std::move(box.small_[i]));
+        box.heap_.push_back({std::move(key), std::move(v)});
+        box.n_ = ValueObj::kSmall + 1;
+    } else {
+        box.heap_.push_back({std::move(key), std::move(v)});
+        box.n_++;
+    }
+}
+
+inline const char* value_kind_name(Value::Kind k) {
+    switch (k) {
+        case Value::Null: return "Null";
+        case Value::Bool: return "Bool";
+        case Value::I64: return "I64";
+        case Value::F64: return "F64";
+        case Value::Str: return "Str";
+        case Value::Bytes: return "Bytes";
+        case Value::Arr: return "Arr";
+        case Value::Obj: return "Obj";
+    }
+    return "?";
+}
+
+inline size_t value_size(const Value& v) {
+    switch (v.kind()) {
+        case Value::Null: return 4;
+        case Value::Bool: return v.as_bool() ? 4 : 5;
+        case Value::I64: {
+            int64_t x = v.as_i64();
+            unsigned long long u = x < 0 ? 0ULL - (unsigned long long)x : (unsigned long long)x;
+            size_t n = x < 0 ? 1 : 0;
+            do { n++; u /= 10; } while (u);
+            return n;
+        }
+        case Value::F64: {
+            char b[48];
+            int n = std::snprintf(b, sizeof b, "%.15g", v.as_f64());
+            if (n < 0) n = 0;
+            int dot = 0;
+            for (int i = 0; i < n; i++) if (b[i] == '.' || b[i] == 'e' || b[i] == 'E') dot = 1;
+            return (size_t)n + (dot ? 0 : 2);
+        }
+        case Value::Str:
+        case Value::Bytes: return 2 + json_escaped_length(v.as_str());
+        case Value::Arr: {
+            size_t n = 1;
+            for (size_t k = 0; k < v.size(); k++) { if (k) n++; n += value_size(*v.arr_at(k)); }
+            return n + 1;
+        }
+        case Value::Obj: {
+            size_t n = 1;
+            for (size_t k = 0; k < v.size(); k++) {
+                if (k) n++;
+                n += 1 + json_escaped_length(std::string_view(v.obj_key(k))) + 2;
+                n += value_size(*v.obj_at(k));
+            }
+            return n + 1;
+        }
+    }
+    return 0;
+}
+
+template <typename Sink>
+inline void value_to_json(const Value& v, Sink& out) {
+    switch (v.kind()) {
+        case Value::Null: out.append("null", 4); break;
+        case Value::I64: json_append_int(out, v.as_i64()); break;
+        case Value::F64: json_append_double(out, v.as_f64()); break;
+        case Value::Bool: out.append(v.as_bool() ? "true" : "false", v.as_bool() ? 4 : 5); break;
+        case Value::Str:
+        case Value::Bytes:
+            out.append("\"", 1);
+            json_escape_to(v.as_str(), out);
+            out.append("\"", 1);
+            break;
+        case Value::Arr: {
+            out.append("[", 1);
+            for (size_t k = 0; k < v.size(); k++) { if (k) out.append(",", 1); value_to_json(*v.arr_at(k), out); }
+            out.append("]", 1);
+            break;
+        }
+        case Value::Obj: {
+            out.append("{", 1);
+            for (size_t k = 0; k < v.size(); k++) {
+                if (k) out.append(",", 1);
+                out.append("\"", 1);
+                json_escape_to(std::string_view(v.obj_key(k)), out);
+                out.append("\":", 2);
+                value_to_json(*v.obj_at(k), out);
+            }
+            out.append("}", 1);
+            break;
+        }
+    }
+}
+
+inline std::string value_to_json_string(const Value& v) {
+    std::string out;
+    out.reserve(value_size(v));
+    value_to_json<std::string>(v, out);
+    return out;
+}
+
+// ---- ms2.0 immutable constant pool ---------------------------------------
+// Append-only string interning with stable addresses (thread-safe reads via
+// the returned const char*; writes take a lock). Used at boot to land
+// immutable reason/literal strings outside per-request heaps.
+class ConstPool {
+public:
+    const char* intern(std::string_view s) {
+        std::lock_guard<std::mutex> lk(m_);
+        auto it = idx_.find(s);
+        if (it != idx_.end()) return it->second;
+        auto store = std::make_unique<std::string>(s);
+        const char* p = store->data();
+        idx_.emplace(std::string_view(*store), p);
+        by_id_.push_back(p);
+        strings_.push_back(std::move(store));
+        return p;
+    }
+    std::string_view get(size_t id) const {
+        if (id < by_id_.size()) return by_id_[id];
+        return {};
+    }
+    const char* cstr(size_t id) const {
+        if (id < by_id_.size()) return by_id_[id];
+        return "";
+    }
+    Value v_str(std::string_view s) { return Value::str_view(intern(s)); }
+    size_t size() const { return by_id_.size(); }
+    void freeze() {
+        std::lock_guard<std::mutex> lk(m_);
+        idx_.clear(); // immutable now: interned pointers stay stable w/o the map
+    }
+private:
+    mutable std::mutex m_;
+    std::vector<std::unique_ptr<std::string>> strings_;          // stable addresses
+    std::unordered_map<std::string_view, const char*> idx_;       // build-time dedup
+    std::vector<const char*> by_id_;                              // post-freeze reads
+};
+
+inline ConstPool& const_pool() { static ConstPool p; return p; }
+
+// ---- ms2.0 bridge: hs::Val <-> Value --------------------------------
+inline Value value_from_val(const Val& v) {
+    switch (v.t) {
+        case Val::T::Nil: return Value::nil();
+        case Val::T::Bool: return Value::boolean(v.bv);
+        case Val::T::Int: return Value::i64(v.iv);
+        case Val::T::Flt: return Value::f64(v.fv);
+        case Val::T::Str: return Value::str(std::string_view(v.sv));
+        case Val::T::Arr: {
+            Value a = Value::arr();
+            for (auto& e : v.arr) a.push(value_from_val(e));
+            return a;
+        }
+        case Val::T::Obj: {
+            Value o = Value::obj();
+            for (auto& kv : v.obj) o.set(kv.first, value_from_val(kv.second));
+            return o;
+        }
+    }
+    return Value::nil();
+}
+
+inline Val val_from_value(const Value& v) {
+    switch (v.kind()) {
+        case Value::Null: return Val::nil();
+        case Value::Bool: return Val::boolean(v.as_bool());
+        case Value::I64: return Val::int_(v.as_i64());
+        case Value::F64: return Val::flt(v.as_f64());
+        case Value::Str: return Val::text(std::string(v.as_str()));
+        case Value::Bytes: return Val::text(std::string(v.as_str()));
+        case Value::Arr: {
+            std::vector<Val> a;
+            a.reserve(v.size());
+            for (size_t i = 0; i < v.size(); i++) a.push_back(val_from_value(*v.arr_at(i)));
+            return Val::list(std::move(a));
+        }
+        case Value::Obj: {
+            std::vector<std::pair<std::string, Val>> o;
+            o.reserve(v.size());
+            for (size_t i = 0; i < v.size(); i++) o.emplace_back(v.obj_key(i), val_from_value(*v.obj_at(i)));
+            return Val::object(std::move(o));
+        }
+    }
+    return Val::nil();
+}
 
 // JSON parser (zero-copy: works directly on stored bytes)
 inline Val parse_json(std::string_view s) {
