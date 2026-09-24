@@ -74,6 +74,11 @@ iterate a mixed collection never observe a dangling payload.
 - Array/object bodies live behind a heap box so `Value` stays shallow-copyable
   at any nesting depth; the 4-slot inline array is the "small array" case the
   spec asks M2.3 to optimize iteration for.
+- ms2.3 iteration: `values()`/`pairs()` expose the contiguous element run, and
+  `value_size`/`value_to_json`/`val_from_value`/`find` hoist that pointer, so
+  per-element `at()` bounds-checks are gone from the loops; repeated encoding
+  of an inline (or spilled) array or object into a reused sink is
+  allocation-free (locked by fixtures 027–029).
 - SSO was raised 14 → 24 in ms2.2 (fixtures 024–026) and re-pinned the layout
   here: `sizeof 32, align 8, sso 24`. 023 pins every measured number, so any
   future layout drift fails the suite deliberately, never silently.

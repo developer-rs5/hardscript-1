@@ -1,0 +1,4 @@
+cpp
+pool pre-freeze: items=10 strings=2 bytes=522 table=["method","path",200,204,0.5,true,false,[],{},-7]
+pool post-freeze: table=["method","path",200,204,0.5,true,false,[],{},-7]
+ok

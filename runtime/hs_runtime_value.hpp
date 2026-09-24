@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
@@ -630,23 +631,32 @@ inline std::string value_to_json_string(const Value& v) {
     return out;
 }
 
-// ---- ms2.0 immutable constant pool ---------------------------------------
-// Append-only string interning with stable addresses (thread-safe reads via
-// the returned const char*; writes take a lock). Used at boot to land
-// immutable reason/literal strings outside per-request heaps.
+// ---- ms2.0/ms2.4 immutable constant pool --------------------------------
+// Append-only interning with stable addresses (thread-safe reads via the
+// returned pointer; writes take a lock). ms2.0 interned strings only; ms2.4
+// generalizes it to every constant the engine can dedup at boot: strings,
+// ints, doubles, booleans, and the empty array/object singletons. Entries are
+// stored in `std::deque`s so pooled addresses (string buffers, Value slots)
+// are stable for the process lifetime regardless of later internals. The
+// legacy `intern()` -> `const char*` contract is preserved: pooled strings
+// are owned and NUL-terminated. After `freeze()`, the dedup index is dropped
+// (matching ms2.0) and reads need no lock; pointers stay valid.
 class ConstPool {
 public:
-    const char* intern(std::string_view s) {
-        std::lock_guard<std::mutex> lk(m_);
-        auto it = idx_.find(s);
-        if (it != idx_.end()) return it->second;
-        auto store = std::make_unique<std::string>(s);
-        const char* p = store->data();
-        idx_.emplace(std::string_view(*store), p);
-        by_id_.push_back(p);
-        strings_.push_back(std::move(store));
-        return p;
-    }
+    // Legacy string intern: returns the pooled, process-stable, NUL-terminated
+    // char*. First intern of a string allocates it; repeats are a map lookup
+    // that allocates nothing.
+    const char* intern(std::string_view s) { return intern_str(s)->as_str().data(); }
+    // Pooled Values; dedup across all kinds, zeros-of-work for repeats.
+    const Value* intern_str(std::string_view s);
+    const Value* intern_i64(int64_t i);
+    const Value* intern_f64(double f);
+    const Value* intern_bool(bool b);
+    const Value* intern_empty_array();
+    const Value* intern_empty_object();
+    // Kind-dispatch interning; non-poolable kinds (non-empty containers,
+    // Function, Bytes) deep-copy without dedup.
+    const Value* intern_value(const Value& v);
     std::string_view get(size_t id) const {
         if (id < by_id_.size()) return by_id_[id];
         return {};
@@ -656,17 +666,137 @@ public:
         return "";
     }
     Value v_str(std::string_view s) { return Value::str_view(intern(s)); }
-    size_t size() const { return by_id_.size(); }
-    void freeze() {
-        std::lock_guard<std::mutex> lk(m_);
-        idx_.clear(); // immutable now: interned pointers stay stable w/o the map
-    }
+    size_t size() const { return by_id_.size(); }   // legacy: interned strings
+    size_t count_items() const { return vals_.size(); }  // all pooled values
+    size_t bytes() const;                          // logical payload bytes pooled
+    std::string table_json() const;                // compile-time table snapshot
+    // Seal the pool: pointers stay valid forever and the dedup map is kept
+    // (unlike ms2.0, which dropped the map) so re-interning an existing
+    // constant after freeze still returns the exact same slot — the table is
+    // immutable but remains de-duplicated.
+    void freeze() { std::lock_guard<std::mutex> lk(m_); frozen_ = true; }
+
 private:
+    static uint64_t mix(uint64_t h) {
+        h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull; h ^= h >> 33;
+        return h;
+    }
+    uint64_t fp_str(std::string_view s) const {
+        uint64_t h = 1469598103934665603ull;
+        for (char c : s) h = (h ^ (uint8_t)c) * 1099511628211ull;
+        return mix(h ^ 1);
+    }
+    const Value* put(Value&& v, uint64_t fp) {
+        vals_.push_back(std::move(v));
+        size_t id = vals_.size() - 1;
+        idx_.emplace(fp, id);
+        return &vals_[id];
+    }
+    const Value* intern_unpooled(const Value& v);
     mutable std::mutex m_;
-    std::vector<std::unique_ptr<std::string>> strings_;          // stable addresses
-    std::unordered_map<std::string_view, const char*> idx_;       // build-time dedup
-    std::vector<const char*> by_id_;                              // post-freeze reads
+    bool frozen_ = false;
+    std::deque<std::string> owned_;                // NUL-terminated, stable buffers
+    std::deque<Value> vals_;                       // stable pooled Value slots
+    std::unordered_map<uint64_t, size_t> idx_;      // fingerprint -> vals_ index
+    std::vector<const char*> by_id_;                 // legacy string ids, order-preserving
 };
+
+inline const Value* ConstPool::intern_str(std::string_view s) {
+    std::lock_guard<std::mutex> lk(m_);
+    uint64_t fp = fp_str(s);
+    auto it = idx_.find(fp);
+    if (it != idx_.end()) return &vals_[it->second];
+    owned_.push_back(std::string(s));
+    vals_.push_back(Value::str_view(owned_.back()));
+    size_t id = vals_.size() - 1;
+    by_id_.push_back(owned_.back().data());
+    idx_.emplace(fp, id);
+    return &vals_[id];
+}
+inline const Value* ConstPool::intern_i64(int64_t i) {
+    std::lock_guard<std::mutex> lk(m_);
+    uint64_t fp = mix(((uint64_t)ValueKind::Int << 8) | 2) ^ (uint64_t)i;
+    auto it = idx_.find(fp);
+    if (it != idx_.end()) return &vals_[it->second];
+    return put(Value::i64(i), fp);
+}
+inline const Value* ConstPool::intern_f64(double f) {
+    std::lock_guard<std::mutex> lk(m_);
+    uint64_t bits; std::memcpy(&bits, &f, sizeof bits);
+    uint64_t fp = mix(((uint64_t)ValueKind::Float << 8) | 3) ^ bits;
+    auto it = idx_.find(fp);
+    if (it != idx_.end()) return &vals_[it->second];
+    return put(Value::f64(f), fp);
+}
+inline const Value* ConstPool::intern_bool(bool b) {
+    std::lock_guard<std::mutex> lk(m_);
+    uint64_t fp = mix(((uint64_t)ValueKind::Bool << 8) | 4) ^ (b ? 1u : 0u);
+    auto it = idx_.find(fp);
+    if (it != idx_.end()) return &vals_[it->second];
+    return put(Value::boolean(b), fp);
+}
+inline const Value* ConstPool::intern_empty_array() {
+    std::lock_guard<std::mutex> lk(m_);
+    uint64_t fp = mix(((uint64_t)ValueKind::Array << 8) | 5);
+    auto it = idx_.find(fp);
+    if (it != idx_.end()) return &vals_[it->second];
+    return put(Value::arr(), fp);
+}
+inline const Value* ConstPool::intern_empty_object() {
+    std::lock_guard<std::mutex> lk(m_);
+    uint64_t fp = mix(((uint64_t)ValueKind::Object << 8) | 6);
+    auto it = idx_.find(fp);
+    if (it != idx_.end()) return &vals_[it->second];
+    return put(Value::obj(), fp);
+}
+inline const Value* ConstPool::intern_value(const Value& v) {
+    switch (v.kind()) {
+        case ValueKind::String: return intern_str(v.as_str());
+        case ValueKind::Int: return intern_i64(v.as_i64());
+        case ValueKind::Float: return intern_f64(v.as_f64());
+        case ValueKind::Bool: return intern_bool(v.as_bool());
+        case ValueKind::Array: return v.size() ? intern_unpooled(v) : intern_empty_array();
+        case ValueKind::Object: return v.size() ? intern_unpooled(v) : intern_empty_object();
+        case ValueKind::Nil:
+        case ValueKind::Bytes:
+        case ValueKind::Function:
+            return intern_unpooled(v);
+    }
+    return intern_unpooled(v);
+}
+inline const Value* ConstPool::intern_unpooled(const Value& v) {
+    // Deep copy through an owned value; not deduped. Strings become owned
+    // copies so view-into-input safety is guaranteed.
+    Value owned = v;
+    if (owned.is(ValueKind::String) || owned.is(ValueKind::Bytes)) owned = Value::str(v.as_str());
+    std::lock_guard<std::mutex> lk(m_);
+    vals_.push_back(std::move(owned));
+    return &vals_[vals_.size() - 1];
+}
+inline size_t ConstPool::bytes() const {
+    size_t n = 0;
+    for (const Value& v : vals_) {
+        switch (v.kind()) {
+            case ValueKind::String: n += 32 + v.as_str().size(); break;   // object + content
+            case ValueKind::Array: n += sizeof(ValueVec); break;
+            case ValueKind::Object: n += sizeof(ValueObj); break;
+            default: break;   // ints/doubles/bools live inline in the Value
+        }
+    }
+    return n;
+}
+inline std::string ConstPool::table_json() const {
+    std::string out;
+    out.reserve(64);
+    out.append("[", 1);
+    for (size_t i = 0; i < vals_.size(); i++) {
+        if (i) out.append(",", 1);
+        // render each pooled value through the encoder (no re-interning)
+        value_to_json(vals_[i], out);
+    }
+    out.append("]", 1);
+    return out;
+}
 
 inline ConstPool& const_pool() { static ConstPool p; return p; }
 
