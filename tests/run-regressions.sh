@@ -7,6 +7,11 @@
 #       ok                    build must succeed (exit 0)
 #         GET /path = BODY    then run the server and assert the route body
 #       err\nMSG:<substr>     build must fail (exit 1) with this message text
+#       esc                   build must succeed; the rest of the file is the
+#                             exact escape-analysis report printed by
+#                             `hard build` with HARD_ESCAPE_REPORT=1
+#       cpp                   .cpp fixture compiled against the runtime
+#                             headers; the rest is its exact expected stdout
 #
 # Exit 0 if every regression passes, non-zero otherwise.
 set -u
@@ -70,6 +75,31 @@ for f in "$DIR"/*.hard; do
         srv_rc=$?
         if [ "$srv_rc" -ne 0 ]; then
             echo "regression: FAIL ${base##*/} (server exit rc=$srv_rc, sanitizer finding?)"
+            FAILED=$((FAILED+1))
+        fi
+        rm -rf "$TMP"
+        continue
+    fi
+
+    # esc case: escape-analysis report mode. First exp line is "esc";
+    # the rest is the exact expected report (one line per classified local
+    # binding plus the summary line), emitted by `hard build` under
+    # HARD_ESCAPE_REPORT=1. The build must succeed (g++ clean) too.
+    if [ "$kind" = "esc" ]; then
+        cp "$f" "$TMP/prog.hard"
+        out=$(cd "$TMP" && HARD_ESCAPE_REPORT=1 "$HARD" build prog.hard 2>&1)
+        ec=$?
+        if [ "$ec" -ne 0 ]; then
+            echo "regression: FAIL ${base##*/} (build failed: $(echo "$out" | head -1))"
+            FAILED=$((FAILED+1))
+            rm -rf "$TMP"
+            continue
+        fi
+        want=$(printf '%s\n' "${lines[@]:1}")
+        if [ "$out" = "$want" ]; then
+            echo "regression: PASS ${base##*/} ($(echo "$out" | tr '\n' ' '))"
+        else
+            echo "regression: FAIL ${base##*/} (report mismatch: got '$(echo "$out" | tr '\n' ' ')', want '$(echo "$want" | tr '\n' ' ')')"
             FAILED=$((FAILED+1))
         fi
         rm -rf "$TMP"

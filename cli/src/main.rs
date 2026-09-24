@@ -159,9 +159,40 @@ fn cmd_new(args: &[String]) {
 fn cmd_build(rest: &[String]) {
     let (target, _) = find_target(rest);
     match compile(target.as_path()) {
-        Ok((_, bin)) => println!("built {}", bin.display()),
+        Ok((_, bin)) => {
+            if std::env::var("HARD_ESCAPE_REPORT").is_ok() {
+                match report_escape(target.as_path()) {
+                    Ok(lines) => {
+                        for l in lines {
+                            println!("{l}");
+                        }
+                    }
+                    Err(diags) => report(&diags),
+                }
+            } else {
+                println!("built {}", bin.display());
+            }
+        }
         Err(diags) => report(&diags),
     }
+}
+
+/// Escape-analysis report mode (`HARD_ESCAPE_REPORT=1`): prints one line per
+/// classified local binding plus a summary, instead of the build banner.
+/// The report is derived from the same pipeline as the generated C++ but
+/// never alters it.
+fn report_escape(target: &Path) -> Result<Vec<String>, Vec<Diag>> {
+    let src = match std::fs::read_to_string(target) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(vec![Diag::new_nospan(
+                hs_compiler::ErrorKind::Codegen,
+                format!("cannot read {}: {e}", target.display()),
+            )])
+        }
+    };
+    let rep = hs_compiler::escape_report(&src, target.to_str().unwrap_or("").to_string())?;
+    Ok(rep.to_lines())
 }
 
 fn cmd_run(rest: &[String]) {

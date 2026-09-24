@@ -11,6 +11,7 @@ pub mod ast;
 pub mod codegen;
 pub mod diagnostics;
 pub mod docs;
+pub mod escape;
 pub mod error;
 pub mod fmt;
 pub mod lexer;
@@ -63,6 +64,16 @@ pub fn frontend(src: &str, path: impl Into<String>) -> Result<Program, Vec<Diag>
             .map(|d| d.with_location(path.clone()))
             .collect()),
     }
+}
+
+/// Run the escape analysis over a source program (frontend + optimizer, the
+/// same AST shape codegen would see) and return its report. Pure — never
+/// changes emitted C++ — exposed for tooling such as `hard build` report mode.
+pub fn escape_report(src: &str, path: impl Into<String>) -> Result<escape::EscapeReport, Vec<Diag>> {
+    let path = path.into();
+    let mut prog = frontend(src, path.clone())?;
+    let _ = optimizer::run(&mut prog);
+    Ok(escape::analyze(&prog))
 }
 
 /// Full pipeline: parse -> typecheck -> codegen. Returns the generated C++
