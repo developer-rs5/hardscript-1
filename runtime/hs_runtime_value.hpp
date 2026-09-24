@@ -976,6 +976,138 @@ inline Val parse_json(std::string_view s) {
 inline Val parse_json(const std::string& s) { return parse_json(std::string_view(s)); }
 
 // ===========================================================================
+// ms2.6 value-engine JSON parser
+//
+// Same grammar, number handling and error strings as `parse_json`, but the
+// result is a value-engine `Value`: string tokens pack into SSO (<= 24 bytes,
+// zero heap) and objects/arrays use the small-vector boxes, so a typical
+// request body like {"a":1,"b":"hello","c":[1,2]} costs exactly one
+// object-box allocation (the nested array rides inline).
+// ===========================================================================
+inline Value parse_json_value(std::string_view s) {
+    // Recursive descent over a cursor; member functions (not std::function)
+    // so parsing costs zero per-call stack/heap overhead beyond the parsed
+    // containers themselves.
+    struct P {
+        size_t p = 0;
+        std::string_view s;
+
+        void ws() {
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+        }
+        std::string parse_str() {
+            if (p >= s.size() || s[p] != '"') throw std::runtime_error("expected JSON string");
+            p++;
+            std::string out;
+            while (p < s.size() && s[p] != '"') {
+                char c = s[p];
+                if (c == '\\') {
+                    p++;
+                    char e = s[p++];
+                    switch (e) {
+                        case '"': out += '"'; break;
+                        case '\\': out += '\\'; break;
+                        case '/': out += '/'; break;
+                        case 'b': out += '\b'; break;
+                        case 'f': out += '\f'; break;
+                        case 'n': out += '\n'; break;
+                        case 'r': out += '\r'; break;
+                        case 't': out += '\t'; break;
+                        case 'u': {
+                            if (p + 4 > s.size()) throw std::runtime_error("bad \\u escape");
+                            unsigned cp = 0;
+                            for (int i = 0; i < 4; i++) {
+                                char h = s[p + i];
+                                cp = (cp << 4) | (h >= 'a' ? (h - 'a' + 10) : (h >= 'A' ? (h - 'A' + 10) : (h - '0')));
+                            }
+                            p += 4;
+                            if (cp < 0x80) out += (char)cp;
+                            else if (cp < 0x800) { out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F)); }
+                            else { out += (char)(0xE0 | (cp >> 12)); out += (char)(0x80 | ((cp >> 6) & 0x3F)); out += (char)(0x80 | (cp & 0x3F)); }
+                            break;
+                        }
+                        default: throw std::runtime_error("bad JSON escape");
+                    }
+                } else { out += c; p++; }
+            }
+            if (p >= s.size()) throw std::runtime_error("unterminated JSON string");
+            p++;
+            return out;
+        }
+        Value parse() {
+            ws();
+            if (p >= s.size()) throw std::runtime_error("unexpected end of JSON");
+            char c = s[p];
+            if (c == '{') {
+                p++;
+                Value obj = Value::obj();
+                ws();
+                if (p < s.size() && s[p] == '}') { p++; return obj; }
+                while (true) {
+                    ws();
+                    std::string k = parse_str();
+                    ws();
+                    if (p >= s.size() || s[p] != ':') throw std::runtime_error("expected ':' in JSON object");
+                    p++;
+                    Value v = parse();
+                    obj.set(std::move(k), std::move(v));
+                    ws();
+                    if (p < s.size() && s[p] == ',') { p++; continue; }
+                    if (p < s.size() && s[p] == '}') { p++; break; }
+                    throw std::runtime_error("expected ',' or '}' in JSON object");
+                }
+                return obj;
+            }
+            if (c == '[') {
+                p++;
+                Value arr = Value::arr();
+                ws();
+                if (p < s.size() && s[p] == ']') { p++; return arr; }
+                while (true) {
+                    arr.push(parse());
+                    ws();
+                    if (p < s.size() && s[p] == ',') { p++; continue; }
+                    if (p < s.size() && s[p] == ']') { p++; break; }
+                    throw std::runtime_error("expected ',' or ']' in JSON array");
+                }
+                return arr;
+            }
+            if (c == '"') return Value::str(parse_str());
+            if (s.compare(p, 4, "true") == 0) { p += 4; return Value::boolean(true); }
+            if (s.compare(p, 5, "false") == 0) { p += 5; return Value::boolean(false); }
+            if (s.compare(p, 4, "null") == 0) { p += 4; return Value::nil(); }
+            if (c == '-' || (c >= '0' && c <= '9')) {
+                size_t start = p;
+                if (c == '-') p++;
+                bool isf = false;
+                while (p < s.size()) {
+                    char d = s[p];
+                    if (d >= '0' && d <= '9') p++;
+                    else if (d == '.' || d == 'e' || d == 'E' || d == '+' || d == '-') { if (d == '.') isf = true; p++; }
+                    else break;
+                }
+                std::string num{s.substr(start, p - start)};
+                if (isf) {
+                    try { return Value::f64(std::stod(num)); }
+                    catch (...) { throw std::runtime_error("invalid number in JSON: " + num); }
+                }
+                try { return Value::i64(std::stoll(num)); }
+                catch (...) {
+                    try { return Value::f64(std::stod(num)); }
+                    catch (...) { throw std::runtime_error("invalid number in JSON: " + num); }
+                }
+            }
+            throw std::runtime_error(std::string("unexpected character in JSON: '") + c + "'");
+        }
+    } cur;
+    cur.s = s;
+    Value v = cur.parse();
+    cur.ws();
+    if (cur.p != s.size()) throw std::runtime_error("trailing data after JSON value");
+    return v;
+}
+
+// ===========================================================================
 // Operators
 // ===========================================================================
 inline Val op_add(const Val& a, const Val& b) {

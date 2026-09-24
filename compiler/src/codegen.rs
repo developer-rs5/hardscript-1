@@ -180,7 +180,7 @@ impl Codegen {
                     "auto __it = req.params.find({});",
                     cstring(&p.name)
                 ));
-                self.wln("if (__it != req.params.end()) return hs::Val::text(__it->second);");
+                self.wln("if (__it != req.params.end()) return hs::Val::text(std::string(__it->second));");
                 self.wln(&format!("std::string __q = req.q({});", cstring(&p.name)));
                 self.wln("if (!__q.empty()) return hs::Val::text(__q);");
                 self.wln("return hs::Val::nil();");

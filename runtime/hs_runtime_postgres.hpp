@@ -249,4 +249,104 @@ inline Val pg_query(int pfd, const std::string& sql) {
     return Val::int_(affected);
 }
 
+// ms2.6 value-engine variant of pg_query: same wire protocol and column/number
+// handling, but rows are engine `Value`s (SSO strings, small-vector boxes).
+inline Value pg_query_value(int pfd, const std::string& sql) {
+    std::string body = sql + '\0';
+    std::string msg;
+    msg += 'Q';
+    msg += (char)0; msg += (char)0; msg += (char)0; msg += (char)(body.size() + 4);
+    msg += body;
+    pg_write_all(pfd, msg);
+    std::vector<std::string> cols;
+    std::vector<Value> rows;
+    int64_t affected = 0;
+    std::string mb;
+    (void)mb;
+    for (;;) {
+        char typ;
+        if (recv(pfd, &typ, 1, MSG_WAITALL) != 1) throw std::runtime_error("postgres: connection lost during query");
+        uint32_t l = pg_read_int32(pfd);
+        std::string payload((size_t)(l - 4), '\0');
+        size_t got = 0;
+        while (got < payload.size()) {
+            ssize_t n = recv(pfd, &payload[got], payload.size() - got, MSG_WAITALL);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        if (typ == 'T') {
+            uint16_t ncols = ((uint16_t)payload[0] << 8) | (uint8_t)payload[1];
+            cols.clear();
+            size_t off = 2;
+            for (int k = 0; k < ncols; k++) {
+                size_t n = 0;
+                while (off + n + 1 <= payload.size() && payload[off + n] != '\0') n++;
+                cols.push_back(payload.substr(off, n));
+                off += n + 1;
+                off += 18;
+            }
+        } else if (typ == 'D') {
+            uint16_t nf = ((uint16_t)payload[0] << 8) | (uint8_t)payload[1];
+            size_t off = 2;
+            Value row = Value::obj();
+            for (int k = 0; k < nf; k++) {
+                int32_t flen = (int32_t)(((uint32_t)payload[off] << 24) | ((uint32_t)payload[off + 1] << 16) | ((uint32_t)payload[off + 2] << 8) | (uint8_t)payload[off + 3]);
+                off += 4;
+                std::string cname = k < (int)cols.size() ? cols[(size_t)k] : ("c" + std::to_string(k));
+                if (flen < 0) {
+                    row.set(std::move(cname), Value::nil());
+                } else {
+                    std::string v = payload.substr(off, (size_t)flen);
+                    off += (size_t)flen;
+                    Value boxed;
+                    std::string d = v;
+                    if (!d.empty()) {
+                        bool allnum = true;
+                        bool dot = false;
+                        for (char cc : d) { if (!(cc >= '0' && cc <= '9')) { if (cc == '.' && !dot) { dot = true; } else { allnum = false; break; } } }
+                        if (allnum && !d.empty()) {
+                            if (dot) boxed = Value::f64(strtod(d.c_str(), nullptr));
+                            else {
+                                if (d.size() > 0 && d[0] == '0' && d.size() > 1) boxed = Value::str(d);
+                                else boxed = Value::i64(strtoll(d.c_str(), nullptr, 10));
+                            }
+                        } else {
+                            boxed = Value::str(d);
+                        }
+                    } else {
+                        boxed = Value::str("");
+                    }
+                    row.set(std::move(cname), std::move(boxed));
+                }
+            }
+            rows.push_back(std::move(row));
+        } else if (typ == 'C') {
+            std::string tag;
+            size_t n = 0;
+            while (n < payload.size() && payload[n] != '\0') n++;
+            tag = payload.substr(0, n);
+            size_t sp = tag.rfind(' ');
+            if (sp != std::string::npos) affected = strtoll(tag.substr(sp + 1).c_str(), nullptr, 10);
+        } else if (typ == 'E') {
+            for (size_t k = 1; k + 1 < payload.size(); k += 2) {
+                if (payload[k] == 'M') {
+                    size_t n = 0;
+                    while (k + 1 + n < payload.size() && payload[k + 1 + n] != '\0') n++;
+                    mb = payload.substr(k + 1, n);
+                    break;
+                }
+            }
+            throw std::runtime_error("postgres error: " + mb);
+        } else if (typ == 'Z') {
+            break;
+        }
+    }
+    if (!cols.empty() || !rows.empty()) {
+        Value arr = Value::arr();
+        for (auto& r : rows) arr.push(std::move(r));
+        return arr;
+    }
+    return Value::i64(affected);
+}
+
 #endif

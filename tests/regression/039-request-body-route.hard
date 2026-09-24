@@ -1,0 +1,8 @@
+// ms2.6: 039-request-body-route.hard — end-to-end request-path integration:
+// a route param flows through the view-based params map, and the request body
+// param is parsed once via req.json() (engine parse, memoized). Exercises the
+// full build/run binary with an empty POST body.
+app @3031
+POST "/echo/:tag" :: (tag = Str, body = body) {
+    <- { "tag": tag, "keys": json.keys(body) }
+}

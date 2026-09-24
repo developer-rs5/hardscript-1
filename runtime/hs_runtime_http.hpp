@@ -79,7 +79,10 @@ struct Request {
     std::string_view query;   // raw query string — view into conn buffer
     std::string_view body;    // request body — view into conn buffer
     std::vector<Hdr> headers; // lowercased-key lookup via fold hashing
-    std::map<std::string, std::string> params;
+    // ms2.6: param map is now view-based. Keys point into the route pattern
+    // (process lifetime), values point into the request path — so dispatch and
+    // handler entry cost no per-param heap allocation.
+    std::map<std::string_view, std::string_view> params;
     // ms1.6: zero-copy param views filled by the router (values point into
     // req.path, valid for the duration of dispatch).
     std::pair<std::string_view, std::string_view> pv[16] = {};
@@ -147,16 +150,37 @@ struct Request {
         }
         return "";
     }
+    // ms2.6: the request body is parsed once, into a value-engine Value
+    // (SSO strings, small-vector containers). `json()` keeps the legacy Val
+    // signature as a compatibility adapter over the cached engine value.
+    Value json_value() const;
     Val json() const {
         if (body.empty()) return Val::object({});
-        return parse_json(body);
+        return val_from_value(json_value());
     }
     std::string form(const std::string& name) const {
         Request tmp;
         tmp.query = body;
         return tmp.q(name);
     }
+
+private:
+    // ms2.6: memoized engine parse of the request body (lazy, once per
+    // request — repeated json()/json_value() calls never re-parse).
+    mutable Value json_engine_;
+    mutable bool json_parsed_ = false;
 };
+
+// Lazy, memoized engine-Value parse of the request body. The empty body
+// yields an empty object (matching the legacy json() contract). Defined
+// after the Request struct so it can touch the cache members.
+inline Value Request::json_value() const {
+    if (!json_parsed_) {
+        json_engine_ = body.empty() ? Value::obj() : parse_json_value(body);
+        json_parsed_ = true;
+    }
+    return json_engine_;
+}
 
 struct Response {
     int status = 200;
@@ -446,7 +470,7 @@ struct Server {
         int ri = -1;
         if (trie_walk(0, got, gn, 0, mid, vp, vpn, ri)) {
             for (size_t k = 0; k < vpn; k++)
-                req.params[std::string(vp[k].first)] = std::string(vp[k].second);
+                req.params[vp[k].first] = vp[k].second;   // ms2.6: view-backed map, no copies
             req.pv_n = vpn;
             for (size_t k = 0; k < vpn; k++) req.pv[k] = vp[k];
             return ri;
@@ -503,7 +527,7 @@ struct Server {
         out.set("headers", h);
         if (r.has_json) out.set("body", std::move(r.json_v));
         else if (!r.body.empty()) {
-            try { out.set("body", parse_json(r.body)); }
+            try { out.set("body", val_from_value(parse_json_value(r.body))); }
             catch (...) { out.set("body", Val::text(r.body)); }
         }
         return out;
