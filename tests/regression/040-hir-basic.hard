@@ -1,0 +1,17 @@
+bring http
+app @3031
+
+items ::= [1, 2, 3]
+
+calc double(Int x) => Int {
+    y <- x * 2
+    <- y
+}
+
+GET "/echo/:tag" :: (tag = Str, body = body) {
+    n <- tag
+    ?(n == "go") {
+        <- { tag: n }
+    }
+    <- { tag: tag, n: double(42), items: items }
+}

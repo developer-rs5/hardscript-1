@@ -106,6 +106,30 @@ for f in "$DIR"/*.hard; do
         continue
     fi
 
+    # hir case: lower to HIR and compare the pretty printer output to the
+    # expected snapshot (the rest of the file). Deterministic: lowering does
+    # not depend on any external state, so the HIR text must be byte-identical.
+    if [ "$kind" = "hir" ]; then
+        cp "$f" "$TMP/prog.hard"
+        out=$(cd "$TMP" && "$HARD" hir prog.hard 2>&1)
+        ec=$?
+        if [ "$ec" -ne 0 ]; then
+            echo "regression: FAIL ${base##*/} (hir failed: $(echo "$out" | head -1))"
+            FAILED=$((FAILED+1))
+            rm -rf "$TMP"
+            continue
+        fi
+        want=$(printf '%s\n' "${lines[@]:1}")
+        if [ "$out" = "$want" ]; then
+            echo "regression: PASS ${base##*/} ($(echo "$out" | head -1 | tr -d '\n'))"
+        else
+            echo "regression: FAIL ${base##*/} (hir mismatch)"
+            FAILED=$((FAILED+1))
+        fi
+        rm -rf "$TMP"
+        continue
+    fi
+
     # ok case: build, run, assert routes
     cp "$f" "$TMP/prog.hard"
     if ! (cd "$TMP" && "$HARD" build prog.hard) >/dev/null 2>&1; then

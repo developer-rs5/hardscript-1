@@ -1,0 +1,44 @@
+hir
+program
+  bring http @1:1
+  app @3031 @2:1
+  const v#0 "items" = @4:1
+    list #0 @4:11
+      int #1 1 @4:12
+      int #2 2 @4:15
+      int #3 3 @4:18
+  fn #4 "double" -> Int @6:6
+    param v#1 "x" :Int @6:13
+    block #5 @6:6
+      var v#2 "y" = @7:5
+        binary #6 * @7:12
+          ident #7 "x" v#1 @7:10
+          int #8 2 @7:14
+      return @8:5
+        ident #9 "y" v#2 @8:8
+  route #10 "GET /echo/:tag" @11:1
+    param v#3 "tag" :Str @11:22
+    param v#4 "body" [body] @11:33
+    block #11 @11:1
+      var v#5 "n" = @12:5
+        ident #12 "tag" v#3 @12:10
+      if @13:5
+        cond
+          binary #13 == @13:9
+            ident #14 "n" v#5 @13:7
+            str #15 "go" @13:12
+        block #16 @13:5
+          return @14:9
+            obj #17 @14:12
+              key "tag"
+                ident #18 "n" v#5 @14:19
+      return @16:5
+        obj #19 @16:8
+          key "tag"
+            ident #20 "tag" v#3 @16:15
+          key "n"
+            call #21 @16:29
+              ident #22 "double" ? @16:23
+              int #23 42 @16:30
+          key "items"
+            ident #24 "items" v#0 @16:42

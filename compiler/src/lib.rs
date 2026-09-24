@@ -14,6 +14,7 @@ pub mod docs;
 pub mod escape;
 pub mod error;
 pub mod fmt;
+pub mod hir;
 pub mod lexer;
 pub mod optimizer;
 pub mod parser;
@@ -64,6 +65,20 @@ pub fn frontend(src: &str, path: impl Into<String>) -> Result<Program, Vec<Diag>
             .map(|d| d.with_location(path.clone()))
             .collect()),
     }
+}
+
+/// Lower a source program into HIR. Errors surface as diagnostics from the
+/// front end (lex/parse); lowering itself is total for any parsed program.
+pub fn lower_hir(src: &str, path: impl Into<String>) -> Result<hir::HirProgram, Vec<Diag>> {
+    let path = path.into();
+    let prog = frontend(src, path)?;
+    Ok(hir::lower(&prog))
+}
+
+/// Render the HIR for a source file (frontend + lowering + pretty printer).
+/// This is the output of `hard hir` and the snapshot fixtures.
+pub fn hir_string(src: &str, path: impl Into<String>) -> Result<String, Vec<Diag>> {
+    Ok(lower_hir(src, path)?.render())
 }
 
 /// Run the escape analysis over a source program (frontend + optimizer, the

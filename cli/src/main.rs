@@ -72,6 +72,7 @@ fn main() {
         "doctor" => cmd_doctor(rest),
         "add" => cmd_add(rest),
         "bench" => cmd_bench(rest),
+        "hir" => cmd_hir(rest),
         "--version" | "-V" => println!("hard {VERSION}"),
         "--help" | "-h" | "help" => help(),
         other => {
@@ -96,6 +97,7 @@ fn help() {
          \x20 hard add <module>            Add a module reference to hard.toml\n\
          \x20 hard doctor                  Check the toolchain (g++, runtime)\n\
          \x20 hard bench [file]            Release-build and report timings\n\
+         \x20 hard hir   [file]            Print the lowered HIR (debugging)\n\
          \x20 hard help                    Show this help\n\
          \n\
          Files default to main.hard in the current directory."
@@ -314,6 +316,18 @@ fn cmd_add(args: &[String]) {
     write(&toml_path, &content);
     println!("added module '{mod_name}' to hard.toml");
     println!("note: the registry is not live yet; the module list is informational.");
+}
+
+fn cmd_hir(rest: &[String]) {
+    let (target, _) = find_target(rest);
+    let src = match std::fs::read_to_string(&target) {
+        Ok(s) => s,
+        Err(e) => die(&format!("cannot read {}: {e}", target.display())),
+    };
+    match hs_compiler::hir_string(&src, target.to_str().unwrap_or("").to_string()) {
+        Ok(hir) => print!("{hir}"),
+        Err(diags) => report(&diags),
+    }
 }
 
 fn cmd_bench(rest: &[String]) {
