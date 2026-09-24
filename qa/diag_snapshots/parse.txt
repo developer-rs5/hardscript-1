@@ -1,0 +1,4 @@
+error[HS0302]: module 'main' not found
+   --> main.hard:1:0
+    = A `bring "./path"` points at a file that does not exist.
+help: Looked for main.hard (relative to ).

@@ -1,0 +1,8 @@
+app @3000
+model A = a1 [
+  id => Int,
+]
+model A = a2 [
+  id => Int,
+]
+GET "/" :: { <- 1 }

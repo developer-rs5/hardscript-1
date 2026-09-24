@@ -1,0 +1,8 @@
+app @3000
+socket s1 {
+  connect :: { <- 1 }
+}
+socket s1 {
+  connect :: { <- 1 }
+}
+GET "/" :: { <- 1 }

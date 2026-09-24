@@ -1,0 +1,4 @@
+app @3000
+calc f() => Int { <- 1 }
+calc f() => Int { <- 2 }
+GET "/" :: { <- f() }

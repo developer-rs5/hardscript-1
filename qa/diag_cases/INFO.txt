@@ -1,0 +1,6 @@
+# Diagnostics V2 snapshot suite (M3.4.7).
+#
+# One directory per case -> `hard <invoke>` -> stderr (NO_COLOR) compared
+# byte-for-byte against qa/diag_snapshots/<name>.txt. Deterministic 100%:
+# every case below avoids HS0502 (native g++ output embeds build paths) and
+# reaches only parse/type/module diagnostics or lint warnings.
