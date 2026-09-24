@@ -385,6 +385,13 @@ public:
     void push(Value&& v);
     void set(std::string key, Value v);
 
+    // Contiguous element runs for iteration hot paths (ms2.3): array -> its
+    // Values, object -> its key/value pairs. Hoisting the run pointer (and the
+    // small_vs_heap branch) out of the loop removes the per-element
+    // kind-check + bounds-check + branch that the generic at() accessors pay.
+    const Value* values() const;  // out-of-line: needs complete ValueVec
+    const std::pair<std::string, Value>* pairs() const;  // needs complete ValueObj
+
 private:
     enum ST : uint8_t { kOwn = 0x01, kInline = 0x02, kView = 0x04 };
 
@@ -442,6 +449,8 @@ struct ValueObj {
 };
 
 // Out-of-line members that need the complete box types.
+inline const Value* Value::values() const { return kind_ == ValueKind::Array ? u_.v->data() : nullptr; }
+inline const std::pair<std::string, Value>* Value::pairs() const { return kind_ == ValueKind::Object ? u_.o->data() : nullptr; }
 inline void Value::destroy() noexcept {
     if (fl_ & kOwn) delete u_.s;
     if (kind_ == ValueKind::Array) delete u_.v;
@@ -471,8 +480,9 @@ inline const Value* Value::obj_at(size_t i) const { return kind_ == ValueKind::O
 inline const std::string& Value::obj_key(size_t i) const { return u_.o->data()[i].first; }
 inline const Value* Value::find(const std::string_view k) const {
     if (kind_ != ValueKind::Object) return nullptr;
+    const std::pair<std::string, Value>* p = u_.o->data();
     for (size_t i = 0; i < u_.o->size(); i++)
-        if (u_.o->data()[i].first == k) return &u_.o->data()[i].second;
+        if (p[i].first == k) return &p[i].second;
     return nullptr;
 }
 inline void Value::push(Value&& v) {
@@ -557,16 +567,18 @@ inline size_t value_size(const Value& v) {
         case ValueKind::Bytes: return 2 + json_escaped_length(v.as_str());
         case ValueKind::Function: return 4;  // not serializable; serializes as null
         case ValueKind::Array: {
+            const Value* d = v.values();
             size_t n = 1;
-            for (size_t k = 0; k < v.size(); k++) { if (k) n++; n += value_size(*v.arr_at(k)); }
+            for (size_t k = 0; k < v.size(); k++) { if (k) n++; n += value_size(d[k]); }
             return n + 1;
         }
         case ValueKind::Object: {
+            const std::pair<std::string, Value>* p = v.pairs();
             size_t n = 1;
             for (size_t k = 0; k < v.size(); k++) {
                 if (k) n++;
-                n += 1 + json_escaped_length(std::string_view(v.obj_key(k))) + 2;
-                n += value_size(*v.obj_at(k));
+                n += 1 + json_escaped_length(std::string_view(p[k].first)) + 2;
+                n += value_size(p[k].second);
             }
             return n + 1;
         }
@@ -589,19 +601,21 @@ inline void value_to_json(const Value& v, Sink& out) {
             out.append("\"", 1);
             break;
         case ValueKind::Array: {
+            const Value* d = v.values();
             out.append("[", 1);
-            for (size_t k = 0; k < v.size(); k++) { if (k) out.append(",", 1); value_to_json(*v.arr_at(k), out); }
+            for (size_t k = 0; k < v.size(); k++) { if (k) out.append(",", 1); value_to_json(d[k], out); }
             out.append("]", 1);
             break;
         }
         case ValueKind::Object: {
+            const std::pair<std::string, Value>* p = v.pairs();
             out.append("{", 1);
             for (size_t k = 0; k < v.size(); k++) {
                 if (k) out.append(",", 1);
                 out.append("\"", 1);
-                json_escape_to(std::string_view(v.obj_key(k)), out);
+                json_escape_to(std::string_view(p[k].first), out);
                 out.append("\":", 2);
-                value_to_json(*v.obj_at(k), out);
+                value_to_json(p[k].second, out);
             }
             out.append("}", 1);
             break;
@@ -699,15 +713,17 @@ inline Val val_from_value(const Value& v) {
         case ValueKind::Bytes: return Val::text(std::string(v.as_str()));
         case ValueKind::Function: return Val::nil();  // no Val counterpart
         case ValueKind::Array: {
+            const Value* d = v.values();
             std::vector<Val> a;
             a.reserve(v.size());
-            for (size_t i = 0; i < v.size(); i++) a.push_back(val_from_value(*v.arr_at(i)));
+            for (size_t i = 0; i < v.size(); i++) a.push_back(val_from_value(d[i]));
             return Val::list(std::move(a));
         }
         case ValueKind::Object: {
+            const std::pair<std::string, Value>* p = v.pairs();
             std::vector<std::pair<std::string, Val>> o;
             o.reserve(v.size());
-            for (size_t i = 0; i < v.size(); i++) o.emplace_back(v.obj_key(i), val_from_value(*v.obj_at(i)));
+            for (size_t i = 0; i < v.size(); i++) o.emplace_back(p[i].first, val_from_value(p[i].second));
             return Val::object(std::move(o));
         }
     }
