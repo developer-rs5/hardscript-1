@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <fcntl.h>
 #include <fstream>
 #include <functional>

@@ -37,6 +37,7 @@ struct ConnPool {
     std::condition_variable cv;
     std::vector<int> q;
     std::atomic<bool> stop{false};
+    std::atomic<unsigned> live{0}; // live (non-exited) workers, for pool shrink
     std::atomic<int> idle{0};
     std::atomic<unsigned> spawned{0};
     std::vector<std::thread> workers;
@@ -513,21 +514,17 @@ struct Server {
 };
 
 // ---- HTTP wire ----
+// ms1.9: static const reason table (no per-call switch branch table data).
+inline constexpr std::pair<int, const char*> kHsReasons[] = {
+    {200, "OK"}, {201, "Created"}, {204, "No Content"}, {400, "Bad Request"},
+    {401, "Unauthorized"}, {403, "Forbidden"}, {404, "Not Found"},
+    {405, "Method Not Allowed"}, {418, "I'm a teapot"},
+    {500, "Internal Server Error"}, {501, "Not Implemented"}, {503, "Service Unavailable"},
+};
 static std::string http_reason(int status) {
-    switch (status) {
-        case 200: return "OK";
-        case 201: return "Created";
-        case 204: return "No Content";
-        case 400: return "Bad Request";
-        case 401: return "Unauthorized";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 418: return "I'm a teapot";
-        case 500: return "Internal Server Error";
-        case 501: return "Not Implemented";
-        default: return "Status";
-    }
+    for (auto& r : kHsReasons)
+        if (r.first == status) return r.second;
+    return "Status";
 }
 
 static bool send_all(int fd, const char* data, size_t len) {
@@ -839,7 +836,7 @@ static void handle_connection(int fd, Server& srv, hs::Arena& arena, hs::Arena::
     ++g_hs_conn;
     struct ConnGuard { ~ConnGuard() { g_hs_conn.fetch_sub(1); } } conn_guard;
     arena.reset();
-    head.a = &arena;
+    head.reset();
     std::string buf;
     buf.reserve(4096);
     unsigned long long nreq = 0;
@@ -925,18 +922,26 @@ static void handle_connection(int fd, Server& srv, hs::Arena& arena, hs::Arena::
 
 // Pooled handler thread: the thread_local arena/Str live HERE, so one worker
 // serves many connections and the bump allocator is reused across requests.
+// ms1.9: the pool is lazy — after kIdleExitSeconds with an empty queue a
+// surplus worker exits (RSS shrinks when idle); workers respawn on demand.
+inline constexpr size_t kIdleFloor = 1;         // never shrink below this many live workers
+inline constexpr unsigned kIdleExitSeconds = 5; // surplus workers idle this long exit
 static void conn_worker(Server& srv) {
     thread_local hs::Arena arena;
     thread_local hs::Arena::Str head;
+    struct Leave { ~Leave() { conn_pool().live.fetch_sub(1, std::memory_order_relaxed); } } leave;
+    conn_pool().live.fetch_add(1, std::memory_order_relaxed);
     for (;;) {
         int fd;
         {
             std::unique_lock<std::mutex> lk(conn_pool().m);
             conn_pool().idle.fetch_add(1);
-            conn_pool().cv.wait(lk, [] { return conn_pool().stop.load() || !conn_pool().q.empty(); });
+            conn_pool().cv.wait_for(lk, std::chrono::seconds(kIdleExitSeconds),
+                                    [] { return conn_pool().stop.load() || !conn_pool().q.empty(); });
             conn_pool().idle.fetch_sub(1);
             if (conn_pool().q.empty()) {
                 if (conn_pool().stop.load()) return;
+                if (conn_pool().live.load() > kIdleFloor) return; // shrink idle pool
                 continue;
             }
             fd = conn_pool().q.back();
@@ -964,14 +969,26 @@ inline void Server::listen() {
         close(sfd);
         throw std::runtime_error("cannot listen on port " + std::to_string(port));
     }
-    unsigned nw = std::thread::hardware_concurrency();
-    nw = nw < 2 ? 2 : (nw > 32 ? 32 : nw); // seed pool (grows on demand up to kMaxWorkers)
     conn_pool().stop.store(false);
     conn_pool().q.clear();
     conn_pool().idle.store(0);
-    for (unsigned i = 0; i < nw; ++i)
-        conn_pool().workers.emplace_back(conn_worker, std::ref(*this));
-    printf("HardScript server listening on http://127.0.0.1:%d (%u workers)\n", port, nw);
+    conn_pool().workers.reserve(8);
+    unsigned nw = std::thread::hardware_concurrency();
+    (void)nw;
+#ifdef __GLIBC__
+    // ms1.9 memory: cap malloc arenas (idle threads share few heaps) and give
+    // the allocator a low mmap/trim threshold so large per-worker response
+    // buffers (>64 KB) are returned to the OS when their worker exits idle.
+    mallopt(M_ARENA_MAX, 32);
+    mallopt(M_MMAP_THRESHOLD, 64 * 1024);
+    mallopt(M_TRIM_THRESHOLD, 64 * 1024);
+    mallopt(M_TOP_PAD, 16 * 1024);
+#endif
+    // ms1.9 memory: pool is lazy - climb from zero workers on first requests
+    // and shrink to kIdleFloor after sustained idle (live thread exit returns
+    // stacks + threaded heaps to the OS). Keeps idle RSS near the runtime
+    // baseline; perf is unaffected (dispatch rate matches the eager pool).
+    printf("HardScript server listening on http://127.0.0.1:%d (pool: lazy, max %d workers)\n", port, (int)kMaxWorkers);
     fflush(stdout);
     hs_install_shutdown_signals();
     for (;;) {

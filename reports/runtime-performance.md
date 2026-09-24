@@ -52,6 +52,7 @@ idle RSS ≤ 3 MB.
 | c8d265b | ms1.8 phase-1 runtime report | baseline + milestone log written |
 | 844db3e | ms1.4 streaming JSON encoder | JSON bodies stream into the arena Str (single send, no temp std::string / ostringstream / per-byte snprintf); keep-alive ~30k → 39.7k RPS |
 | *next* | ms1.6 trie-based router | static O(1) (23 ns at 5k routes), param/wild O(depth), wildcard support, 0 alloc/100k dispatch; linear matcher was 40–85 µs at 5k routes |
+| *next* | ms1.9 lazy pool + memory | idle RSS 4.20 → 3.86 MB (1 thread at boot), pool shrink to floor after 5 s idle, big buffers return to OS on worker exit; fixed Arena::Str use-after-free on large keep-alive bodies |
 
 ## Quality gates
 

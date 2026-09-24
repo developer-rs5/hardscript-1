@@ -40,19 +40,23 @@ public:
         return p;
     }
 
-    // Re-usable char buffer that writes into the arena.
+    // Re-usable char buffer that writes into its OWN heap block (plain
+    // realloc), never into the arena: the arena reallocs its block on growth,
+    // and a Str pointing into it would read freed memory after a grow
+    // (use-after-free on large keep-alive bodies — ms1.9 fix). Steady-state
+    // keep-alive reuses the grown block (no allocation per request).
     struct Str {
-        Arena* a = nullptr;
         char* data = nullptr;
         size_t len = 0;
         size_t cap = 0;
+        ~Str() { std::free(data); }
         void reset() { len = 0; }
         void ensure(size_t extra) {
             if (len + extra <= cap) return;
             size_t want = cap ? cap : 256;
             while (want < len + extra) want *= 2;
-            char* nd = (char*)a->allocate(want);
-            if (len) std::memcpy(nd, data, len);
+            char* nd = (char*)std::realloc(data, want);
+            if (!nd) std::abort();
             data = nd;
             cap = want;
         }
