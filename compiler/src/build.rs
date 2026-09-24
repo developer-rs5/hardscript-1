@@ -234,7 +234,10 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
     let mut merged: Vec<crate::ast::Stmt> = Vec::new();
     let mut outcomes = Vec::new();
     let mut modules: Vec<crate::manifest::ModuleEntry> = Vec::new();
-    let mut root_path = target.to_string_lossy().into_owned();
+    let mut root_path = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "main.hard".to_string());
     let mut errs: Vec<Diag> = Vec::new();
     for (idx, (id, _key)) in jobs_list.iter().enumerate() {
         let n = &graph.nodes[*id];
@@ -244,7 +247,9 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
                 stmts.retain(|s| !matches!(s, crate::ast::Stmt::Import { .. }));
                 merged.append(&mut stmts);
                 if *id == graph.root {
-                    root_path = n.path.display().to_string();
+                    // Relative, not absolute: diagnostic/expect locations must
+                    // stay stable across machines and project directories.
+                    root_path = n.rel.clone();
                 }
                 outcomes.push(ModuleFrontOutcome {
                     rel: n.rel.clone(),
