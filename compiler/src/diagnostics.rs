@@ -223,6 +223,11 @@ fn render_one(d: &Diag, color: bool, out: &mut String) {
 
     // every note / expected / received line is rendered at the frame depth
     let indent = "    ";
+    // M3.4.5: always give the reader one line of catalog context, followed by
+    // any concrete notes the diagnostic already carries.
+    if let Some(def) = crate::catalog::lookup(d.code) {
+        out.push_str(&format!("{indent}= {}\n", def.meaning));
+    }
     for n in &d.notes {
         out.push_str(&format!("{indent}= {n}\n"));
     }
@@ -243,12 +248,23 @@ fn render_one(d: &Diag, color: bool, out: &mut String) {
         }
     }
 
-    if let Some(help) = &d.help {
+    // help / suggestion footer, falling back to the catalog's first fix when
+    // the site carries neither (e.g. internal new_nospan diagnostics).
+    let help = d
+        .help
+        .clone()
+        .or_else(|| {
+            d.suggestion
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.clone())
+        })
+        .or_else(|| {
+            crate::catalog::lookup(d.code).and_then(|def| def.fixes.first().map(|f| f.to_string()))
+        });
+    if let Some(h) = help {
         let label = paint(color, BLUE, "help: ");
-        out.push_str(&format!("{label}{help}\n"));
-    } else if let Some(s) = &d.suggestion {
-        let label = paint(color, BLUE, "help: ");
-        out.push_str(&format!("{label}{s}\n"));
+        out.push_str(&format!("{label}{h}\n"));
     }
 }
 
@@ -301,6 +317,27 @@ mod tests {
         let d = diag().with_code(cat::W_UNUSED_VARIABLE);
         let out = render_v2(&[d], false);
         assert!(out.starts_with("warning[HS2001]: `x` is not defined\n"), "got: {out}");
+    }
+
+    #[test]
+    fn catalog_meaning_notes_and_help_fallback() {
+        // M3.4.5: every diagnostic gets one line of catalog context plus an
+        // actionable help footer — from the site's help, its suggestion, or
+        // the catalog's first documented fix as a last resort.
+        let out = render_v2(&[diag()], false);
+        let meaning = cat::lookup(cat::UNDEFINED_VARIABLE).unwrap().meaning;
+        assert!(
+            out.contains(&format!("= {meaning}\n")),
+            "catalog meaning note missing:\n{out}"
+        );
+        let bare = Diag::new_nospan(ErrorKind::Codegen, "g++ failed".to_string())
+            .with_code(cat::NATIVE_COMPILE_FAILED);
+        let out = render_v2(&[bare], false);
+        assert!(out.contains("error[HS0502]: g++ failed"), "got: {out}");
+        assert!(
+            out.contains("help: "),
+            "catalog fix fallback should provide help for nospan diags:\n{out}"
+        );
     }
 
     #[test]
