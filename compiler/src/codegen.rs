@@ -334,7 +334,7 @@ impl Codegen {
 
     fn stmt(&mut self, st: &Stmt, ctx: Ctx) {
         match st {
-            Stmt::Bring(..) | Stmt::App(..) | Stmt::Model(..) => {}
+            Stmt::Bring(..) | Stmt::Import { .. } | Stmt::App(..) | Stmt::Model(..) => {}
             Stmt::Func(_) | Stmt::Route(_) | Stmt::Middleware { .. } | Stmt::Socket(_)
             | Stmt::Test(_) => {}
             Stmt::Var(v) => {

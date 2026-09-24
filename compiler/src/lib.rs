@@ -14,11 +14,14 @@ pub mod docs;
 pub mod escape;
 pub mod error;
 pub mod fmt;
+pub mod graph;
 pub mod hir;
+pub mod json;
 pub mod lexer;
 pub mod optimizer;
 pub mod optimize;
 pub mod parser;
+pub mod sha256;
 pub mod token;
 pub mod typecheck;
 

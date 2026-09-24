@@ -200,7 +200,11 @@ pub struct VarDef {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    /// Builtin runtime module (`bring http`, `bring std.crypto`).
     Bring(Module, Span),
+    /// Local source module (`bring "./utils"`, `bring "../shared/handlers"`).
+    /// Stored without the `.hard` extension (added at resolution time).
+    Import { path: String, span: Span },
     App(i64, Span),
     Model(ModelDef),
     Route(RouteDef),
@@ -222,7 +226,7 @@ impl Stmt {
     pub fn span(&self) -> Span {
         use Stmt::*;
         match self {
-            Bring(_, s) | App(_, s) => *s,
+            Bring(_, s) | Import { span: s, .. } | App(_, s) => *s,
             Model(m) => m.span,
             Route(r) => r.span,
             Socket(s) => s.span,

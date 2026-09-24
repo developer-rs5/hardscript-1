@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::{Diag, ErrorKind};
+use crate::lexer::Lexer;
 use crate::token::{Kw, Span, Sym, Tok, Token};
 
 pub struct Parser {
@@ -8,6 +9,9 @@ pub struct Parser {
     depth: usize,
     fatal: bool,
     pub imports: Vec<Module>,
+    /// Local module imports (`bring "./utils"`) resolved against the project
+    /// root at module-graph time. Stored as written (no `.hard` extension).
+    pub import_paths: Vec<String>,
     pub app_port: Option<i64>,
     pub models: Vec<ModelDef>,
     pub routes: Vec<RouteDef>,
@@ -40,6 +44,7 @@ impl Parser {
             depth: 0,
             fatal: false,
             imports: Vec::new(),
+            import_paths: Vec::new(),
             app_port: None,
             models: Vec::new(),
             routes: Vec::new(),
@@ -244,17 +249,14 @@ impl Parser {
         match self.peek() {
             Tok::Kw(Kw::Bring) => {
                 self.advance();
-                let (name, _) = self.expect_ident("after `bring`")?;
-                match Module::from_name(&name, sp) {
-                    Some(m) => {
-                        self.imports.push(m.clone());
-                        Ok(Some(Stmt::Bring(m, sp)))
-                    }
-                    None => Err(vec![Diag::new(
+                match self.advance().tok {
+                    Tok::Ident(name) => self.parse_bring_ident(name, sp),
+                    Tok::Str(path) => self.parse_bring_str(path, sp),
+                    other => Err(vec![Diag::new(
                         ErrorKind::Parse,
-                        format!("unknown module '{name}'"),
+                        format!("expected a module name or path after `bring`, found {other}"),
                         sp,
-                        "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.",
+                        "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
                     )]),
                 }
             }
@@ -419,6 +421,67 @@ impl Parser {
         }
         let e = self.parse_expr()?;
         Ok(Stmt::ExprStmt(e))
+    }
+
+    /// `bring http`, `bring std.crypto` (ident form).
+    fn parse_bring_ident(&mut self, name: String, sp: Span) -> Result<Option<Stmt>, Vec<Diag>> {
+        // `std.<module>` — the namespaced form of a builtin module reference.
+        if name == "std" && matches!(self.peek(), Tok::Sym(Sym::Dot)) {
+            self.advance(); // `.`
+            let (mod_name, _) = self.expect_ident("after `std.`")?;
+            return match Module::from_name(&mod_name, sp) {
+                Some(m) => {
+                    self.imports.push(m.clone());
+                    Ok(Some(Stmt::Bring(m, sp)))
+                }
+                None => Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("unknown module 'std.{mod_name}'"),
+                    sp,
+                    "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.",
+                )]),
+            };
+        }
+        match Module::from_name(&name, sp) {
+            Some(m) => {
+                self.imports.push(m.clone());
+                Ok(Some(Stmt::Bring(m, sp)))
+            }
+            None => Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("unknown module '{name}'"),
+                sp,
+                "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
+            )]),
+        }
+    }
+
+    /// `bring "./utils"`, `bring "http"`, `bring "std.crypto"` (string form).
+    fn parse_bring_str(&mut self, path: String, sp: Span) -> Result<Option<Stmt>, Vec<Diag>> {
+        // A local module path (starts with `./`, `../` or `/`, or contains a
+        // directory separator) resolves to a `.hard` file on disk. Anything
+        // else is an alternate spelling of a builtin module name.
+        let is_path = path.starts_with("./")
+            || path.starts_with("../")
+            || path.starts_with('/')
+            || path.contains('/');
+        if is_path {
+            self.import_paths.push(path.clone());
+            return Ok(Some(Stmt::Import { path, span: sp }));
+        }
+        let name = path.strip_prefix("std.").unwrap_or(&path);
+        match Module::from_name(name, sp) {
+            Some(m) => {
+                self.imports.push(m.clone());
+                Ok(Some(Stmt::Bring(m, sp)))
+            }
+            None => Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("unknown module '{path}'"),
+                sp,
+                "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time, or a local import like `bring \"./utils\"`.",
+            )]),
+        }
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Vec<Diag>> {
@@ -1029,4 +1092,86 @@ impl Parser {
             )]),
         }
     }
+}
+
+/// The imports found by [`scan_imports`].
+#[derive(Debug, Default, Clone)]
+pub struct ScanImports {
+    /// Builtin runtime modules (`http`, `crypto`, …).
+    pub builtins: Vec<Module>,
+    /// Local module paths as written (`./utils`), before `.hard` resolution.
+    pub paths: Vec<String>,
+}
+
+/// A lightweight, body-agnostic scanner that extracts `bring` statements from
+/// a source file without running the full parser.
+///
+/// Used by the module-graph builder: resolving the dependency graph only needs
+/// the imports, so this stays tolerant (it never fails on a malformed file —
+/// the real parse error is raised later, when the module is actually compiled)
+/// and avoids walking function bodies. Deterministic: reports imports in
+/// source order.
+pub fn scan_imports(src: &str) -> ScanImports {
+    let Ok(toks) = Lexer::new(src).tokenize() else {
+        return ScanImports::default();
+    };
+    let toks: Vec<Token> = toks;
+    let mut out = ScanImports::default();
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i].tok == Tok::Kw(Kw::Bring) {
+            i += 1;
+            if i >= toks.len() {
+                break;
+            }
+            match &toks[i].tok {
+                Tok::Str(s) => {
+                    let path = s.clone();
+                    i += 1;
+                    let is_path = path.starts_with("./")
+                        || path.starts_with("../")
+                        || path.starts_with('/')
+                        || path.contains('/');
+                    if is_path {
+                        out.paths.push(path);
+                    } else {
+                        let name = path.strip_prefix("std.").unwrap_or(&path).to_string();
+                        if let Some(m) = Module::from_name(&name, Span::new(0, 0)) {
+                            out.builtins.push(m);
+                        }
+                    }
+                    continue;
+                }
+                Tok::Ident(name) => {
+                    i += 1;
+                    if name == "std"
+                        && i < toks.len()
+                        && toks[i].tok == Tok::Sym(Sym::Dot)
+                        && i + 1 < toks.len()
+                        && matches!(toks[i + 1].tok, Tok::Ident(_))
+                    {
+                        i += 1; // `.`
+                        if let Tok::Ident(mname) = &toks[i].tok {
+                            let mname = mname.clone();
+                            i += 1;
+                            if let Some(m) = Module::from_name(&mname, Span::new(0, 0)) {
+                                out.builtins.push(m);
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(m) = Module::from_name(name, Span::new(0, 0)) {
+                        out.builtins.push(m);
+                    }
+                    continue;
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
 }

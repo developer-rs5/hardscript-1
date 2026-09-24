@@ -8,6 +8,8 @@ pub enum ErrorKind {
     Type,
     Codegen,
     Fmt,
+    /// Module-graph errors: missing modules, import cycles, bad paths.
+    Module,
 }
 
 impl ErrorKind {
@@ -18,6 +20,7 @@ impl ErrorKind {
             ErrorKind::Type => "Type Error",
             ErrorKind::Codegen => "Compile Error",
             ErrorKind::Fmt => "Format Error",
+            ErrorKind::Module => "Module Error",
         }
     }
 }

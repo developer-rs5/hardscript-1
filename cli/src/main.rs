@@ -269,7 +269,24 @@ fn cmd_docs(rest: &[String]) {
     }
 }
 
-fn cmd_doctor(_args: &[String]) {
+fn cmd_doctor(args: &[String]) {
+    let graph_flag = args.iter().any(|a| a == "--graph");
+    let deps_flag = args.iter().any(|a| a == "--deps");
+
+    if graph_flag || deps_flag {
+        let (target, _) = find_target(args);
+        if !target.exists() {
+            die(&format!("cannot read {}: {:?} (run `hard doctor` without --graph/--deps in a project?)", target.display(), target.exists()));
+        }
+        match hs_compiler::graph::discover(&target) {
+            Ok(g) => {
+                println!("{}", if graph_flag { g.to_json() } else { g.to_deps() });
+            }
+            Err(diags) => report(&diags),
+        }
+        return;
+    }
+
     let mut ok = true;
     println!("hard doctor — {VERSION}");
     for tool in ["g++", "gcc", "make"] {

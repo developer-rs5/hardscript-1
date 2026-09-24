@@ -359,6 +359,14 @@ pub fn lower(prog: &ast::Program) -> HirProgram {
                 });
                 stats.items += 1;
             }
+            // Local imports are graph/cache-level; they contribute no items.
+            ast::Stmt::Import { path, span } => {
+                items.push(HirItem::Bring {
+                    module: path.clone(),
+                    span: *span,
+                });
+                stats.items += 1;
+            }
             ast::Stmt::App(port, span) => {
                 items.push(HirItem::App { port: *port, span: *span });
                 stats.items += 1;
@@ -765,9 +773,9 @@ impl Lowerer {
             },
             ast::Stmt::ExprStmt(e) => HirStmt::Expr { expr: self.expr(e) },
             // Items are handled by the program walker; guards keep exhaustiveness.
-            ast::Stmt::Bring(..) | ast::Stmt::App(..) | ast::Stmt::Model(..)
-            | ast::Stmt::Route(..) | ast::Stmt::Socket(..) | ast::Stmt::Func(..)
-            | ast::Stmt::Middleware { .. } | ast::Stmt::Test(..) => {
+            ast::Stmt::Bring(..) | ast::Stmt::Import { .. } | ast::Stmt::App(..)
+            | ast::Stmt::Model(..) | ast::Stmt::Route(..) | ast::Stmt::Socket(..)
+            | ast::Stmt::Func(..) | ast::Stmt::Middleware { .. } | ast::Stmt::Test(..) => {
                 unreachable!("item statement reached stmt lowering")
             }
         }

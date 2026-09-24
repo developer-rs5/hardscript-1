@@ -29,6 +29,7 @@ impl Fmt {
     fn stmt(&mut self, st: &Stmt, d: usize) {
         match st {
             Stmt::Bring(m, _) => self.line(d, &format!("bring {}", self.module(m))),
+            Stmt::Import { path, .. } => self.line(d, &format!("bring {path:?}")),
             Stmt::App(p, _) => self.line(d, &format!("app @{p}")),
             Stmt::Model(m) => {
                 self.line(d, &format!("model {} = {} [", m.name, m.table));
