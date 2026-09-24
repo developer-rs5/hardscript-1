@@ -199,8 +199,15 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
 
     let loaded: Vec<Result<(Vec<crate::ast::Stmt>, ParseOutcome, u64), Vec<Diag>>> =
         if opts.jobs > 1 {
+            // Worker stacks must be at least as large as the main thread's:
+            // the parser's MAX_DEPTH guard (parser.rs) is tuned below the
+            // main-thread overflow point (~450 nested parens on a dev build),
+            // but rayon's default worker stack (2 MiB on Linux, 512 KiB on
+            // macOS) overflows far earlier than the guard trips. Oversized
+            // stacks are reserved lazily, so this costs address space only.
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(opts.jobs)
+                .stack_size(64 * 1024 * 1024)
                 .build()
                 .map_err(|e| {
                     vec![Diag::new(

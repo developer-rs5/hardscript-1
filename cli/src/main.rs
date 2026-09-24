@@ -444,8 +444,40 @@ fn cmd_doctor(args: &[String]) {
         "  runtime header: embedded ({} bytes)",
         runtime_bytes()
     );
+
+    // Incremental-build diagnostics (only when this directory has built).
+    let manifest = hs_compiler::manifest::BuildManifest::load(Path::new("."));
+    let store = hs_compiler::cache::EntryStore::new(Path::new("."));
+    let has_cache = store.count() > 0 || manifest.is_some();
+    if has_cache {
+        println!("  compiler version: {VERSION}");
+        println!("  runtime version: {}", &runtime_fingerprint()[..16]);
+        println!("  cache entries: {}", store.count());
+        println!("  cache size: {}", human_bytes(store.size_bytes()));
+        if let Some(m) = &manifest {
+            println!("  cache hits: {}", m.cache.hits);
+            println!("  cache misses: {}", m.cache.misses);
+            println!("  cache skipped: {}", m.cache.skipped);
+            println!("  cache compiled: {}", m.cache.compiled);
+            if m.native_skipped {
+                println!("  last build: warm (native skipped)");
+            } else {
+                println!("  last build: recompiled");
+            }
+        }
+    }
     if !ok {
         std::process::exit(1);
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", n as f64 / (1024.0 * 1024.0))
     }
 }
 

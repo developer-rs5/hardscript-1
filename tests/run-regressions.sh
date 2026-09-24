@@ -245,5 +245,23 @@ for f in "$DIR"/*.cpp; do
     rm -rf "$TMP"
 done
 
+# incremental kind: self-contained multi-step scenarios (multiple modules,
+# repeated builds, cache assertions) in tests/regression/incremental/*/run.sh.
+# A scenario passes iff its run.sh exits 0; scenario scripts print their own
+# details and rely on $HARD (absolute) and $PORT.
+for run in "$DIR"/incremental/*/run.sh; do
+    [ -e "$run" ] || continue
+    TOTAL=$((TOTAL+1))
+    name="inc-$(basename "$(dirname "$run")")"
+    if HARD="$HARD" PORT="$PORT" bash "$run" >"$DIR/.inc-last.out" 2>&1; then
+        echo "regression: PASS $name ($(cat "$DIR/.inc-last.out"))"
+    else
+        echo "regression: FAIL $name"
+        cat "$DIR/.inc-last.out"
+        FAILED=$((FAILED+1))
+    fi
+done
+rm -f "$DIR/.inc-last.out"
+
 echo "regression: $((TOTAL-FAILED))/$TOTAL passed"
 [ "$FAILED" -eq 0 ] || exit 1
