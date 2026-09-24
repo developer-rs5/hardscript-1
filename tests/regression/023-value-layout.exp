@@ -1,0 +1,11 @@
+cpp
+sizeof=24
+alignof=8
+sso=14
+kinds=9
+array_inline=4
+object_inline=4
+polymorphic=0
+standard_layout=1
+layout_report=sizeof(Value)=24 alignof(Value)=8 sso=14 kinds=9 array_inline=4 object_inline=4
+ok

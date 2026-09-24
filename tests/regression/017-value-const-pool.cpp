@@ -30,7 +30,7 @@ int main() {
     CHECK(std::string_view(const_pool().cstr(0)) == std::string_view(a), "ids map to interned addr");
 
     Value pv = const_pool().v_str("Origin");
-    CHECK(pv.kind() == Value::Str, "v_str kind");
+    CHECK(pv.kind() == ValueKind::String, "v_str kind");
     CHECK(value_to_json_string(pv) == "\"Origin\"", "v_str json");
     const char* orig = const_pool().cstr(2);
     CHECK(std::string_view(orig) == "Origin", "last interned id");

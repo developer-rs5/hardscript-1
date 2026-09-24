@@ -311,7 +311,10 @@ inline std::string Val::to_text_dbg() const { return ::hs::to_text_dbg(*this); }
 // constant-pool piece used by the escape-analysis report).
 // ===========================================================================
 
-enum class ValueKind : uint8_t { Null, Bool, I64, F64, Str, Bytes, Arr, Obj };
+// Tagged-union value engine kind set (Phase 2, ms2.1). Primitives (Nil,
+// Bool, Int, Float) live inline inside `Value` with no heap; heap is used
+// only for String/Array/Object/Bytes/Function payloads.
+enum class ValueKind : uint8_t { Nil, Bool, Int, Float, String, Array, Object, Function, Bytes };
 
 class Value;
 struct ValueVec;
@@ -320,7 +323,6 @@ struct ValueObj;
 class Value {
 public:
     static constexpr size_t kSso = 14;
-    enum Kind : uint8_t { Null, Bool, I64, F64, Str, Bytes, Arr, Obj };
 
     Value() = default;
     ~Value() { destroy(); }
@@ -329,37 +331,44 @@ public:
     Value(Value&& o) noexcept { steal(o); }
     Value& operator=(Value&& o) noexcept { if (this != &o) { destroy(); steal(o); } return *this; }
 
+    // ---- tagged-union constructors: primitives inline, no allocation.
     static Value nil() { return Value(); }
-    static Value boolean(bool b) { Value v; v.kind_ = Bool; v.u_.b = b; return v; }
-    static Value i64(int64_t i) { Value v; v.kind_ = I64; v.u_.i = i; return v; }
-    static Value f64(double f) { Value v; v.kind_ = F64; v.u_.f = f; return v; }
+    static Value boolean(bool b) { Value v; v.kind_ = ValueKind::Bool; v.u_.b = b; return v; }
+    static Value i64(int64_t i) { Value v; v.kind_ = ValueKind::Int; v.u_.i = i; return v; }
+    static Value f64(double f) { Value v; v.kind_ = ValueKind::Float; v.u_.f = f; return v; }
     static Value str(std::string_view s) {
         Value v;
-        v.kind_ = Str;
+        v.kind_ = ValueKind::String;
         if (s.size() <= kSso) { std::memcpy(v.u_.sso, s.data(), s.size()); v.sso_n_ = (uint8_t)s.size(); }
         else { v.own_ = true; v.u_.s = new std::string(s); }
         return v;
     }
     // Non-owning string (points into a const pool / request buffer).
-    static Value str_view(std::string_view s) { Value v; v.kind_ = Str; v.u_.view = {s.data(), s.size()}; return v; }
+    static Value str_view(std::string_view s) { Value v; v.kind_ = ValueKind::String; v.u_.view = {s.data(), s.size()}; return v; }
     // Non-owning bytes view.
-    static Value bytes(std::string_view s) { Value v; v.kind_ = Bytes; v.u_.view = {s.data(), s.size()}; return v; }
+    static Value bytes(std::string_view s) { Value v; v.kind_ = ValueKind::Bytes; v.u_.view = {s.data(), s.size()}; return v; }
+    // Callable: raw function pointer + a name interned into the const pool
+    // (stable address, zero per-value allocation). Out-of-line below.
+    static Value fn(void* fp, std::string_view name);
     static Value arr();
     static Value obj();
 
-    Kind kind() const { return kind_; }
-    bool is(Kind k) const { return kind_ == k; }
+    ValueKind kind() const { return kind_; }
+    bool is(ValueKind k) const { return kind_ == k; }
 
-    int64_t as_i64() const { return kind_ == I64 ? u_.i : (kind_ == F64 ? (int64_t)u_.f : 0); }
-    double as_f64() const { return kind_ == F64 ? u_.f : (double)(kind_ == I64 ? u_.i : 0); }
-    bool as_bool() const { return kind_ == Bool ? u_.b : false; }
+    int64_t as_i64() const { return kind_ == ValueKind::Int ? u_.i : (kind_ == ValueKind::Float ? (int64_t)u_.f : 0); }
+    double as_f64() const { return kind_ == ValueKind::Float ? u_.f : (double)(kind_ == ValueKind::Int ? u_.i : 0); }
+    bool as_bool() const { return kind_ == ValueKind::Bool ? u_.b : false; }
 
     std::string_view as_str() const {
-        if (kind_ != Str && kind_ != Bytes) return {};
+        if (kind_ != ValueKind::String && kind_ != ValueKind::Bytes) return {};
         if (own_) return std::string_view(*u_.s);
         if (sso_n_) return std::string_view(u_.sso, sso_n_);
         return u_.view.d ? std::string_view(u_.view.d, u_.view.n) : std::string_view();
     }
+
+    void* as_fn() const { return kind_ == ValueKind::Function ? u_.fn.fp : nullptr; }
+    const char* fn_name() const { return kind_ == ValueKind::Function ? u_.fn.name : ""; }
 
     // Arrays / objects (bodies live after the ValueVec/ValueObj boxes).
     size_t size() const;
@@ -370,13 +379,6 @@ public:
     void push(Value&& v);
     void set(std::string key, Value v);
 
-    ValueKind value_kind() const {
-        static constexpr ValueKind M[] = { ValueKind::Null, ValueKind::Bool, ValueKind::I64,
-                                           ValueKind::F64, ValueKind::Str, ValueKind::Bytes,
-                                           ValueKind::Arr, ValueKind::Obj };
-        return M[kind_];
-    }
-
 private:
     union U {
         U() {}
@@ -384,13 +386,14 @@ private:
         double f;
         bool b;
         char sso[kSso];
-        std::string* s;                          // owned long string
+        std::string* s;                           // owned long string
         struct { const char* d; size_t n; } view; // non-owning view
+        struct { void* fp; const char* name; } fn; // callable: fn ptr + pooled name
         ValueVec* v;
         ValueObj* o;
     };
 
-    Kind kind_ = Null;
+    ValueKind kind_ = ValueKind::Nil;
     uint8_t sso_n_ = 0;
     bool own_ = false;
     U u_;
@@ -400,7 +403,7 @@ private:
     void copy_from(const Value& o);
     void steal(Value& o) noexcept {
         kind_ = o.kind_; sso_n_ = o.sso_n_; own_ = o.own_; u_ = o.u_;
-        o.kind_ = Null; o.sso_n_ = 0; o.own_ = false;
+        o.kind_ = ValueKind::Nil; o.sso_n_ = 0; o.own_ = false;
     }
 };
 
@@ -432,38 +435,38 @@ struct ValueObj {
 // Out-of-line members that need the complete box types.
 inline void Value::destroy() noexcept {
     if (own_) delete u_.s;
-    if (kind_ == Arr) delete u_.v;
-    if (kind_ == Obj) delete u_.o;
-    kind_ = Null; sso_n_ = 0; own_ = false;
+    if (kind_ == ValueKind::Array) delete u_.v;
+    if (kind_ == ValueKind::Object) delete u_.o;
+    kind_ = ValueKind::Nil; sso_n_ = 0; own_ = false;
 }
-inline Value Value::arr() { Value v; v.kind_ = Arr; v.u_.v = new ValueVec(); return v; }
-inline Value Value::obj() { Value v; v.kind_ = Obj; v.u_.o = new ValueObj(); return v; }
+inline Value Value::arr() { Value v; v.kind_ = ValueKind::Array; v.u_.v = new ValueVec(); return v; }
+inline Value Value::obj() { Value v; v.kind_ = ValueKind::Object; v.u_.o = new ValueObj(); return v; }
 inline void Value::copy_from(const Value& o) {
     kind_ = o.kind_; sso_n_ = o.sso_n_; own_ = o.own_;
     switch (kind_) {
-        case Str:
+        case ValueKind::String:
             if (own_) u_.s = new std::string(*o.u_.s);
             else if (sso_n_) { std::memcpy(u_.sso, o.u_.sso, sso_n_); }
             else u_.view = o.u_.view;
             break;
-        case Bytes: u_.view = o.u_.view; break;
-        case Arr: u_.v = new ValueVec(*o.u_.v); break;
-        case Obj: u_.o = new ValueObj(*o.u_.o); break;
-        default: u_ = o.u_; break;  // scalar copy
+        case ValueKind::Bytes: u_.view = o.u_.view; break;
+        case ValueKind::Array: u_.v = new ValueVec(*o.u_.v); break;
+        case ValueKind::Object: u_.o = new ValueObj(*o.u_.o); break;
+        default: u_ = o.u_; break;  // scalar copy (incl. Function: fp + pooled name)
     }
 }
-inline size_t Value::size() const { return kind_ == Arr ? u_.v->size() : (kind_ == Obj ? u_.o->size() : 0); }
-inline const Value* Value::arr_at(size_t i) const { return kind_ == Arr && i < u_.v->size() ? u_.v->data() + i : nullptr; }
-inline const Value* Value::obj_at(size_t i) const { return kind_ == Obj && i < u_.o->size() ? &u_.o->data()[i].second : nullptr; }
+inline size_t Value::size() const { return kind_ == ValueKind::Array ? u_.v->size() : (kind_ == ValueKind::Object ? u_.o->size() : 0); }
+inline const Value* Value::arr_at(size_t i) const { return kind_ == ValueKind::Array && i < u_.v->size() ? u_.v->data() + i : nullptr; }
+inline const Value* Value::obj_at(size_t i) const { return kind_ == ValueKind::Object && i < u_.o->size() ? &u_.o->data()[i].second : nullptr; }
 inline const std::string& Value::obj_key(size_t i) const { return u_.o->data()[i].first; }
 inline const Value* Value::find(const std::string_view k) const {
-    if (kind_ != Obj) return nullptr;
+    if (kind_ != ValueKind::Object) return nullptr;
     for (size_t i = 0; i < u_.o->size(); i++)
         if (u_.o->data()[i].first == k) return &u_.o->data()[i].second;
     return nullptr;
 }
 inline void Value::push(Value&& v) {
-    if (kind_ != Arr) { destroy(); kind_ = Arr; u_.v = new ValueVec(); }
+    if (kind_ != ValueKind::Array) { destroy(); kind_ = ValueKind::Array; u_.v = new ValueVec(); }
     ValueVec& box = *u_.v;
     if (box.n_ < ValueVec::kSmall) { box.small_[box.n_++] = std::move(v); return; }
     if (box.heap_.empty()) {                       // first spill: migrate inline slots
@@ -476,7 +479,7 @@ inline void Value::push(Value&& v) {
     }
 }
 inline void Value::set(std::string key, Value v) {
-    if (kind_ != Obj) { destroy(); kind_ = Obj; u_.o = new ValueObj(); }
+    if (kind_ != ValueKind::Object) { destroy(); kind_ = ValueKind::Object; u_.o = new ValueObj(); }
     ValueObj& box = *u_.o;
     for (size_t i = 0; i < box.size(); i++)
         if (box.data()[i].first == key) { box.data()[i].second = std::move(v); return; }
@@ -491,32 +494,48 @@ inline void Value::set(std::string key, Value v) {
     }
 }
 
-inline const char* value_kind_name(Value::Kind k) {
+inline const char* value_kind_name(ValueKind k) {
     switch (k) {
-        case Value::Null: return "Null";
-        case Value::Bool: return "Bool";
-        case Value::I64: return "I64";
-        case Value::F64: return "F64";
-        case Value::Str: return "Str";
-        case Value::Bytes: return "Bytes";
-        case Value::Arr: return "Arr";
-        case Value::Obj: return "Obj";
+        case ValueKind::Nil: return "Nil";
+        case ValueKind::Bool: return "Bool";
+        case ValueKind::Int: return "Int";
+        case ValueKind::Float: return "Float";
+        case ValueKind::String: return "String";
+        case ValueKind::Array: return "Array";
+        case ValueKind::Object: return "Object";
+        case ValueKind::Function: return "Function";
+        case ValueKind::Bytes: return "Bytes";
     }
     return "?";
 }
 
+// One-line layout summary used by the layout QA fixture and the final
+// value-memory report: sizeof/alignof, the SSO threshold and the container
+// inline-slot counts. Kept as a runtime string so the compiler can embed it
+// in a generated report without re-deriving the C++ data structure.
+inline std::string value_layout_report() {
+    char b[192];
+    int n = std::snprintf(
+        b, sizeof b,
+        "sizeof(Value)=%zu alignof(Value)=%zu sso=%zu kinds=%zu array_inline=%zu object_inline=%zu",
+        sizeof(Value), alignof(Value), Value::kSso,
+        (size_t)ValueKind::Bytes - (size_t)ValueKind::Nil + 1,
+        ValueVec::kSmall, ValueObj::kSmall);
+    return std::string(b, (size_t)n);
+}
+
 inline size_t value_size(const Value& v) {
     switch (v.kind()) {
-        case Value::Null: return 4;
-        case Value::Bool: return v.as_bool() ? 4 : 5;
-        case Value::I64: {
+        case ValueKind::Nil: return 4;
+        case ValueKind::Bool: return v.as_bool() ? 4 : 5;
+        case ValueKind::Int: {
             int64_t x = v.as_i64();
             unsigned long long u = x < 0 ? 0ULL - (unsigned long long)x : (unsigned long long)x;
             size_t n = x < 0 ? 1 : 0;
             do { n++; u /= 10; } while (u);
             return n;
         }
-        case Value::F64: {
+        case ValueKind::Float: {
             char b[48];
             int n = std::snprintf(b, sizeof b, "%.15g", v.as_f64());
             if (n < 0) n = 0;
@@ -524,14 +543,15 @@ inline size_t value_size(const Value& v) {
             for (int i = 0; i < n; i++) if (b[i] == '.' || b[i] == 'e' || b[i] == 'E') dot = 1;
             return (size_t)n + (dot ? 0 : 2);
         }
-        case Value::Str:
-        case Value::Bytes: return 2 + json_escaped_length(v.as_str());
-        case Value::Arr: {
+        case ValueKind::String:
+        case ValueKind::Bytes: return 2 + json_escaped_length(v.as_str());
+        case ValueKind::Function: return 4;  // not serializable; serializes as null
+        case ValueKind::Array: {
             size_t n = 1;
             for (size_t k = 0; k < v.size(); k++) { if (k) n++; n += value_size(*v.arr_at(k)); }
             return n + 1;
         }
-        case Value::Obj: {
+        case ValueKind::Object: {
             size_t n = 1;
             for (size_t k = 0; k < v.size(); k++) {
                 if (k) n++;
@@ -547,23 +567,24 @@ inline size_t value_size(const Value& v) {
 template <typename Sink>
 inline void value_to_json(const Value& v, Sink& out) {
     switch (v.kind()) {
-        case Value::Null: out.append("null", 4); break;
-        case Value::I64: json_append_int(out, v.as_i64()); break;
-        case Value::F64: json_append_double(out, v.as_f64()); break;
-        case Value::Bool: out.append(v.as_bool() ? "true" : "false", v.as_bool() ? 4 : 5); break;
-        case Value::Str:
-        case Value::Bytes:
+        case ValueKind::Nil:
+        case ValueKind::Function: out.append("null", 4); break;  // fn: not serializable
+        case ValueKind::Int: json_append_int(out, v.as_i64()); break;
+        case ValueKind::Float: json_append_double(out, v.as_f64()); break;
+        case ValueKind::Bool: out.append(v.as_bool() ? "true" : "false", v.as_bool() ? 4 : 5); break;
+        case ValueKind::String:
+        case ValueKind::Bytes:
             out.append("\"", 1);
             json_escape_to(v.as_str(), out);
             out.append("\"", 1);
             break;
-        case Value::Arr: {
+        case ValueKind::Array: {
             out.append("[", 1);
             for (size_t k = 0; k < v.size(); k++) { if (k) out.append(",", 1); value_to_json(*v.arr_at(k), out); }
             out.append("]", 1);
             break;
         }
-        case Value::Obj: {
+        case ValueKind::Object: {
             out.append("{", 1);
             for (size_t k = 0; k < v.size(); k++) {
                 if (k) out.append(",", 1);
@@ -625,6 +646,17 @@ private:
 
 inline ConstPool& const_pool() { static ConstPool p; return p; }
 
+// Function values intern their name into the const pool so the stored
+// `const char*` is stable for the process lifetime and never allocated per
+// value. Defined here (not in the class) because it needs the pool.
+inline Value Value::fn(void* fp, std::string_view name) {
+    Value v;
+    v.kind_ = ValueKind::Function;
+    v.u_.fn.fp = fp;
+    v.u_.fn.name = const_pool().intern(name);
+    return v;
+}
+
 // ---- ms2.0 bridge: hs::Val <-> Value --------------------------------
 inline Value value_from_val(const Val& v) {
     switch (v.t) {
@@ -649,19 +681,20 @@ inline Value value_from_val(const Val& v) {
 
 inline Val val_from_value(const Value& v) {
     switch (v.kind()) {
-        case Value::Null: return Val::nil();
-        case Value::Bool: return Val::boolean(v.as_bool());
-        case Value::I64: return Val::int_(v.as_i64());
-        case Value::F64: return Val::flt(v.as_f64());
-        case Value::Str: return Val::text(std::string(v.as_str()));
-        case Value::Bytes: return Val::text(std::string(v.as_str()));
-        case Value::Arr: {
+        case ValueKind::Nil: return Val::nil();
+        case ValueKind::Bool: return Val::boolean(v.as_bool());
+        case ValueKind::Int: return Val::int_(v.as_i64());
+        case ValueKind::Float: return Val::flt(v.as_f64());
+        case ValueKind::String: return Val::text(std::string(v.as_str()));
+        case ValueKind::Bytes: return Val::text(std::string(v.as_str()));
+        case ValueKind::Function: return Val::nil();  // no Val counterpart
+        case ValueKind::Array: {
             std::vector<Val> a;
             a.reserve(v.size());
             for (size_t i = 0; i < v.size(); i++) a.push_back(val_from_value(*v.arr_at(i)));
             return Val::list(std::move(a));
         }
-        case Value::Obj: {
+        case ValueKind::Object: {
             std::vector<std::pair<std::string, Val>> o;
             o.reserve(v.size());
             for (size_t i = 0; i < v.size(); i++) o.emplace_back(v.obj_key(i), val_from_value(*v.obj_at(i)));

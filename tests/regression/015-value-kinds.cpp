@@ -39,14 +39,14 @@ int main() {
     {
         hs::Value v = hs::Value::str("hi");
         CHECK(hs::value_to_json_string(v) == "\"hi\"", "str short");
-        CHECK(hs::Value::str("hi").kind() == hs::Value::Str, "str kind");
+        CHECK(hs::Value::str("hi").kind() == hs::ValueKind::String, "str kind");
         CHECK(hs::Value::str("hi").as_str() == "hi", "str as_str");
     }
     {
         char raw[2] = { '\x00', '\x01' };
         hs::Value v = hs::Value::bytes(std::string_view(raw, 2));
         CHECK(hs::value_to_json_string(v) == "\"\\u0000\\u0001\"", "bytes escape");
-        CHECK(v.kind() == hs::Value::Bytes, "bytes kind");
+        CHECK(v.kind() == hs::ValueKind::Bytes, "bytes kind");
     }
     std::printf("ok\n");
     return fails ? 1 : 0;
