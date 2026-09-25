@@ -1,41 +1,48 @@
-use hs_compiler::{frontend, render_all, Diag};
+use hs_compiler::{frontend, render_all};
+use hs_lsp::server::BackendServer;
 use std::env;
 use std::io::{self, Read};
 use std::process;
+use tower_lsp::{LspService, Server};
 
-/// `hs-lsp <file>` — checks a HardScript source file and prints diagnostics.
-/// With no arguments it reads source from stdin.
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 {
-        check_file(&args[1]);
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().map(String::as_str) == Some("--check") {
+        check(&arguments[1..]);
         return;
     }
-    let mut src = String::new();
-    if io::stdin().read_to_string(&mut src).is_err() {
-        eprintln!("hs-lsp: could not read stdin");
-        process::exit(1);
-    }
-    check_str(&src, "<stdin>");
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let (service, socket) = LspService::new(BackendServer::service);
+    Server::new(stdin, stdout, socket).serve(service).await;
 }
 
-fn check_file(path: &str) {
-    match std::fs::read_to_string(path) {
-        Ok(src) => check_str(&src, path),
-        Err(e) => eprintln!("hs-lsp: {path}: {e}"),
+fn check(arguments: &[String]) {
+    if arguments.is_empty() {
+        let mut source = String::new();
+        if io::stdin().read_to_string(&mut source).is_err() {
+            eprintln!("hs-lsp: could not read stdin");
+            process::exit(1);
+        }
+        check_source(&source, "<stdin>");
+        return;
     }
-}
-
-fn check_str(src: &str, path: &str) {
-    match frontend(src, path) {
-        Ok(_) => println!("ok {path}: no diagnostics"),
-        Err(diags) => {
-            report(&diags);
+    match std::fs::read_to_string(&arguments[0]) {
+        Ok(source) => check_source(&source, &arguments[0]),
+        Err(error) => {
+            eprintln!("hs-lsp: {}: {error}", arguments[0]);
             process::exit(1);
         }
     }
 }
 
-fn report(diags: &[Diag]) {
-    eprint!("{}", render_all(diags));
+fn check_source(source: &str, path: &str) {
+    match frontend(source, path) {
+        Ok(_) => println!("ok {path}: no diagnostics"),
+        Err(diagnostics) => {
+            eprint!("{}", render_all(&diagnostics));
+            process::exit(1);
+        }
+    }
 }

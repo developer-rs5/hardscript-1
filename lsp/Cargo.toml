@@ -2,7 +2,23 @@
 name = "hs-lsp"
 version.workspace = true
 edition.workspace = true
-description = "HardScript language server (diagnostics today; full LSP protocol next)."
+description = "HardScript language server for editor intelligence and diagnostics."
+
+[lib]
+name = "hs_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hs-lsp"
+path = "src/main.rs"
 
 [dependencies]
 hs-compiler = { path = "../compiler" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.43.0", features = ["io-std", "macros", "rt-multi-thread"] }
+tower-lsp = "0.20.0"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+tempfile = "3.15.0"
