@@ -1,0 +1,7 @@
+ok
+GET /health = {"status":"ok"}
+GET /health/deep = {"status":"deep-ok"}
+GET /me = {"error":"unauthorized","status":401,"message":"no credentials"}
+GET /admin = {"error":"unauthorized","status":401,"message":"no credentials"}
+GET /who?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSIsInJvbGUiOiJ1c2VyIn0.JiDg0gnQG5P4aGoGmj29OoPkO6Ox1RGibT4Xf9NjUMQ = {"id":"u1","role":"user"}
+POST /login = {"issued":true,"tampered":false,"sub":"u1","role":"admin"}

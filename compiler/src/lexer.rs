@@ -439,6 +439,7 @@ pub fn classify_ident(s: &str) -> Tok {
         "message" => Kw::Message,
         "disconnect" => Kw::Disconnect,
         "before" => Kw::Before,
+        "protect" => Kw::Protect,
         "loop" => Kw::Loop,
         "pick" => Kw::Pick,
         "async" => Kw::Async,

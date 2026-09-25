@@ -334,6 +334,10 @@ impl Parser {
                 self.middlewares.push((name.clone(), body.clone()));
                 Ok(Some(Stmt::Middleware { name, body, span: sp }))
             }
+            Tok::Kw(Kw::Protect) => {
+                self.advance();
+                self.parse_protect(sp).map(Some)
+            }
             Tok::Kw(Kw::Calc) => {
                 self.advance();
                 self.parse_func(false).map(Some)
@@ -581,6 +585,102 @@ None => Err(vec![Diag::new(
         }
         self.expect_sym(Sym::RBrace, "to close a block")?;
         Ok(stmts)
+    }
+
+    /// `protect jwt(secret = env.get("JWT_SECRET"), except = ["/health"])`
+    ///
+    /// The scheme names the guard, `secret` is the expression for the signing
+    /// key (required), and `except` lists the path prefixes that stay public.
+    /// Options are named so a later scheme can add more without changing the
+    /// shape of the declaration.
+    fn parse_protect(&mut self, sp: Span) -> Result<Stmt, Vec<Diag>> {
+        let (scheme, ssp) = self.expect_ident("as a protect scheme, e.g. `jwt`")?;
+        if !matches!(scheme.as_str(), "jwt") {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("unknown protect scheme `{scheme}`"),
+                ssp,
+                "The only scheme today is `jwt`.",
+            )
+            .with_code(cat::INVALID_PROTECT)]);
+        }
+        self.expect_sym(Sym::LParen, "after the protect scheme")?;
+        let mut secret: Option<Expr> = None;
+        let mut except: Vec<String> = Vec::new();
+        while !matches!(self.peek(), Tok::Sym(Sym::RParen)) {
+            let (key, ksp) = self.expect_ident("as a protect option name")?;
+            match key.as_str() {
+                "secret" => {
+                    self.expect_sym(Sym::Assign, "after `secret`")?;
+                    if secret.is_some() {
+                        return Err(vec![Diag::new(
+                            ErrorKind::Parse,
+                            "`secret` is set twice".to_string(),
+                            ksp,
+                            "A protect declaration takes one signing key.",
+                        )
+                        .with_code(cat::INVALID_PROTECT)]);
+                    }
+                    secret = Some(self.parse_expr()?);
+                }
+                "except" => {
+                    self.expect_sym(Sym::Assign, "after `except`")?;
+                    self.expect_sym(Sym::LBracket, "to start the `except` path list")?;
+                    while !matches!(self.peek(), Tok::Sym(Sym::RBracket)) {
+                        let psp = self.span();
+                        let Tok::Str(path) = self.peek().clone() else {
+                            return Err(vec![Diag::new(
+                                ErrorKind::Parse,
+                                "an exempt path must be a string".to_string(),
+                                psp,
+                                "Write `except = [\"/health\"]`.",
+                            )
+                            .with_code(cat::INVALID_PROTECT)]);
+                        };
+                        self.advance();
+                        except.push(path);
+                        if !self.eat_sym(Sym::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect_sym(Sym::RBracket, "to close the `except` path list")?;
+                }
+                other => {
+                    return Err(vec![Diag::new(
+                        ErrorKind::Parse,
+                        format!("unknown protect option `{other}`"),
+                        ksp,
+                        "Use `secret = ...` and `except = [...]`.",
+                    )
+                    .with_code(cat::INVALID_PROTECT)]);
+                }
+            }
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+            // A trailing comma after the last option is a typo, not a hint that
+            // another option is coming.
+            if matches!(self.peek(), Tok::Sym(Sym::RParen)) {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    "trailing comma in the protect declaration".to_string(),
+                    sp,
+                    "Drop the comma, or add the option it was meant to introduce.",
+                )
+                .with_code(cat::INVALID_PROTECT)]);
+            }
+        }
+        self.expect_sym(Sym::RParen, "to close the protect declaration")?;
+        let Some(secret) = secret else {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                "protect needs a signing key".to_string(),
+                sp,
+                "Write `protect jwt(secret = env.get(\"JWT_SECRET\"))`.",
+            )
+            .with_code(cat::INVALID_PROTECT)]);
+        };
+        Ok(Stmt::Protect(ProtectDef { scheme, secret, except, span: sp }))
     }
 
     /// `model Name = table [ field => Type #attr, ... ]` — the v0.1 blueprint
@@ -1443,6 +1543,57 @@ mod tests {
             Ok(_) => Vec::new(),
             Err(d) => d,
         }
+    }
+
+    fn parse_one(src: &str) -> Stmt {
+        let toks: Vec<Token> = crate::Lexer::new(src).tokenize().unwrap();
+        crate::Parser::new(toks).parse_program().unwrap().stmts.remove(0)
+    }
+
+    #[test]
+    fn protect_parses_scheme_secret_and_exempts() {
+        let st = parse_one("protect jwt(secret = env.get(\"S\"), except = [\"/health\", \"/metrics\"])\n");
+        let d = match st {
+            Stmt::Protect(d) => d,
+            other => panic!("expected Protect, got {other:?}"),
+        };
+        assert_eq!(d.scheme, "jwt");
+        assert_eq!(d.except, vec!["/health".to_string(), "/metrics".to_string()]);
+        assert_eq!(d.secret.render(), "env.get(\"S\")");
+    }
+
+    #[test]
+    fn protect_except_is_optional() {
+        let d = match parse_one("protect jwt(secret = k)\n") {
+            Stmt::Protect(d) => d,
+            other => panic!("expected Protect, got {other:?}"),
+        };
+        assert!(d.except.is_empty(), "no exempt list is allowed");
+    }
+
+    #[test]
+    fn protect_requires_a_secret() {
+        // A guard with no secret would either fail every request or, worse,
+        // fall back to an empty key; it has to be a parse error.
+        let errs = parse_errs("protect jwt()\n");
+        assert!(!errs.is_empty(), "empty protect must not parse");
+        let errs = parse_errs("protect jwt(except = [\"/x\"])\n");
+        assert!(!errs.is_empty(), "protect without secret must not parse");
+    }
+
+    #[test]
+    fn protect_rejects_a_trailing_comma() {
+        // `secret = x,` is a typo, not a one-element list; the parser must say
+        // so rather than quietly accepting it.
+        let errs = parse_errs("protect jwt(secret = k,)\n");
+        assert!(!errs.is_empty(), "trailing comma must not parse");
+    }
+
+    #[test]
+    fn protect_is_a_keyword_not_an_identifier() {
+        // `protect` is a reserved word now, so a variable cannot shadow it.
+        let errs = parse_errs("protect <- 1\n");
+        assert!(!errs.is_empty(), "protect is reserved");
     }
 
     #[test]

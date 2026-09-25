@@ -227,12 +227,25 @@ inline std::string md5_hex(const std::string& data) {
     return out;
 }
 
-// JWT
+// JWT (HS256 only - the only MAC the runtime implements)
+//
+// The signing and verification details live in hs_runtime_auth.hpp; these two
+// stay as the v0.5 boolean API that `jwt.sign` / `jwt.verify` compile to.
 inline std::string jwt_sign(const Val& payload, const std::string& secret) {
     std::string h = base64_encode_url("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
     std::string b = base64_encode_url(to_json(payload));
     std::string body = h + "." + b;
     return body + "." + base64_encode_url(hmac_sha256_bin(secret, body));
+}
+/// Length-independent, content-constant-time comparison. `std::string::operator==`
+/// returns as soon as two bytes differ, which leaks the correct signature one
+/// byte at a time over the wire.
+inline bool ct_equal(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); i++)
+        diff |= (unsigned char)(a[i] ^ b[i]);
+    return diff == 0;
 }
 inline bool jwt_verify(const std::string& token, const std::string& secret) {
     std::vector<std::string> parts;
@@ -241,11 +254,28 @@ inline bool jwt_verify(const std::string& token, const std::string& secret) {
     parts.push_back(cur);
     if (parts.size() != 3) return false;
     std::string expect = base64_encode_url(hmac_sha256_bin(secret, parts[0] + "." + parts[1]));
-    if (expect != parts[2]) return false;
+    if (!ct_equal(expect, parts[2])) return false;
     try {
+        Val head = parse_json(base64_decode(parts[0]));
+        // Pin the algorithm. Without this a token whose header claims another
+        // alg is accepted as long as the MAC matches, and `alg: none` style
+        // downgrades are one refactor away.
+        const Val* alg = head.find("alg");
+        if (!alg || !alg->is_str() || alg->sv != "HS256") return false;
         Val body = parse_json(base64_decode(parts[1]));
+        const double now = (double)(unix_ms() / 1000);
         const Val* exp = body.find("exp");
-        if (exp && exp->is_num() && (double)exp->num() < (double)(unix_ms() / 1000)) return false;
+        // Fail closed: an `exp` that is present but not a number used to be
+        // ignored, so `{"exp":null}` produced a token that never expired.
+        if (exp) {
+            if (!exp->is_num()) return false;
+            if ((double)exp->num() < now) return false;
+        }
+        const Val* nbf = body.find("nbf");
+        if (nbf) {
+            if (!nbf->is_num()) return false;
+            if ((double)nbf->num() > now) return false;
+        }
     } catch (...) { return false; }
     return true;
 }

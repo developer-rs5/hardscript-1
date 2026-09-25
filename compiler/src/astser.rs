@@ -240,6 +240,16 @@ fn write_stmt(enc: &mut Enc, st: &Stmt, depth: u64) -> Result<(), String> {
             write_stmt_items(enc, body)?;
             enc.span(*span);
         }
+        Stmt::Protect(d) => {
+            enc.u8(17);
+            enc.str(&d.scheme);
+            write_expr(enc, &d.secret, 0)?;
+            enc.uv(d.except.len() as i64);
+            for p in &d.except {
+                enc.str(p);
+            }
+            enc.span(d.span);
+        }
         Stmt::Test(t) => {
             enc.u8(8);
             write_test(enc, t)?;
@@ -726,6 +736,17 @@ fn read_stmt(dec: &mut Dec, depth: u64) -> Result<Stmt, String> {
             let e = read_expr(dec, 0)?;
             Stmt::ExprStmt(e)
         }
+        17 => {
+            let scheme = dec.str()?;
+            let secret = read_expr(dec, 0)?;
+            let n = decode_count(dec)?;
+            let mut except = Vec::with_capacity(n);
+            for _ in 0..n {
+                except.push(dec.str()?);
+            }
+            let span = dec.span()?;
+            Stmt::Protect(ProtectDef { scheme, secret, except, span })
+        }
         other => return Err(format!("unknown stmt tag {other}")),
     })
 }
@@ -973,6 +994,26 @@ test "hello" {
             path: String::new(),
         };
         format(&prog)
+    }
+
+    #[test]
+    fn protect_decl_survives_the_cache() {
+        // A dropped `protect` in the cache would silently un-guard every route
+        // on an incremental rebuild, so assert the whole declaration.
+        let src = "protect jwt(secret = env.get(\"JWT_SECRET\"), except = [\"/health\", \"/api/status\"])\n";
+        let before = parse_ok(src);
+        let after = deserialize_stmts(&serialize_stmts(&before).unwrap()).unwrap();
+        let d = match &after[0] {
+            Stmt::Protect(d) => d,
+            other => panic!("expected Protect, got {other:?}"),
+        };
+        assert_eq!(d.scheme, "jwt");
+        assert_eq!(d.except, vec!["/health".to_string(), "/api/status".to_string()]);
+        // The secret is an expression, not just an identifier.
+        assert_eq!(d.secret.render(), "env.get(\"JWT_SECRET\")");
+        // And the canonical form is unchanged, which is what proves the shape
+        // matched rather than merely decoding without error.
+        assert_eq!(format_program(&before), format_program(&after));
     }
 
     #[test]

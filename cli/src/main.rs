@@ -48,6 +48,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_validation.hpp"),
     ),
     (
+        "hs_runtime_auth.hpp",
+        include_str!("../../runtime/hs_runtime_auth.hpp"),
+    ),
+    (
         "hs_runtime_util.hpp",
         include_str!("../../runtime/hs_runtime_util.hpp"),
     ),

@@ -41,6 +41,7 @@ pub const DUPLICATE_DECL: u16 = 105;
 pub const DUPLICATE_ROUTE: u16 = 106;
 pub const DUPLICATE_MIDDLEWARE: u16 = 107;
 pub const DUPLICATE_MODEL: u16 = 108;
+pub const INVALID_PROTECT: u16 = 109;
 pub const UNDEFINED_MEMBER: u16 = 110;
 pub const TYPE_MISMATCH: u16 = 201;
 pub const WRONG_ARG_COUNT: u16 = 202;
@@ -48,6 +49,8 @@ pub const OPERATOR_TYPE_ERROR: u16 = 203;
 pub const INVALID_FIELD_OR_INDEX: u16 = 204;
 pub const RETURN_TYPE_MISMATCH: u16 = 205;
 pub const CONDITION_NOT_BOOL: u16 = 206;
+pub const DUPLICATE_PROTECT: u16 = 207;
+pub const REQUEST_UNAVAILABLE: u16 = 208;
 pub const IMPORT_CYCLE: u16 = 301;
 pub const MODULE_NOT_FOUND: u16 = 302;
 pub const IMPORT_CHAIN_TOO_DEEP: u16 = 303;
@@ -296,6 +299,21 @@ pub fn catalog() -> &'static [CodeDef] {
             fixes: &["Rename one model.", "Import the declaring module once."],
         },
         CodeDef {
+            number: 109,
+            name: "Invalid Protect Declaration",
+            kind: ErrorKind::Type,
+            meaning: "A `protect` declaration names a scheme or an option that does not exist, or asks for a route to be exempt in a way that can never match.",
+            example: "protect jwt(secret = k, except = [\"health\"])",
+            causes: &[
+                "The scheme is spelled differently from the one implemented.",
+                "An exempt path is missing its leading `/`, so it can never match a route path.",
+            ],
+            fixes: &[
+                "Use `protect jwt(secret = ...)`; `jwt` is the only scheme today.",
+                "Write exempt paths with a leading `/`, e.g. `except = [\"/health\"]`.",
+            ],
+        },
+        CodeDef {
             number: 110,
             name: "Undefined Member",
             kind: ErrorKind::Type,
@@ -363,7 +381,28 @@ pub fn catalog() -> &'static [CodeDef] {
             causes: &["Using a non-boolean value as the condition."],
             fixes: &["Compare explicitly, e.g. `?(users.count > 0)`."],
         },
+        CodeDef {
+            number: 207,
+            name: "Duplicate Protect",
+            kind: ErrorKind::Type,
+            meaning: "A program declares `protect` more than once.",
+            example: "protect jwt(secret = a)\nprotect jwt(secret = b)",
+            causes: &["A module and the file that imports it both declare a guard."],
+            fixes: &["Keep one `protect` declaration and merge the two `except` lists."],
+        },
 
+        CodeDef {
+            number: 208,
+            name: "Request Unavailable",
+            kind: ErrorKind::Type,
+            meaning: "A builtin that reads the in-flight HTTP request was called somewhere no request exists, such as a `calc` function or a global initializer.",
+            example: "calc peek() => Str {\n    <- http.header(\"authorization\")\n}",
+            causes: &["The helper was used in a function instead of a route body.", "It was used in a global `var` or `const` initializer."],
+            fixes: &[
+                "Move the call into a route or `before` body.",
+                "Pass the value you need in as an argument.",
+            ],
+        },
         // ---------------- Modules (HS0300..=HS0399) ----------------
         CodeDef {
             number: 301,

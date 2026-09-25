@@ -32,6 +32,7 @@ pub fn render_markdown(prog: &Program) -> String {
 
     let mut routes: Vec<&RouteDef> = Vec::new();
     let mut models: Vec<&ModelDef> = Vec::new();
+    let mut protect: Option<&ProtectDef> = None;
     let mut sockets: Vec<&SocketDef> = Vec::new();
     let mut funcs: Vec<&FunDef> = Vec::new();
     let mut tests: Vec<&TestDef> = Vec::new();
@@ -42,15 +43,42 @@ pub fn render_markdown(prog: &Program) -> String {
             Stmt::Socket(s) => sockets.push(s),
             Stmt::Func(f) => funcs.push(f),
             Stmt::Test(t) => tests.push(t),
+            Stmt::Protect(d) => protect = Some(d),
             _ => {}
         }
+    }
+
+    if let Some(g) = protect {
+        // The auth contract is the first thing a reader of the docs needs, and
+        // the compiler already knows it exactly.
+        out.push_str("## Authentication\n\n");
+        out.push_str(&format!("- Guard: `{}` (JWT, HS256)\n", g.scheme));
+        out.push_str(&format!("- Signing key: `{}`\n", g.secret.render()));
+        out.push_str(&format!(
+            "- Exempt paths: {}\n",
+            if g.except.is_empty() {
+                "none — every route requires a token".to_string()
+            } else {
+                g.except
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+        out.push('\n');
     }
 
     if !routes.is_empty() {
         out.push_str("## Routes\n\n");
         for r in &routes {
+            // Mark the guarded routes so the list is not just a path dump.
+            let auth = match protect {
+                Some(g) if !g.exempts(&r.path) => " (auth required)",
+                _ => "",
+            };
             out.push_str(&format!(
-                "- `{} {path}` -> `{path}`\n",
+                "- `{} {path}` -> `{path}`{auth}\n",
                 r.method,
                 path = r.path
             ));

@@ -1,0 +1,13 @@
+app @3031
+
+bring http
+
+// `http.header` reads the request being handled, and a calc has no request.
+// Reporting it here beats letting the generated C++ fail to compile.
+calc peek() => Str {
+    <- http.header("authorization")
+}
+
+GET "/x" :: {
+    <- 1
+}

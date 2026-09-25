@@ -450,6 +450,11 @@ pub fn lower(prog: &ast::Program) -> HirProgram {
                 items.push(HirItem::Fn(f));
                 stats.items += 1;
             }
+            // The guard is a codegen-time decision: HIR keeps routes as they
+            // are and the emitter consults the declaration when it walks them.
+            ast::Stmt::Protect(_) => {
+                stats.items += 1;
+            }
             ast::Stmt::If { .. } | ast::Stmt::Loop { .. } | ast::Stmt::Return(..)
             | ast::Stmt::Race(..) | ast::Stmt::Expect { .. } | ast::Stmt::ExprStmt(..) => {
                 // Statement at module scope is not legal today; skip.
@@ -764,7 +769,8 @@ impl Lowerer {
             // Items are handled by the program walker; guards keep exhaustiveness.
             ast::Stmt::Bring(..) | ast::Stmt::Import { .. } | ast::Stmt::App(..)
             | ast::Stmt::Model(..) | ast::Stmt::Route(..) | ast::Stmt::Socket(..)
-            | ast::Stmt::Func(..) | ast::Stmt::Middleware { .. } | ast::Stmt::Test(..) => {
+            | ast::Stmt::Func(..) | ast::Stmt::Middleware { .. } | ast::Stmt::Test(..)
+            | ast::Stmt::Protect(..) => {
                 unreachable!("item statement reached stmt lowering")
             }
         }

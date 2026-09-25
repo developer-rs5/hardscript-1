@@ -13,6 +13,7 @@
 //   hs_runtime_sched.hpp     test registry/runner
 //   hs_runtime_postgres.hpp  PostgreSQL native wire client
 //   hs_runtime_validation.hpp  validation engine (M5.1)
+//   hs_runtime_auth.hpp        JWT auth, route guard, password hashing (M5.2)
 //   hs_runtime_util.hpp      CLI/args helpers + codegen glue (hs_respond, tests)
 //
 // The generated code calls into these helpers (see compiler/src/codegen.rs).
@@ -28,6 +29,7 @@
 #include "hs_runtime_sched.hpp"
 #include "hs_runtime_postgres.hpp"
 #include "hs_runtime_validation.hpp"
+#include "hs_runtime_auth.hpp"
 #include "hs_runtime_util.hpp"
 
 #endif // HS_RUNTIME_HPP

@@ -397,6 +397,35 @@ pub struct VarDef {
     pub span: Span,
 }
 
+/// A `protect` declaration. `scheme` is the guard to apply (`jwt` today);
+/// `secret` is the expression that yields the signing key; `except` lists path
+/// prefixes that stay public.
+#[derive(Debug, Clone)]
+pub struct ProtectDef {
+    pub scheme: String,
+    pub secret: Expr,
+    pub except: Vec<String>,
+    pub span: Span,
+}
+
+impl ProtectDef {
+    /// True when this declaration leaves `path` public.
+    ///
+    /// An exempt entry covers its own path and everything under it, but the
+    /// match is segment-aware: `"/api"` exempts `"/api"` and `"/api/status"`
+    /// while `"/ap"` exempts neither, because prefix-matching a partial
+    /// segment would quietly expose `"/api"`. Both the emitter and the docs
+    /// generator ask this question, so the rule lives here once.
+    pub fn exempts(&self, path: &str) -> bool {
+        self.except.iter().any(|p| {
+            path == p
+                || (path.len() > p.len()
+                    && path.starts_with(p.as_str())
+                    && (p.ends_with('/') || path.as_bytes()[p.len()] == b'/'))
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     /// Builtin runtime module (`bring http`, `bring std.crypto`).
@@ -410,6 +439,8 @@ pub enum Stmt {
     Socket(SocketDef),
     Func(FunDef),
     Middleware { name: String, body: Vec<Stmt>, span: Span },
+    /// `protect jwt(secret = env.get("JWT_SECRET"), except = ["/health"])`
+    Protect(ProtectDef),
     Test(TestDef),
     Var(VarDef),
     Const(VarDef),
@@ -431,11 +462,59 @@ impl Stmt {
             Socket(s) => s.span,
             Func(f) => f.span,
             Middleware { span: s, .. } => *s,
+            Protect(d) => d.span,
             Test(t) => t.span,
             Var(v) | Const(v) => v.span,
             If { span: s, .. } | Loop { span: s, .. } | Return(_, s) | Race(_, s)
             | Expect { span: s, .. } => *s,
             ExprStmt(e) => e.span(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn guard(paths: &[&str]) -> ProtectDef {
+        ProtectDef {
+            scheme: "jwt".to_string(),
+            secret: Expr::Str("k".to_string(), Span::new(1, 1)),
+            except: paths.iter().map(|p| p.to_string()).collect(),
+            span: Span::new(1, 1),
+        }
+    }
+
+    #[test]
+    fn exempt_paths_match_on_segment_boundaries() {
+        let g = guard(&["/api", "/health"]);
+        // Exact matches.
+        assert!(g.exempts("/api"), "exact");
+        assert!(g.exempts("/health"), "exact second entry");
+        // Children are covered, which is what makes a prefix useful.
+        assert!(g.exempts("/api/status"), "child path");
+        assert!(g.exempts("/api/v1/users"), "deep child path");
+        // A partial-segment prefix must NOT match: this is the difference
+        // between an exempt list and a substring search, and getting it wrong
+        // publishes a route the author meant to guard.
+        assert!(!g.exempts("/ap"), "shorter than the prefix");
+        assert!(!g.exempts("/apix"), "partial segment");
+        assert!(!g.exempts("/healthcheck"), "partial segment on the other entry");
+        // Unrelated paths stay guarded.
+        assert!(!g.exempts("/"), "root");
+        assert!(!g.exempts("/users"), "unrelated");
+        assert!(!g.exempts(""), "empty path");
+        // A trailing slash in the entry is a directory, not a partial segment.
+        let dir = guard(&["/api/"]);
+        assert!(dir.exempts("/api/"), "exact with slash");
+        assert!(dir.exempts("/api/users"), "child with slash");
+        assert!(!dir.exempts("/api"), "parent without the slash");
+    }
+
+    #[test]
+    fn no_exempt_paths_guards_everything() {
+        let g = guard(&[]);
+        assert!(!g.exempts("/"), "root");
+        assert!(!g.exempts("/health"), "anything");
     }
 }

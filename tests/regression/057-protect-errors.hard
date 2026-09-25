@@ -1,0 +1,10 @@
+app @3031
+
+// `except` entries are matched segment-wise, so a path that does not start
+// with `/` could never match a route. Rejecting it at compile time is better
+// than shipping a route that looks public and is not.
+protect jwt(secret = "s", except = ["health"])
+
+GET "/" :: {
+    <- 1
+}

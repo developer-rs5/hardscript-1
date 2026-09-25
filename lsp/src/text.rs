@@ -404,6 +404,7 @@ fn keyword_text(keyword: Kw) -> Option<&'static str> {
         Kw::Message => "message",
         Kw::Disconnect => "disconnect",
         Kw::Before => "before",
+        Kw::Protect => "protect",
         Kw::Loop => "loop",
         Kw::Pick => "pick",
         Kw::Async => "async",

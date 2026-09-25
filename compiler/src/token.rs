@@ -39,6 +39,7 @@ pub enum Kw {
     Message,
     Disconnect,
     Before,
+    Protect,
     Loop,
     Pick,
     Async,

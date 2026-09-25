@@ -113,6 +113,14 @@ struct Codegen {
     /// Declared `model` names, used to decide whether a route body parameter
     /// gets automatic validation (M5.1).
     model_names: std::collections::BTreeSet<String>,
+    /// The `protect` declaration, if any: decides which routes get the auth
+    /// guard and which stay public (M5.2).
+    protect: Option<ProtectDef>,
+    /// What is being emitted right now. Request-scoped builtins such as
+    /// `http.header` and `auth.require` read the in-flight `Request`, so they
+    /// are only meaningful where one exists; without this the mistake would
+    /// surface as a raw g++ "req was not declared" error.
+    ctx: Ctx,
 }
 
 /// Generate the C++ translation unit for `prog`.
@@ -123,6 +131,8 @@ pub fn generate(prog: &Program) -> Result<String, Vec<Diag>> {
         path: prog.path.clone(),
         diags: Vec::new(),
         model_names: std::collections::BTreeSet::new(),
+        protect: None,
+        ctx: Ctx::Func,
     };
     cg.run(prog);
     if cg.diags.is_empty() {
@@ -146,6 +156,13 @@ impl Codegen {
     fn blank(&mut self) {
         self.out.push('\n');
     }
+    fn err_with(&mut self, msg: impl Into<String>, span: Span, help: &str) {
+        self.diags.push(
+            Diag::new(ErrorKind::Type, msg, span, help)
+                .with_code(crate::catalog::DUPLICATE_PROTECT),
+        );
+    }
+
     fn err(&mut self, msg: impl Into<String>, span: Span) {
         self.diags.push(Diag::new(
             ErrorKind::Codegen,
@@ -164,6 +181,7 @@ impl Codegen {
         self.blank();
 
         let mut routes: Vec<&RouteDef> = Vec::new();
+        let mut protect: Option<&ProtectDef> = None;
         let mut funcs: Vec<&FunDef> = Vec::new();
         let mut mws: Vec<String> = Vec::new();
         let mut mw_bodies: Vec<&Vec<Stmt>> = Vec::new();
@@ -188,13 +206,24 @@ impl Codegen {
                 Stmt::Socket(s) => sockets.push(s),
                 Stmt::Test(t) => tests.push(t),
                 Stmt::Model(m) => models.push(m),
+                Stmt::Protect(d) => match self.check_protect(d) {
+                    Some(err) => self.diags.push(err),
+                    None if protect.is_some() => self.err_with(
+                        "`protect` is already declared".to_string(),
+                        d.span,
+                        "One protect declaration covers every route; merge the two.",
+                    ),
+                    None => protect = Some(d),
+                },
                 _ => {}
             }
         }
 
-        // Model names drive automatic request-body validation, so the route
-        // emitters need the set before they run.
+        // Model names drive automatic request-body validation and `protect`
+        // decides which routes get the guard, so both have to be known before
+        // any route is emitted.
         self.model_names = models.iter().map(|m| m.name.clone()).collect();
+        self.protect = protect.cloned();
 
         for f in &funcs {
             self.emit_func(f);
@@ -329,12 +358,52 @@ impl Codegen {
         self.blank();
     }
 
+    /// Reject a `protect` we cannot honour at runtime, rather than emitting a
+    /// guard that silently does the wrong thing.
+    fn check_protect(&mut self, d: &ProtectDef) -> Option<Diag> {
+        if d.scheme != "jwt" {
+            return Some(Diag::new(
+                ErrorKind::Type,
+                format!("unknown protect scheme `{}`", d.scheme),
+                d.span,
+                "The only scheme today is `jwt`.",
+            )
+            .with_code(crate::catalog::INVALID_PROTECT));
+        }
+        for p in &d.except {
+            if !p.starts_with('/') {
+                return Some(Diag::new(
+                    ErrorKind::Type,
+                    format!("exempt path `{p}` must start with `/`"),
+                    d.span,
+                    "Write `except = [\"/health\"]`.",
+                )
+                .with_code(crate::catalog::INVALID_PROTECT));
+            }
+        }
+        None
+    }
+
     fn emit_route(&mut self, r: &RouteDef, idx: usize) {
         let line = format!("static hs::Response route_{idx}(const hs::Request& req) {{");
         self.wln(&line);
         self.ind += 1;
         self.wln("try {");
         self.ind += 1;
+        // `protect` runs before parameter binding, so a request without a
+        // valid token never reaches body validation and never sees the field
+        // names in the schema.
+        if let Some(g) = self.protect.clone() {
+            if !g.exempts(&r.path) {
+                let secret = self.expr(&g.secret);
+                self.wln("static const std::string __hs_secret = hs::to_text(");
+                self.ind += 1;
+                self.wln(&secret);
+                self.ind -= 1;
+                self.wln(").sv;");
+                self.wln("hs::auth_guard(req, __hs_secret);");
+            }
+        }
         for p in &r.params {
             let nm = safe_id(&p.name);
             if p.is_body {
@@ -517,14 +586,19 @@ impl Codegen {
     // ---------- statements ----------
 
     fn stmts(&mut self, body: &[Stmt], ctx: Ctx) {
+        let outer = self.ctx;
+        self.ctx = ctx;
         for st in body {
             self.stmt(st, ctx);
         }
+        self.ctx = outer;
     }
 
     fn stmt(&mut self, st: &Stmt, ctx: Ctx) {
         match st {
             Stmt::Bring(..) | Stmt::Import { .. } | Stmt::App(..) | Stmt::Model(..) => {}
+            // `protect` is consumed by `run` before any body is emitted.
+            Stmt::Protect(..) => {}
             Stmt::Func(_) | Stmt::Route(_) | Stmt::Middleware { .. } | Stmt::Socket(_)
             | Stmt::Test(_) => {}
             Stmt::Var(v) => {
@@ -771,10 +845,12 @@ impl Codegen {
 
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> String {
         match callee {
-            Expr::Member(base, name, _) => {
+            Expr::Member(base, name, msp) => {
                 if let Expr::Ident(module, _) = base.as_ref() {
                     if MODULES.contains(&module.as_str()) {
-                        if let Some(r) = self.builtin(module, name, args, span) {
+                        // The callee's own span reads better in a diagnostic
+                        // than the one at the opening paren.
+                        if let Some(r) = self.builtin(module, name, args, *msp) {
                             return r;
                         }
                     }
@@ -817,7 +893,32 @@ impl Codegen {
         format!("hs::to_int({v}).iv")
     }
 
+    /// Builtins that read the in-flight `Request`. Using one outside a route or
+    /// middleware would generate C++ referring to a `req` that does not exist,
+    /// so it is a source-level error instead of a g++ failure.
+    fn needs_request(&self, module: &str, name: &str) -> bool {
+        matches!((module, name),
+            ("http", "header")
+                | ("http", "query")
+                | ("auth", "bearer")
+                | ("auth", "require")
+                | ("auth", "optional"))
+    }
+
     fn builtin(&mut self, module: &str, name: &str, args: &[Expr], span: Span) -> Option<String> {
+        if self.needs_request(module, name) && !matches!(self.ctx, Ctx::Route | Ctx::Middleware) {
+            self.diags.push(
+                Diag::new(
+                    ErrorKind::Type,
+                    format!("{module}.{name}() can only be called in a route"),
+                    span,
+                    "It reads the request being handled, which only exists there. \
+                     Pass the value in, or move the call into a route body.",
+                )
+                .with_code(crate::catalog::REQUEST_UNAVAILABLE),
+            );
+            return None;
+        }
         match (module, name) {
             // crypto
             (_, _) if module == "crypto" && name == "sha256" => {
@@ -1069,6 +1170,96 @@ impl Codegen {
             (_, _) if module == "validation" && name == "is_null" => {
                 let a = self.arg_at(args, 0);
                 Some(format!("hs::Val::boolean(hs::v_is_null({a}))"))
+            }
+            // auth (M5.2)
+            //
+            // `auth.issue` mints a token; everything else reads the request.
+            // `auth.user()` returns the claims the `protect` guard published
+            // for the request in flight, so a handler never has to re-verify
+            // a token it already proved valid.
+            (_, _) if module == "auth" && name == "issue" => {
+                let claims = self.arg_at(args, 0);
+                let secret = self.ttx(args, 1);
+                let ttl = match args.get(2) {
+                    Some(_) => format!("(double){}", self.tin(args, 2)),
+                    None => "3600.0".to_string(),
+                };
+                let iss = match args.get(3) {
+                    Some(_) => self.ttx(args, 3),
+                    None => "std::string()".to_string(),
+                };
+                Some(format!(
+                    "hs::Val::text(hs::auth_issue({claims}, {secret}, {ttl}, {iss}))"
+                ))
+            }
+            (_, _) if module == "auth" && (name == "verify" || name == "check") => {
+                let token = self.ttx(args, 0);
+                let secret = self.ttx(args, 1);
+                Some(format!(
+                    "hs::Val::boolean(hs::auth_check({token}, {secret}).ok)"
+                ))
+            }
+            (_, _) if module == "auth" && name == "claims" => {
+                // Decode without verifying. Useful for a logout endpoint that
+                // wants to read `jti` off a token it is about to discard, and
+                // for tests; never use it to make an authorization decision.
+                let token = self.ttx(args, 0);
+                Some(format!("hs::jwt_claims_unchecked({token})"))
+            }
+            (_, _) if module == "auth" && name == "reason" => {
+                let a = self.arg_at(args, 0);
+                let b = self.ttx(args, 1);
+                Some(format!("hs::Val::text(hs::auth_check({a}, {b}).reason)"))
+            }
+            (_, _) if module == "auth" && name == "user" => {
+                Some("hs::auth_user()".to_string())
+            }
+            (_, _) if module == "auth" && name == "bearer" => {
+                Some("hs::Val::text(hs::auth_bearer(req))".to_string())
+            }
+            (_, _) if module == "auth" && name == "require" => {
+                let secret = self.ttx(args, 0);
+                let claim = match args.get(1) {
+                    Some(_) => self.ttx(args, 1),
+                    None => "std::string()".to_string(),
+                };
+                Some(Self::void_expr(format!(
+                    "hs::auth_require(req, {secret}, {claim})"
+                )))
+            }
+            (_, _) if module == "auth" && name == "optional" => {
+                let secret = self.ttx(args, 0);
+                Some(format!("hs::Val::boolean(hs::auth_optional(req, {secret}))"))
+            }
+            (_, _) if module == "auth" && name == "reject" => {
+                let status = self.arg_at(args, 0);
+                let msg = match args.get(1) {
+                    Some(_) => self.ttx(args, 1),
+                    None => "std::string()".to_string(),
+                };
+                Some(Self::void_expr(format!(
+                    "hs::auth_reject((int)hs::to_int({status}).iv, {msg})"
+                )))
+            }
+            (_, _) if module == "auth" && name == "hash" => {
+                Some(format!("hs::Val::text(hs::auth_hash_password({}))", self.ttx(args, 0)))
+            }
+            (_, _) if module == "auth" && name == "check_password" => {
+                Some(format!(
+                    "hs::Val::boolean(hs::auth_verify_password({}, {}))",
+                    self.ttx(args, 0),
+                    self.ttx(args, 1)
+                ))
+            }
+            // http: request/response access
+            (_, _) if module == "http" && name == "header" => {
+                Some(format!(
+                    "hs::Val::text(req.header({}))",
+                    self.ttx(args, 0)
+                ))
+            }
+            (_, _) if module == "http" && name == "query" => {
+                Some(format!("hs::Val::text(req.q({}))", self.ttx(args, 0)))
             }
             // http: early response with an arbitrary status
             (_, _) if module == "http" && name == "abort" => {

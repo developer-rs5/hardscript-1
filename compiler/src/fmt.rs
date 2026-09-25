@@ -189,6 +189,19 @@ impl Fmt {
                 }
                 self.line(d, "}");
             }
+            Stmt::Protect(p) => {
+                let mut opts = vec![format!("secret = {}", p.secret.render())];
+                if !p.except.is_empty() {
+                    let paths = p
+                        .except
+                        .iter()
+                        .map(|e| format!("{e:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    opts.push(format!("except = [{paths}]"));
+                }
+                self.line(d, &format!("protect {}({})", p.scheme, opts.join(", ")));
+            }
             Stmt::Test(t) => {
                 self.line(d, &format!("test \"{}\" {{", t.name));
                 for s in &t.body {

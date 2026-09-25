@@ -73,7 +73,7 @@ Triple-quoted strings `"""..."""` capture content verbatim (no escapes).
 ```
 bring   app     model    GET     POST    PUT
 DELETE  PATCH   socket   connect message disconnect
-before  loop    pick     async   wait    race
+before  protect loop    pick     async   wait    race
 test    expect  calc
 ```
 
@@ -290,6 +290,47 @@ before <name> :: { ... }
 
 ---
 
+## 13.1 Route protection
+
+```
+protect jwt(secret = <expr>, except = [ "/path", ... ])
+```
+
+- Declares a JWT guard for the program. Every route is protected unless it
+  matches an `except` path; an exempt entry also exempts anything under it, so
+  `"/api"` exempts `"/api"` and `"/api/status"`.
+- `secret` is required and is the HMAC-SHA256 signing key. It is evaluated once,
+  lazily, on the first guarded request.
+- `except` is optional. Paths must start with `/`; the prefix match is
+  segment-aware, so `"/ap"` does not exempt `"/api"`.
+- The guard runs before parameters are bound and before any model validation, so
+  an unauthenticated request never reaches the handler.
+- Credentials are read from `Authorization: Bearer <token>`, then the
+  `access_token` cookie, then the `token` query parameter. The scheme match is
+  case-insensitive.
+- A missing, malformed, expired, not-yet-valid, wrongly-signed, unsigned
+  (`alg=none`), or non-HS256 token is rejected with `401` and a JSON body;
+  `401` responses carry a `WWW-Authenticate: Bearer` header.
+- On success the verified claims are published for the request, and a handler
+  reads them with `auth.user()` instead of re-verifying the token.
+- `jwt` is the only scheme today; any other name is a compile error.
+- Only one `protect` declaration is allowed per program.
+
+Example:
+
+```
+secret <- env.get("JWT_SECRET")
+
+protect jwt(secret = secret, except = ["/health", "/login"])
+
+GET "/me" :: {
+    u <- auth.user()
+    <- { id: u.sub, role: u.role }
+}
+```
+
+---
+
 ## 14. Conditionals
 
 ```
@@ -431,7 +472,7 @@ Canonical formatting applied by the AST re-emitter:
 program    ::= (stmt)* EOF
 stmt       ::= bring module
              | app "@" int
-             | modeldecl | route | middleware | socket | func | test
+             | modeldecl | route | middleware | protectdecl | socket | func | test
              | var | const | if | loop | race | return | expect | expr
 var        ::= ident "<-" expr
 const      ::= ident "::=" expr
@@ -445,6 +486,7 @@ typaram    ::= ident ident
 route      ::= (GET|POST|PUT|DELETE|PATCH) string "::" routeparams? block
 routeparams::= "(" ident "=" ident ("," ident "=" ident)* ")"
 middleware ::= "before" ident "::" block
+protectdecl::= "protect" ident "(" (ident "=" expr) ("," ident "=" expr)* ")"
 socket     ::= "socket" string "{" (connect|message|disconnect)* "}"
 event      ::= (connect|message|disconnect) ("(" ident* ")")? "::" block
 test       ::= "test" string block

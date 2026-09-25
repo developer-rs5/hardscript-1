@@ -1,0 +1,53 @@
+bring http
+
+bring auth
+
+app @3031
+
+// A fixed secret keeps the fixture deterministic: the token below is signed
+// with exactly this key, so the guarded route can be reached over HTTP.
+secret <- "reg-secret"
+
+// The exempt paths stay public; every other route needs a valid token.
+// An exempt entry also exempts the paths under it.
+protect jwt(secret = secret, except = ["/health", "/login"])
+
+GET "/health" :: {
+    <- { status: "ok" }
+}
+
+POST "/login" :: {
+    tok <- auth.issue({ sub: "u1", role: "admin" }, secret, 3600, "hardscript")
+    good <- auth.verify(tok, secret)
+    bad <- auth.verify(tok + "x", secret)
+    c <- auth.claims(tok)
+    <- { issued: good, tampered: bad, sub: c.sub, role: c.role }
+}
+
+// Protected: without credentials the guard answers 401 before the handler
+// body runs, and the JSON body says which check failed.
+GET "/me" :: {
+    u <- auth.user()
+    <- { id: u.sub, role: u.role }
+}
+
+// Protected and role-gated: a valid token is not enough, the claim has to be
+// there too, and a missing claim is 403 rather than 401.
+GET "/admin" :: {
+    auth.require(secret, "role")
+    <- { ok: true }
+}
+
+// The token in the .exp was signed with the secret above and carries no exp, so
+// it stays valid; it arrives as ?token= because the regression runner cannot
+// set request headers.
+GET "/who" :: {
+    u <- auth.user()
+    <- { id: u.sub, role: u.role }
+}
+
+// A route under an exempt prefix stays public even though the prefix is not an
+// exact path.
+GET "/health/deep" :: {
+    <- { status: "deep-ok" }
+}
