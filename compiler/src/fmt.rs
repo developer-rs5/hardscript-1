@@ -102,7 +102,7 @@ impl Fmt {
                     .as_ref()
                     .map(|t| format!(" => {t}"))
                     .unwrap_or_default();
-                self.line(d, &format!("calc fn {}({}){} {{", f.name, params.join(", "), ret));
+                self.line(d, &format!("calc {}({}){} {{", f.name, params.join(", "), ret));
                 for s in &f.body {
                     self.stmt(s, d + 1);
                 }
@@ -237,5 +237,42 @@ impl Fmt {
             Module::Runtime => "runtime",
             Module::Time => "time",
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calc_function_roundtrip_is_idempotent() {
+        // Regression for the "calc fn" formatter bug: formatting a program
+        // with `calc` functions must emit `calc name(...)`, re-parse, and be
+        // byte-identical on the second pass.
+        let src = "calc add(Int a, Int b) => Int {\n    <- a + b\n}\n\ncalc greet(Str name) => Str {\n    <- \"hi \" + name\n}\n";
+        let prog = crate::frontend(src, "test.hard").expect("parses");
+        let once = format(&prog);
+        let reparsed = crate::frontend(&once, "test.hard").expect("formatted output parses");
+        assert!(
+            once.contains("calc add("),
+            "formatter must keep `calc`, got:\n{once}"
+        );
+        assert!(
+            !once.contains("calc fn"),
+            "formatter must not emit stray `fn`, got:\n{once}"
+        );
+        assert_eq!(
+            once,
+            format(&reparsed),
+            "formatting must be idempotent:\n{once}"
+        );
+    }
+
+    #[test]
+    fn route_and_handler_survive_roundtrip() {
+        let src = "bring http\n\napp @3033\n\nGET \"/\" :: {\n    <- { hello: \"world\" }\n}\n";
+        let once = format(&crate::frontend(src, "test.hard").unwrap());
+        assert!(once.contains("GET \"/\" :: {"), "got:\n{once}");
+        let twice = format(&crate::frontend(&once, "test.hard").unwrap());
+        assert_eq!(once, twice);
     }
 }
