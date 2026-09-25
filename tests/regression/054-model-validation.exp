@@ -1,0 +1,6 @@
+ok
+GET /ok = {"passed":true}
+GET /bad = {"count":5,"passed":false,"first_field":"email","first_rule":"email"}
+GET /fmt = {"email":true,"not_email":false,"url":true,"uuid":true,"ip":true,"phone":true,"low":true,"high":true}
+GET /nullable = {"passed":true}
+GET /unknown = {"passed":false}

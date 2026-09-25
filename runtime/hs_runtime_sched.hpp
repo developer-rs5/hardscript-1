@@ -1,6 +1,8 @@
 #ifndef HS_RUNTIME_SCHED_HPP
 #define HS_RUNTIME_SCHED_HPP
 #include "hs_runtime_http.hpp"
+namespace hs {
+
 // ===========================================================================
 // Test runner
 // ===========================================================================
@@ -48,5 +50,7 @@ inline int Server::test_main() {
     printf("%d passed, %d failed\n", test_state().passed, test_state().failed);
     return test_state().failed == 0 ? 0 : 1;
 }
+
+} // namespace hs
 
 #endif

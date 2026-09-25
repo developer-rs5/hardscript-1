@@ -8,9 +8,9 @@ use crate::ast::*;
 use crate::error::{Diag, ErrorKind};
 use crate::token::Span;
 
-const MODULES: [&str; 10] = [
-    "crypto", "fs", "env", "json", "jwt", "time", "runtime", "websocket", "postgres", "http",
-];
+/// Allowed builtin modules for lowering `module.builtin(...)` calls. Derived
+/// from the AST catalog (see [`Module::SET`]).
+const MODULES: &[&str] = Module::SET_NAMES;
 
 const CPP_KEYWORDS: [&str; 61] = [
     "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break",
@@ -34,11 +34,85 @@ fn cstring(s: &str) -> String {
     format!("{:?}", s)
 }
 
+/// C++ double literal for a rule bound (`18` -> `18.0`).
+fn cdbl(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 9.0e15 {
+        format!("{f:.1}")
+    } else {
+        format!("{f}")
+    }
+}
+
+/// Map one `name = value` field constraint onto a runtime rule constructor.
+///
+/// Unknown constraint names lower to nothing rather than failing the build:
+/// the field type still validates, and `hard openapi` records the constraint
+/// as documentation.
+fn rule_from_expr(key: &str, v: &Expr) -> Option<String> {
+    let num = |e: &Expr| -> Option<f64> {
+        match e {
+            Expr::Int(n, _) => Some(*n as f64),
+            Expr::Float(f, _) => Some(*f),
+            _ => None,
+        }
+    };
+    let txt = |e: &Expr| -> Option<String> {
+        match e {
+            Expr::Str(s, _) => Some(s.clone()),
+            Expr::Ident(s, _) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    match key {
+        "min" | "gte" => num(v).map(|n| format!("hs::r_min({})", cdbl(n))),
+        "max" | "lte" => num(v).map(|n| format!("hs::r_max({})", cdbl(n))),
+        "gt" => num(v).map(|n| format!("hs::r_min({})", cdbl(n + 1.0))),
+        "lt" => num(v).map(|n| format!("hs::r_max({})", cdbl(n - 1.0))),
+        "between" | "range" => match v {
+            Expr::Range(lo, hi, _) => {
+                let l = num(lo)?;
+                let h = num(hi)?;
+                Some(format!("hs::r_minmax({}, {})", cdbl(l), cdbl(h)))
+            }
+            _ => None,
+        },
+        "length" | "len" => match v {
+            // `length = 3..30`
+            Expr::Range(lo, hi, _) => {
+                let l = num(lo)?;
+                let h = num(hi)?;
+                Some(format!("hs::r_length({}, {})", l as i64, h as i64))
+            }
+            // `length = 8`
+            _ => num(v).map(|n| format!("hs::r_length({}, {})", n as i64, i64::MAX)),
+        },
+        "regex" | "match" | "pattern" => txt(v).map(|s| format!("hs::r_regex({:?})", s)),
+        "in" | "oneof" | "enum" | "values" => match v {
+            Expr::List(items, _) => {
+                let lits = items.iter().filter_map(|i| txt(i)).collect::<Vec<_>>();
+                if lits.is_empty() {
+                    None
+                } else {
+                    let parts = lits.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>();
+                    Some(format!("hs::r_enum({{{}}})", parts.join(", ")))
+                }
+            }
+            _ => txt(v).map(|s| format!("hs::r_enum_str({:?})", s)),
+        },
+        "nullable" | "optional" => Some("hs::r_nullable()".to_string()),
+        "required" => Some("hs::r_required()".to_string()),
+        _ => None,
+    }
+}
+
 struct Codegen {
     out: String,
     ind: usize,
     path: String,
     diags: Vec<Diag>,
+    /// Declared `model` names, used to decide whether a route body parameter
+    /// gets automatic validation (M5.1).
+    model_names: std::collections::BTreeSet<String>,
 }
 
 /// Generate the C++ translation unit for `prog`.
@@ -48,6 +122,7 @@ pub fn generate(prog: &Program) -> Result<String, Vec<Diag>> {
         ind: 0,
         path: prog.path.clone(),
         diags: Vec::new(),
+        model_names: std::collections::BTreeSet::new(),
     };
     cg.run(prog);
     if cg.diags.is_empty() {
@@ -94,6 +169,7 @@ impl Codegen {
         let mut mw_bodies: Vec<&Vec<Stmt>> = Vec::new();
         let mut sockets: Vec<&SocketDef> = Vec::new();
         let mut tests: Vec<&TestDef> = Vec::new();
+        let mut models: Vec<&ModelDef> = Vec::new();
 
         for st in &prog.stmts {
             match st {
@@ -111,12 +187,20 @@ impl Codegen {
                 }
                 Stmt::Socket(s) => sockets.push(s),
                 Stmt::Test(t) => tests.push(t),
+                Stmt::Model(m) => models.push(m),
                 _ => {}
             }
         }
 
+        // Model names drive automatic request-body validation, so the route
+        // emitters need the set before they run.
+        self.model_names = models.iter().map(|m| m.name.clone()).collect();
+
         for f in &funcs {
             self.emit_func(f);
+        }
+        for (i, m) in models.iter().enumerate() {
+            self.emit_schema(m, i);
         }
         for (i, r) in routes.iter().enumerate() {
             self.emit_route(r, i);
@@ -142,7 +226,89 @@ impl Codegen {
             mws.len(),
             sockets.len(),
             tests.len(),
+            models.len(),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Validation schemas (M5.1)
+    // -----------------------------------------------------------------
+
+    /// Lower one `model` declaration into a `hs::register_schema` call.
+    /// Every field becomes an `hs::vf` entry carrying its declared type plus
+    /// the constraint rules written in the source.
+    fn emit_schema(&mut self, m: &ModelDef, idx: usize) {
+        let mut entries = Vec::new();
+        for f in &m.fields {
+            let mut rules = Vec::new();
+            let pos = f.positional();
+            for a in &f.args {
+                if let FieldArg::Constraint(k, v) = a {
+                    if let Some(r) = rule_from_expr(k, v) {
+                        rules.push(r);
+                    }
+                }
+            }
+            // Positional arguments: `Enum("a","b")` becomes an enum rule and
+            // `List(Int)` an element-type rule; a bare `nullable` / `required`
+            // is a flag rather than a value.
+            for v in &pos {
+                match v {
+                    Expr::Str(s, _) => {
+                        if f.ty == "Enum" {
+                            rules.push(format!("hs::r_enum_one({:?})", s));
+                        } else if s == "nullable" {
+                            rules.push("hs::r_nullable()".to_string());
+                        } else if s == "required" {
+                            rules.push("hs::r_required()".to_string());
+                        }
+                    }
+                    Expr::Ident(s, _) => {
+                        if s == "nullable" {
+                            rules.push("hs::r_nullable()".to_string());
+                        } else if s == "required" {
+                            rules.push("hs::r_required()".to_string());
+                        } else if f.ty == "List" || f.ty == "Array" {
+                            rules.push(format!("hs::r_items({:?})", s));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for a in &f.attrs {
+                match a.name.as_str() {
+                    "nullable" | "optional" => rules.push("hs::r_nullable()".to_string()),
+                    "required" => rules.push("hs::r_required()".to_string()),
+                    _ => {}
+                }
+            }
+            let strict = if m.strict { "true" } else { "false" };
+            let _ = strict;
+            let rule_list = if rules.is_empty() {
+                String::new()
+            } else {
+                format!(", {{{}}}", rules.join(", "))
+            };
+            entries.push(format!(
+                "hs::vf({:?}, {:?}{})",
+                f.name, f.ty, rule_list
+            ));
+        }
+        let fn_name = format!("register_schema_{idx}");
+        self.wln(&format!("static bool schema_registered_{idx} = false;"));
+        self.wln(&format!(
+            "static void {fn_name}() {{ if (schema_registered_{idx}) return; schema_registered_{idx} = true;"
+        ));
+        self.ind += 1;
+        self.wln(&format!(
+            "hs::register_schema({:?}, {{{}}}, {});",
+            m.name,
+            entries.join(", "),
+            m.strict
+        ));
+        self.ind -= 1;
+        self.wln("}");
+        self.blank();
     }
 
     fn emit_func(&mut self, f: &FunDef) {
@@ -172,9 +338,19 @@ impl Codegen {
         for p in &r.params {
             let nm = safe_id(&p.name);
             if p.is_body {
-                let l = format!("hs::Val {nm} = req.json();");
-                self.wln(&l);
+                self.wln(&format!("hs::Val {nm} = req.json();"));
+                // M5.1: binding the body to a declared model validates it
+                // before the handler body runs; a failure is HTTP 400.
+                if let Some(ty) = &p.ty {
+                    if self.model_names.contains(ty) {
+                        self.wln(&format!(
+                            "{{ hs::Response __vresp; if (!hs::validation_gate({:?}, {nm}, __vresp)) return __vresp; }}",
+                            ty
+                        ));
+                    }
+                }
             } else {
+
                 self.wln(&format!("hs::Val {nm} = [&]() -> hs::Val {{"));
                 self.ind += 1;
                 self.wln(&format!(
@@ -191,6 +367,10 @@ impl Codegen {
         }
         self.stmts(&r.body, Ctx::Route);
         self.wln("return hs::Response::error(500, \"route reached the end without returning a value\");");
+        self.ind -= 1;
+        self.wln("} catch (const hs::HttpAbort& a) {");
+        self.ind += 1;
+        self.wln("return a.r;");
         self.ind -= 1;
         self.wln("} catch (const std::exception& e) {");
         self.ind += 1;
@@ -213,6 +393,10 @@ impl Codegen {
         self.ind += 1;
         self.stmts(body, Ctx::Middleware);
         self.wln("return next();");
+        self.ind -= 1;
+        self.wln("} catch (const hs::HttpAbort& a) {");
+        self.ind += 1;
+        self.wln("return a.r;");
         self.ind -= 1;
         self.wln("} catch (const std::exception& e) {");
         self.ind += 1;
@@ -287,7 +471,8 @@ impl Codegen {
         }
     }
 
-    fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize) {
+    fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize,
+                 nmodels: usize) {
         self.wln("int main(int argc, char** argv) {");
         self.ind += 1;
         self.wln("hs::set_args(argc, argv);");
@@ -308,6 +493,10 @@ impl Codegen {
         let line = format!("app.port = {port};");
         self.wln(&line);
         self.blank();
+        for i in 0..nmodels {
+            let line = format!("register_schema_{i}();");
+            self.wln(&line);
+        }
         for i in 0..nws {
             let line = format!("register_ws_{i}();");
             self.wln(&line);
@@ -804,6 +993,91 @@ impl Codegen {
                 let sql = self.ttx(args, 1);
                 Some(format!("hs::pg_query({fd}, {sql})"))
             }
+            // validation (M5.1)
+            (_, _) if module == "validation" && name == "check" => {
+                let a = self.ttx(args, 0);
+                let b = self.arg_at(args, 1);
+                Some(format!("hs::validate({a}, {b}).to_val()"))
+            }
+            (_, _) if module == "validation" && name == "valid" => {
+                let a = self.ttx(args, 0);
+                let b = self.arg_at(args, 1);
+                Some(format!("hs::Val::boolean(hs::valid({a}, {b}))"))
+            }
+            (_, _) if module == "validation" && name == "errors" => {
+                let a = self.arg_at(args, 0);
+                Some(format!(
+                    "([&](const hs::Val& __r) {{ const hs::Val* __e = __r.find(\"errors\"); return __e ? *__e : hs::Val::list({{}}); }})({a})"
+                ))
+            }
+            (_, _) if module == "validation" && name == "reject" => {
+                let a = self.arg_at(args, 0);
+                Some(Self::void_expr(format!("hs::validation_reject({a})")))
+            }
+            (_, _) if module == "validation" && name == "email" => {
+                let a = self.ttx(args, 0);
+                Some(format!("hs::Val::boolean(hs::v_nonempty({a}) && hs::v_is_email({a}))"))
+            }
+            (_, _) if module == "validation" && name == "url" => {
+                let a = self.ttx(args, 0);
+                Some(format!("hs::Val::boolean(hs::v_nonempty({a}) && hs::v_is_url({a}))"))
+            }
+            (_, _) if module == "validation" && name == "uuid" => {
+                let a = self.ttx(args, 0);
+                Some(format!("hs::Val::boolean(hs::v_nonempty({a}) && hs::v_is_uuid({a}))"))
+            }
+            (_, _) if module == "validation" && name == "ip" => {
+                let a = self.ttx(args, 0);
+                Some(format!("hs::Val::boolean(hs::v_nonempty({a}) && hs::v_is_ip({a}))"))
+            }
+            (_, _) if module == "validation" && name == "phone" => {
+                let a = self.ttx(args, 0);
+                Some(format!("hs::Val::boolean(hs::v_nonempty({a}) && hs::v_is_phone({a}))"))
+            }
+            (_, _) if module == "validation" && name == "regex" => {
+                let a = self.ttx(args, 0);
+                let b = self.ttx(args, 1);
+                Some(format!("hs::Val::boolean(hs::v_regex_test(hs::v_regex_id({a}), {b}))"))
+            }
+            (_, _) if module == "validation" && name == "min" => {
+                let a = self.arg_at(args, 0);
+                let b = self.tin(args, 1);
+                Some(format!("hs::Val::boolean(hs::v_min({a}, (double){b}))"))
+            }
+            (_, _) if module == "validation" && name == "max" => {
+                let a = self.arg_at(args, 0);
+                let b = self.tin(args, 1);
+                Some(format!("hs::Val::boolean(hs::v_max({a}, (double){b}))"))
+            }
+            (_, _) if module == "validation" && name == "length" => {
+                let a = self.arg_at(args, 0);
+                let b = self.tin(args, 1);
+                let c = self.tin(args, 2);
+                Some(format!("hs::Val::boolean(hs::v_length({a}, (double){b}, (double){c}))"))
+            }
+            (_, _) if module == "validation" && name == "between" => {
+                let a = self.arg_at(args, 0);
+                let b = self.tin(args, 1);
+                let c = self.tin(args, 2);
+                Some(format!("hs::Val::boolean(hs::v_between({a}, (double){b}, (double){c}))"))
+            }
+            (_, _) if module == "validation" && (name == "one_of" || name == "oneof") => {
+                let a = self.arg_at(args, 0);
+                let b = self.ttx(args, 1);
+                Some(format!("hs::Val::boolean(hs::v_one_of({a}, {b}))"))
+            }
+            (_, _) if module == "validation" && name == "is_null" => {
+                let a = self.arg_at(args, 0);
+                Some(format!("hs::Val::boolean(hs::v_is_null({a}))"))
+            }
+            // http: early response with an arbitrary status
+            (_, _) if module == "http" && name == "abort" => {
+                let st = self.arg_at(args, 0);
+                let body = self.arg_at(args, 1);
+                Some(Self::void_expr(format!(
+                    "hs::abort_json((int)hs::to_int({st}).iv, \"error\", hs::to_text({body}).sv)"
+                )))
+            }
             _ => {
                 let _ = span;
                 self.err(format!("unknown builtin `{module}.{name}`"), span);
@@ -819,43 +1093,7 @@ impl Codegen {
     // ---------- source-ish rendering for diagnostics / expect ----------
 
     fn src_expr(&self, e: &Expr) -> String {
-        match e {
-            Expr::Int(n, _) => n.to_string(),
-            Expr::Float(f, _) => f.to_string(),
-            Expr::Str(s, _) => format!("\"{}\"", s),
-            Expr::Bool(b, _) => b.to_string(),
-            Expr::List(items, _) => format!(
-                "[{}]",
-                items
-                    .iter()
-                    .map(|i| self.src_expr(i))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Expr::Obj(kvs, _) => format!(
-                "{{ {} }}",
-                kvs.iter()
-                    .map(|(k, v)| format!("{k}: {}", self.src_expr(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Expr::Ident(n, _) => n.clone(),
-            Expr::Member(b, n, _) => format!("{}.{}", self.src_expr(b), n),
-            Expr::Index(b, i, _) => format!("{}[{}]", self.src_expr(b), self.src_expr(i)),
-            Expr::Call { callee, args, .. } => format!(
-                "{}({})",
-                self.src_expr(callee),
-                args.iter().map(|a| self.src_expr(a)).collect::<Vec<_>>().join(", ")
-            ),
-            Expr::Unary(UnOp::Neg, x, _) => format!("-{}", self.src_expr(x)),
-            Expr::Unary(UnOp::Not, x, _) => format!("!{}", self.src_expr(x)),
-            Expr::Binary(op, l, r, _) => {
-                format!("{} {} {}", self.src_expr(l), op.symbol(), self.src_expr(r))
-            }
-            Expr::Range(l, h, _) => format!("{}...{}", self.src_expr(l), self.src_expr(h)),
-            Expr::Match(_, _, _) => "pick(..)".to_string(),
-            Expr::HttpCall { verb, path, .. } => format!("{verb} \"{path}\""),
-        }
+        e.render()
     }
 }
 

@@ -61,15 +61,54 @@ pub fn render_markdown(prog: &Program) -> String {
     if !models.is_empty() {
         out.push_str("## Models\n\n");
         for m in &models {
-            out.push_str(&format!("### `{}` (table `{}`)\n\n", m.name, m.table));
-            out.push_str("| Field | Type | Attributes |\n|---|---|---|\n");
+            let head = match (m.table == m.name.to_lowercase(), m.strict) {
+                (true, true) => format!("### `{}` (table `{}`, strict)\n\n", m.name, m.table),
+                (true, false) => format!("### `{}` (table `{}`)\n\n", m.name, m.table),
+                (false, true) => format!("### `{}` (table `{}`, strict)\n\n", m.name, m.table),
+                (false, false) => format!("### `{}` (table `{}`)\n\n", m.name, m.table),
+            };
+            out.push_str(&head);
+            // The declared type is the interesting part, so carry the
+            // constraint list and the presence marker: `Int!(min=18, max=120)`
+            // says more than `Int` plus a separate attributes column.
+            out.push_str("| Field | Type | Constraints | Attributes |\n|---|---|---|---|\n");
             for f in &m.fields {
-                out.push_str(&format!(
-                    "| {} | {} | {} |\n",
-                    f.name,
-                    f.ty,
-                    f.attrs.join(", ")
-                ));
+                let constraints = f
+                    .args
+                    .iter()
+                    .map(|a| match a {
+                        FieldArg::Positional(e) => e.render(),
+                        FieldArg::Constraint(k, v) => format!("{k}={}", v.render()),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let attrs = f
+                    .attrs
+                    .iter()
+                    .filter(|a| !(a.arg.is_none() && matches!(a.name.as_str(), "required" | "nullable" | "optional")))
+                    .map(|a| match &a.arg {
+                        Some(e) => format!("@{}({})", a.name, e.render()),
+                        None => format!("@{}", a.name),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let presence = if f.attrs.iter().any(|a| a.arg.is_none() && a.name == "required") {
+                    "required"
+                } else if f.attrs.iter().any(|a| {
+                    a.arg.is_none() && matches!(a.name.as_str(), "nullable" | "optional")
+                }) {
+                    "optional"
+                } else {
+                    ""
+                };
+                let constraints = if presence.is_empty() {
+                    constraints
+                } else if constraints.is_empty() {
+                    presence.to_string()
+                } else {
+                    format!("{presence}, {constraints}")
+                };
+                out.push_str(&format!("| {} | {} | {} | {} |\n", f.name, f.ty, constraints, attrs));
             }
             out.push_str("\n");
         }
@@ -109,16 +148,5 @@ pub fn render_markdown(prog: &Program) -> String {
 }
 
 fn module_name(m: &Module) -> &str {
-    match m {
-        Module::Http => "http",
-        Module::Postgres => "postgres",
-        Module::WebSocket => "websocket",
-        Module::Crypto => "crypto",
-        Module::Json => "json",
-        Module::Fs => "fs",
-        Module::Jwt => "jwt",
-        Module::Env => "env",
-        Module::Runtime => "runtime",
-        Module::Time => "time",
-    }
+    m.as_str()
 }

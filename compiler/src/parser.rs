@@ -479,7 +479,7 @@ impl Parser {
                     crate::suggest::did_you_mean(
                         &mod_name,
                         &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                        "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.".to_string(),
+                        format!("Valid modules: {}.", Module::name_list()),
                     ),
                 )
                 .with_code(cat::UNKNOWN_MODULE)]),
@@ -530,7 +530,7 @@ None => Err(vec![Diag::new(
                 crate::suggest::did_you_mean(
                     name,
                     &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                    "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time, or a local import like `bring \"./utils\"`.".to_string(),
+                    format!("Valid modules: {}, or a local import like `bring \"./utils\"`.", Module::name_list()),
                 ),
             )
             .with_code(cat::UNKNOWN_MODULE)]),
@@ -583,16 +583,38 @@ None => Err(vec![Diag::new(
         Ok(stmts)
     }
 
+    /// `model Name = table [ field => Type #attr, ... ]` — the v0.1 blueprint
+    /// form — and the v0.6 framework form
+    /// `model Name { field : Type(min=0) @unique, ... }`.
+    ///
+    /// Both forms produce the same [`ModelDef`]; the framework form simply
+    /// carries type arguments (constraints) and richer attributes that the
+    /// validation engine, ORM and OpenAPI generator consume.
     fn parse_model(&mut self) -> Result<Stmt, Vec<Diag>> {
         let sp = self.span();
         self.advance();
         let (name, nsp) = self.expect_ident("as a model name")?;
-        let table = if self.eat_sym(Sym::Assign) {
+        // `model Name = table { ... }` pins the table name; `model Name { ... }`
+        // defaults the table to the lowercased model name.
+        let mut table: Option<String> = None;
+        // Model-level attributes: `model User @strict { ... }`
+        let mut strict = false;
+        self.parse_model_attrs(nsp, &mut strict)?;
+        let braced = if self.eat_sym(Sym::Assign) {
             let (t, _) = self.expect_ident("as a table name")?;
-            t
+            table = Some(t);
+            // `@strict` reads naturally on either side of the table name.
+            self.parse_model_attrs(nsp, &mut strict)?;
+            *self.peek() == Tok::Sym(Sym::LBrace)
         } else {
-            name.to_lowercase()
+            *self.peek() == Tok::Sym(Sym::LBrace)
         };
+        if braced {
+            let fields = self.parse_model_fields(Sym::LBrace, Sym::RBrace, "a model body")?;
+            let table = table.unwrap_or_else(|| name.to_lowercase());
+            return Ok(Stmt::Model(self.finish_model(name, table, fields, true, strict, nsp)));
+        }
+        let table = table.unwrap_or_else(|| name.to_lowercase());
         self.expect_sym(Sym::LBracket, "to start a model")?;
         let mut fields = Vec::new();
         loop {
@@ -612,25 +634,163 @@ None => Err(vec![Diag::new(
             let (fname, fsp) = self.expect_ident("as a field name")?;
             self.expect_sym(Sym::FatArrow, "after field name in model")?;
             let (ty, _) = self.expect_ident("as a field type")?;
-            let mut attrs = Vec::new();
+            let mut attrs = self.parse_presence_markers();
             while self.eat_sym(Sym::Hash) {
                 let (a, _) = self.expect_ident("after `#` in model attributes")?;
-                attrs.push(a);
+                attrs.push(FieldAttr::plain(a));
             }
-            fields.push(FieldDef { name: fname, ty, attrs, span: fsp });
+            fields.push(FieldDef { name: fname, ty, args: Vec::new(), attrs, span: fsp });
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
         }
         self.expect_sym(Sym::RBracket, "to close a model")?;
-        let md = ModelDef {
-            name,
-            table: table.clone(),
-            fields: fields.clone(),
-            span: nsp,
-        };
+        Ok(Stmt::Model(self.finish_model(name, table, fields, false, false, nsp)))
+    }
+
+    /// Model-level attributes: `@strict` rejects unknown keys at validation
+    /// time, `@open` is accepted and ignored (a later milestone consumes it).
+    fn parse_model_attrs(&mut self, nsp: Span, strict: &mut bool) -> Result<(), Vec<Diag>> {
+        while self.eat_sym(Sym::At) {
+            let (a, _) = self.expect_ident("after `@` in model attributes")?;
+            match a.as_str() {
+                "strict" => *strict = true,
+                "open" => {}
+                other => {
+                    return Err(vec![Diag::new(
+                        ErrorKind::Parse,
+                        format!("unknown model attribute `{other}`"),
+                        nsp,
+                        "Use `@strict` to reject unknown fields.",
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN)])
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_model(
+        &mut self,
+        name: String,
+        table: String,
+        fields: Vec<FieldDef>,
+        brace: bool,
+        strict: bool,
+        span: Span,
+    ) -> ModelDef {
+        let md = ModelDef { name, table, fields, brace, strict, span };
         self.models.push(md.clone());
-        Ok(Stmt::Model(md))
+        md
+    }
+
+    /// `field : Type(a, b=c) @attr(arg) ,` repeated until `close`.
+    /// Optional presence markers on a model field type: `Str!` demands the key
+    /// and `Str?` states that it may be absent. Both are sugar for the
+    /// `required` / `nullable` constraints, and neither is needed to express
+    /// the default (validate when present).
+    fn parse_presence_markers(&mut self) -> Vec<FieldAttr> {
+        let mut attrs = Vec::new();
+        while self.eat_sym(Sym::Bang) {
+            attrs.push(FieldAttr::plain("required"));
+        }
+        if self.eat_sym(Sym::Q) {
+            attrs.push(FieldAttr::plain("nullable"));
+        }
+        attrs
+    }
+
+    fn parse_model_fields(
+        &mut self,
+        open: Sym,
+        close: Sym,
+        what: &str,
+    ) -> Result<Vec<FieldDef>, Vec<Diag>> {
+        let sp = self.span();
+        self.expect_sym(open, &format!("to start {what}"))?;
+        let mut fields = Vec::new();
+        while !matches!(self.peek(), Tok::Sym(c) if *c == close) {
+            if matches!(self.peek(), Tok::Eof) {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("unexpected end of file inside {what}"),
+                    sp,
+                    format!("Close the block with `{}`.", close.as_str()),
+                )
+                .with_code(cat::UNEXPECTED_EOI)]);
+            }
+            // A field starts with `name :`. Newlines are not statement
+            // terminators in HardScript, so the closing delimiter alone cannot
+            // end the last field: stop as soon as the next tokens cannot begin
+            // one. That is what lets fields be written one per line.
+            if !matches!(self.peek(), Tok::Ident(_))
+                || !matches!(self.peek_at(1), Tok::Sym(Sym::Colon))
+            {
+                break;
+            }
+            let (fname, fsp) = self.expect_ident("as a field name")?;
+            self.expect_sym(Sym::Colon, "after field name")?;
+            let (ty, _) = self.expect_ident("as a field type")?;
+            // `Int!(min=18)` and `Int(min=18)!` are both written in the wild,
+            // so markers and constraint args may interleave.
+            let mut args = self.parse_type_args()?;
+            let mut attrs = self.parse_presence_markers();
+            let more = self.parse_type_args()?;
+            if !more.is_empty() {
+                args.extend(more);
+                attrs.extend(self.parse_presence_markers());
+            }
+            while self.eat_sym(Sym::At) {
+                let (a, _) = self.expect_ident("after `@` in field attributes")?;
+                let arg = if matches!(self.peek(), Tok::Sym(Sym::LParen)) {
+                    self.advance();
+                    let e = self.parse_expr()?;
+                    self.expect_sym(Sym::RParen, "to close an attribute argument")?;
+                    Some(e)
+                } else {
+                    None
+                };
+                attrs.push(FieldAttr { name: a, arg });
+            }
+            fields.push(FieldDef { name: fname, ty, args, attrs, span: fsp });
+            self.eat_sym(Sym::Comma);
+        }
+        self.expect_sym(close, &format!("to close {what}"))?;
+        Ok(fields)
+    }
+
+    /// `(Int, "a", "b")` and `(min=18, length=3..30, max=120)` type arguments.
+    fn parse_type_args(&mut self) -> Result<Vec<FieldArg>, Vec<Diag>> {
+        if !matches!(self.peek(), Tok::Sym(Sym::LParen)) {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        let mut args = Vec::new();
+        while !matches!(self.peek(), Tok::Sym(Sym::RParen)) {
+            if matches!(self.peek(), Tok::Eof) {
+                break;
+            }
+            // `name = expr` (also `name == expr` for symmetry with runtime rules)
+            if let Tok::Ident(k) = self.peek().clone() {
+                if matches!(self.peek_at(1), Tok::Sym(Sym::Assign) | Tok::Sym(Sym::EqEq)) {
+                    self.advance();
+                    self.advance();
+                    let v = self.parse_expr()?;
+                    args.push(FieldArg::Constraint(k, Box::new(v)));
+                    if !self.eat_sym(Sym::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            let v = self.parse_expr()?;
+            args.push(FieldArg::Positional(v));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen, "to close field constraints")?;
+        Ok(args)
     }
 
     fn parse_route(&mut self) -> Result<Stmt, Vec<Diag>> {
@@ -851,9 +1011,22 @@ None => Err(vec![Diag::new(
 
     fn parse_expr(&mut self) -> Result<Expr, Vec<Diag>> {
         self.enter_depth("expression")?;
-        let r = self.parse_or();
+        let r = self.parse_range();
         self.exit_depth();
         r
+    }
+
+    /// `lo ... hi` / `lo .. hi`. Binds looser than every operator, so
+    /// `1...n - 1` means `1...(n - 1)`.
+    fn parse_range(&mut self) -> Result<Expr, Vec<Diag>> {
+        let sp = self.span();
+        let lo = self.parse_or()?;
+        if *self.peek() == Tok::Sym(Sym::Ellipsis) {
+            self.advance();
+            let hi = self.parse_or()?;
+            return Ok(Expr::Range(Box::new(lo), Box::new(hi), sp));
+        }
+        Ok(lo)
     }
 
     fn parse_or(&mut self) -> Result<Expr, Vec<Diag>> {
@@ -1299,6 +1472,119 @@ mod tests {
             !errs.iter().any(|d| d.message.contains("end of file")),
             "region was swallowed: {errs:?}"
         );
+    }
+
+    #[test]
+    fn brace_model_fields_need_no_commas() {
+        // Newlines are not statement terminators, so the closing `}` alone
+        // cannot end the last field: the field loop has to stop on the first
+        // token pair that cannot begin a field.
+        let src = "model R {\n    email : Email\n    age : Int(min=18)\n}\n";
+        let prog = crate::frontend(src, "t.hard").expect("brace model must parse");
+        let m = prog
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Model(m) => Some(m),
+                _ => None,
+            })
+            .expect("model statement");
+        assert!(m.brace, "brace form");
+        assert_eq!(m.table, "r", "table defaults to the lowercased name");
+        assert_eq!(m.fields.len(), 2, "got {:?}", m.fields);
+        assert_eq!(m.fields[0].name, "email");
+        assert_eq!(m.fields[0].ty, "Email");
+        assert_eq!(m.fields[1].name, "age");
+        assert_eq!(m.fields[1].ty, "Int");
+        assert_eq!(m.fields[1].args.len(), 1, "constraint arg captured");
+    }
+
+    #[test]
+    fn brace_model_accepts_commas_and_a_trailing_field() {
+        let src = "model R {\n    a : Int,\n    b : Str,\n}\n";
+        let prog = crate::frontend(src, "t.hard").expect("brace model with commas");
+        let m = prog
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Model(m) => Some(m),
+                _ => None,
+            })
+            .expect("model statement");
+        assert_eq!(m.fields.len(), 2, "got {:?}", m.fields);
+    }
+
+    #[test]
+    fn model_table_override_and_strict_attribute() {
+        let src = "model R = people @strict {\n    a : Int\n}\n";
+        let prog = crate::frontend(src, "t.hard").expect("table override parses");
+        let m = prog
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Model(m) => Some(m),
+                _ => None,
+            })
+            .expect("model statement");
+        assert_eq!(m.table, "people", "explicit table name");
+        assert!(m.strict, "@strict marks unknown keys as errors");
+    }
+
+    #[test]
+    fn presence_markers_become_required_and_nullable() {
+        // `Str!` demands the key, `Str?` says it may be absent, and the
+        // constraint args may sit on either side of the marker.
+        let src = "model R {\n    a : Str!\n    b : Int?(min=1)\n    c : Str(max=9)!\n    d : Str\n}\n";
+        let prog = crate::frontend(src, "t.hard").expect("presence markers parse");
+        let m = prog
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Model(m) => Some(m),
+                _ => None,
+            })
+            .expect("model statement");
+        let names: Vec<&str> = m.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d"], "got {names:?}");
+        let has = |f: &FieldDef, want: &str| f.attrs.iter().any(|a| a.name == want);
+        assert!(has(&m.fields[0], "required"), "a is required");
+        assert!(has(&m.fields[1], "nullable"), "b is nullable");
+        assert_eq!(m.fields[1].args.len(), 1, "b keeps its constraint");
+        assert!(has(&m.fields[2], "required"), "c is required");
+        assert_eq!(m.fields[2].args.len(), 1, "c keeps its constraint");
+        assert!(m.fields[3].attrs.is_empty(), "d is unmarked");
+    }
+
+    #[test]
+    fn range_bounds_accept_two_or_three_dots() {
+        // `..` used to lex as two `.` tokens, so `Int(range=0..100)` failed
+        // to parse; both spellings must produce the same inclusive range.
+        for src in [
+            "app @3000\nGET \"/a\" :: {\n    loop i => [0..3] {\n        <- i\n    }\n}\n",
+            "app @3000\nGET \"/a\" :: {\n    loop i => [0...3] {\n        <- i\n    }\n}\n",
+        ] {
+            assert!(parse_errs(src).is_empty(), "range must parse: {src}");
+        }
+    }
+
+    #[test]
+    fn legacy_bracket_model_still_parses() {
+        // v0.5 shipped `model X = table [ f => T #attr ]`; the brace form is
+        // additive, so the old spelling has to keep working.
+        let src = "model User = users [\n    id => Int #id,\n    name => Str,\n]\n";
+        let prog = crate::frontend(src, "t.hard").expect("legacy model parses");
+        let m = prog
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Model(m) => Some(m),
+                _ => None,
+            })
+            .expect("model statement");
+        assert!(!m.brace, "bracket form");
+        assert_eq!(m.table, "users");
+        assert_eq!(m.fields.len(), 2, "got {:?}", m.fields);
+        assert!(m.fields[0].attrs.iter().any(|a| a.name == "id"), "#id attribute");
     }
 
     #[test]

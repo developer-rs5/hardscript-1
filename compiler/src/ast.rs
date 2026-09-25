@@ -18,6 +18,21 @@ pub enum Module {
     Env,
     Runtime,
     Time,
+    // ---- v0.6 backend framework modules ----
+    /// Validation engine (M5.1).
+    Validation,
+    /// Authentication guards: JWT, refresh, cookie, bearer (M5.2).
+    Auth,
+    /// ORM / model engine over SQLite and PostgreSQL (M5.3).
+    Db,
+    /// Cache engine with memory and Redis adapters (M5.5).
+    Cache,
+    /// Background job queue (M5.6).
+    Queue,
+    /// Cron / interval scheduler (M5.7).
+    Schedule,
+    /// Sliding-window rate limiter (M5.8).
+    RateLimit,
 }
 
 impl Module {
@@ -34,7 +49,69 @@ impl Module {
         "env",
         "runtime",
         "time",
+        "validation",
+        "auth",
+        "db",
+        "cache",
+        "queue",
+        "schedule",
+        "ratelimit",
     ];
+
+    /// Human-readable module list used in diagnostics.
+    pub fn name_list() -> String {
+        Module::NAMES.join(", ")
+    }
+
+    /// Canonical lowercase module name. The single source of truth shared by
+    /// the module graph, formatter, docs generator, HIR and codegen.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Module::Http => "http",
+            Module::Postgres => "postgres",
+            Module::WebSocket => "websocket",
+            Module::Crypto => "crypto",
+            Module::Json => "json",
+            Module::Fs => "fs",
+            Module::Jwt => "jwt",
+            Module::Env => "env",
+            Module::Runtime => "runtime",
+            Module::Time => "time",
+            Module::Validation => "validation",
+            Module::Auth => "auth",
+            Module::Db => "db",
+            Module::Cache => "cache",
+            Module::Queue => "queue",
+            Module::Schedule => "schedule",
+            Module::RateLimit => "ratelimit",
+        }
+    }
+
+    /// Ordered builtin module set used to gate builtin lowering. Shared by
+    /// the type checker and the code generator so the two can never drift.
+    pub const SET: &[Module] = &[
+        Module::Http,
+        Module::Postgres,
+        Module::WebSocket,
+        Module::Crypto,
+        Module::Json,
+        Module::Fs,
+        Module::Jwt,
+        Module::Env,
+        Module::Runtime,
+        Module::Time,
+        Module::Validation,
+        Module::Auth,
+        Module::Db,
+        Module::Cache,
+        Module::Queue,
+        Module::Schedule,
+        Module::RateLimit,
+    ];
+
+    /// The allowed-module set as strings (lowercased names), for validation
+    /// and for the "unknown module" candidate list.
+    pub const SET_NAMES: &[&str] = Module::NAMES;
 
     pub fn from_name(s: &str, span: Span) -> Option<Module> {
         match s {
@@ -48,6 +125,13 @@ impl Module {
             "env" => Some(Module::Env),
             "runtime" => Some(Module::Runtime),
             "time" => Some(Module::Time),
+            "validation" => Some(Module::Validation),
+            "auth" => Some(Module::Auth),
+            "db" => Some(Module::Db),
+            "cache" => Some(Module::Cache),
+            "queue" => Some(Module::Queue),
+            "schedule" => Some(Module::Schedule),
+            "ratelimit" => Some(Module::RateLimit),
             _ => {
                 let _ = span;
                 None
@@ -56,12 +140,64 @@ impl Module {
     }
 }
 
+/// A positional type argument (`List(Int)`) or a named constraint
+/// (`min=18`, `length=3..30`).
+#[derive(Debug, Clone)]
+pub enum FieldArg {
+    Positional(Expr),
+    Constraint(String, Box<Expr>),
+}
+
+/// A field attribute: legacy `#id`, or framework `@primary` / `@default(now())`.
+#[derive(Debug, Clone)]
+pub struct FieldAttr {
+    pub name: String,
+    pub arg: Option<Expr>,
+}
+
+impl FieldAttr {
+    pub fn plain(name: impl Into<String>) -> FieldAttr {
+        FieldAttr { name: name.into(), arg: None }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FieldDef {
     pub name: String,
     pub ty: String,
-    pub attrs: Vec<String>,
+    /// Type arguments and validation constraints (`Int(min=18,max=120)`).
+    pub args: Vec<FieldArg>,
+    pub attrs: Vec<FieldAttr>,
     pub span: Span,
+}
+
+impl FieldDef {
+    /// First constraint bound for `key` (e.g. `min` in `Int(min=18)`).
+    pub fn constraint(&self, key: &str) -> Option<&Expr> {
+        self.args.iter().find_map(|a| match a {
+            FieldArg::Constraint(k, v) if k == key => Some(v.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// Positional type arguments in source order (`List(Int)` -> `[Int]`).
+    pub fn positional(&self) -> Vec<&Expr> {
+        self.args
+            .iter()
+            .filter_map(|a| match a {
+                FieldArg::Positional(v) => Some(v),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn has_attr(&self, name: &str) -> bool {
+        self.attrs.iter().any(|a| a.name == name)
+    }
+
+    pub fn attr(&self, name: &str) -> Option<&FieldAttr> {
+        self.attrs.iter().find(|a| a.name == name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +205,14 @@ pub struct ModelDef {
     pub name: String,
     pub table: String,
     pub fields: Vec<FieldDef>,
+    /// Source spelling: `true` for the v0.6 framework form
+    /// (`model User { ... }`), `false` for the v0.1 blueprint form
+    /// (`model User = users [ ... ]`). The formatter round-trips the
+    /// original spelling so `hard fmt --check` stays stable.
+    pub brace: bool,
+    /// `model User @strict { ... }` — reject request bodies that carry keys
+    /// the model does not declare (typo protection).
+    pub strict: bool,
     pub span: Span,
 }
 
@@ -196,6 +340,46 @@ impl Expr {
             | HttpCall { span: s, .. } => *s,
         }
     }
+
+    /// Source-shaped rendering of an expression, used by the formatter, the
+    /// docs generator and `expect` diagnostics.
+    pub fn render(&self) -> String {
+        match self {
+            Expr::Int(n, _) => n.to_string(),
+            Expr::Float(f, _) => f.to_string(),
+            Expr::Str(s, _) => format!("\"{s}\""),
+            Expr::Bool(b, _) => b.to_string(),
+            Expr::List(items, _) => {
+                let inner = items.iter().map(|i| i.render()).collect::<Vec<_>>().join(", ");
+                format!("[{inner}]")
+            }
+            Expr::Obj(kvs, _) => {
+                let inner =
+                    kvs.iter().map(|(k, v)| format!("{k}: {}", v.render())).collect::<Vec<_>>().join(", ");
+                format!("{{ {inner} }}")
+            }
+            Expr::Ident(n, _) => n.clone(),
+            Expr::Member(b, n, _) => format!("{}.{}", b.render(), n),
+            Expr::Index(b, i, _) => format!("{}[{}]", b.render(), i.render()),
+            Expr::Call { callee, args, .. } => {
+                let inner = args.iter().map(|a| a.render()).collect::<Vec<_>>().join(", ");
+                format!("{}({inner})", callee.render())
+            }
+            Expr::Unary(UnOp::Neg, x, _) => format!("-{}", x.render()),
+            Expr::Unary(UnOp::Not, x, _) => format!("!{}", x.render()),
+            Expr::Binary(op, l, r, _) => {
+                format!("{} {} {}", l.render(), op.symbol(), r.render())
+            }
+            Expr::Range(l, h, _) => format!("{}..{}", l.render(), h.render()),
+            Expr::Match(_, _, _) => "pick(..)".to_string(),
+            Expr::HttpCall { verb, path, .. } => format!("{verb} \"{path}\""),
+        }
+    }
+}
+
+/// Shared source-shaped expression renderer (see [`Expr::render`]).
+pub fn expr_to_src(e: &Expr) -> String {
+    e.render()
 }
 
 #[derive(Debug, Clone)]

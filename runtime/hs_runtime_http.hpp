@@ -1,8 +1,11 @@
 #ifndef HS_RUNTIME_HTTP_HPP
 #define HS_RUNTIME_HTTP_HPP
 #include <netinet/tcp.h>
+#include "hs_runtime_crypto.hpp"
 #include "hs_runtime_value.hpp"
 #include "hs_runtime_arena.hpp"
+namespace hs {
+
 // ===========================================================================
 // HTTP
 // ===========================================================================
@@ -231,6 +234,48 @@ struct Response {
 
 using Handler = std::function<Response(const Request&)>;
 using Middleware = std::function<Response(const Request&, const std::function<Response()>& next)>;
+
+// ---------------------------------------------------------------------------
+// Response abort (v0.6 framework)
+// ---------------------------------------------------------------------------
+// The framework needs to end a request early with a fully-formed response:
+// validation failures (400), auth rejections (401/403), rate-limit rejects
+// (429). Throwing `HttpAbort` unwinds straight out of the route/middleware
+// chain and every catch site turns it back into the carried response, so the
+// user never has to thread a result value through their handler.
+//
+//   validation.reject(v)   -> 400 + the validation error list
+//   auth.reject(401, "...") -> 401
+struct HttpAbort : std::exception {
+    Response r;
+    explicit HttpAbort(Response resp) : r(std::move(resp)) {}
+    const char* what() const noexcept override { return "http abort"; }
+};
+
+/// Unwind the current request with `r` as the response.
+[[noreturn]] inline void abort_with(Response r) { throw HttpAbort(std::move(r)); }
+
+/// Unwind with a JSON `{ "error": ... }` envelope at `status`.
+[[noreturn]] inline void abort_json(int status, const std::string& code,
+                                     const std::string& detail) {
+    Val v = Val::object({});
+    v.set("error", Val::text(code));
+    v.set("status", Val::int_(status));
+    if (!detail.empty()) v.set("message", Val::text(detail));
+    Response resp;
+    resp.status = status;
+    resp.ctype = "application/json; charset=utf-8";
+    resp.json_v = std::move(v);
+    resp.has_json = true;
+    throw HttpAbort(std::move(resp));
+}
+
+/// Recover a response from a caught exception, or `fallback` when the exception
+/// was not an abort.
+inline Response abort_or(const std::exception& e, const std::string& fallback_prefix) {
+    if (auto* a = dynamic_cast<const HttpAbort*>(&e)) return a->r;
+    return Response::error(500, fallback_prefix + e.what());
+}
 
 // split a path into at most `cap` segments, zero copies (views into `p`).
 // returns segment count, or (size_t)-1 when the path is too deep for `cap`.
@@ -485,6 +530,8 @@ struct Server {
                 if (ri < 0) return Response::error(404, "not found");
                 try {
                     return routes[(size_t)ri].handler(req);
+                } catch (const HttpAbort& a) {
+                    return a.r;
                 } catch (const std::exception& e) {
                     return Response::error(500, std::string("internal error: ") + e.what());
                 }
@@ -499,11 +546,15 @@ struct Server {
                 if (ri < 0) return Response::error(404, "not found");
                 try {
                     return routes[(size_t)ri].handler(req);
+                } catch (const HttpAbort& a) {
+                    return a.r;
                 } catch (const std::exception& e) {
                     return Response::error(500, std::string("internal error: ") + e.what());
                 }
             };
             return run(0);
+        } catch (const HttpAbort& a) {
+            return a.r;
         } catch (const std::exception& e) {
             return Response::error(500, std::string("middleware error: ") + e.what());
         }
@@ -1060,5 +1111,7 @@ inline void Server::listen() {
     for (auto& w : conn_pool().workers) if (w.joinable()) w.join();
     conn_pool().workers.clear();
 }
+
+} // namespace hs
 
 #endif

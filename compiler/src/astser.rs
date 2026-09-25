@@ -301,12 +301,35 @@ fn write_model(enc: &mut Enc, m: &ModelDef) -> Result<(), String> {
     for f in &m.fields {
         enc.str(&f.name);
         enc.str(&f.ty);
+        enc.uv(f.args.len() as i64);
+        for a in &f.args {
+            match a {
+                FieldArg::Positional(e) => {
+                    enc.u8(0);
+                    write_expr(enc, e, 1)?;
+                }
+                FieldArg::Constraint(k, v) => {
+                    enc.u8(1);
+                    enc.str(k);
+                    write_expr(enc, v, 1)?;
+                }
+            }
+        }
         enc.uv(f.attrs.len() as i64);
         for a in &f.attrs {
-            enc.str(a);
+            enc.str(&a.name);
+            match &a.arg {
+                Some(e) => {
+                    enc.bool(true);
+                    write_expr(enc, e, 1)?;
+                }
+                None => enc.bool(false),
+            }
         }
         enc.span(f.span);
     }
+    enc.bool(m.brace);
+    enc.bool(m.strict);
     enc.span(m.span);
     Ok(())
 }
@@ -386,6 +409,13 @@ fn module_tag(m: &Module) -> u8 {
         Module::Env => 7,
         Module::Runtime => 8,
         Module::Time => 9,
+        Module::Validation => 10,
+        Module::Auth => 11,
+        Module::Db => 12,
+        Module::Cache => 13,
+        Module::Queue => 14,
+        Module::Schedule => 15,
+        Module::RateLimit => 16,
     }
 }
 
@@ -417,7 +447,7 @@ fn unop_tag(op: &UnOp) -> u8 {
 /// Serialize the top-level items of a module (its `Vec<Stmt>`) to bytes.
 pub fn serialize_stmts(stmts: &[Stmt]) -> Result<Vec<u8>, String> {
     let mut enc = Enc::new();
-    enc.out.extend_from_slice(b"HS1STMT");
+    enc.out.extend_from_slice(b"HS2STMT");
     write_stmt_items(&mut enc, stmts)?;
     Ok(enc.out)
 }
@@ -467,6 +497,9 @@ impl<'a> Dec<'a> {
             1 => Ok(true),
             _ => Err("bad bool".into()),
         }
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        self.byte()
     }
     fn str(&mut self) -> Result<String, String> {
         let len = self.var()?;
@@ -726,20 +759,31 @@ fn read_model(dec: &mut Dec) -> Result<ModelDef, String> {
         let fname = dec.str()?;
         let ty = dec.str()?;
         let an = decode_count(dec)?;
-        let mut attrs = Vec::with_capacity(an);
+        let mut args = Vec::with_capacity(an);
         for _ in 0..an {
-            attrs.push(dec.str()?);
+            match dec.u8()? {
+                0 => args.push(FieldArg::Positional(read_expr(dec, 1)?)),
+                1 => {
+                    let k = dec.str()?;
+                    args.push(FieldArg::Constraint(k, Box::new(read_expr(dec, 1)?)));
+                }
+                other => return Err(format!("unknown field-arg tag {other}")),
+            }
+        }
+        let cn = decode_count(dec)?;
+        let mut attrs = Vec::with_capacity(cn);
+        for _ in 0..cn {
+            let aname = dec.str()?;
+            let arg = if dec.bool()? { Some(read_expr(dec, 1)?) } else { None };
+            attrs.push(FieldAttr { name: aname, arg });
         }
         let span = dec.span()?;
-        fields.push(FieldDef {
-            name: fname,
-            ty,
-            attrs,
-            span,
-        });
+        fields.push(FieldDef { name: fname, ty, args, attrs, span });
     }
+    let brace = dec.bool()?;
+    let strict = dec.bool()?;
     let span = dec.span()?;
-    Ok(ModelDef { name, table, fields, span })
+    Ok(ModelDef { name, table, fields, brace, strict, span })
 }
 
 fn read_params(dec: &mut Dec) -> Result<Vec<FunParam>, String> {
@@ -850,7 +894,7 @@ fn unop_from_tag(tag: u8) -> Result<UnOp, String> {
 
 /// Deserialize module items previously written by [`serialize_stmts`].
 pub fn deserialize_stmts(bytes: &[u8]) -> Result<Vec<Stmt>, String> {
-    if !bytes.starts_with(b"HS1STMT") {
+    if !bytes.starts_with(b"HS2STMT") {
         return Err("bad magic".into());
     }
     let mut dec = Dec::new(&bytes[7..]);
@@ -961,6 +1005,34 @@ test "hello" {
         bytes[mid] ^= 0xff;
         // Must not panic; must return Err (or a well-formed-but-failed parse).
         let _ = deserialize_stmts(&bytes);
+    }
+
+    #[test]
+    fn framework_model_metadata_round_trips() {
+        // The v0.6 model form added type arguments, field attributes, the
+        // brace/legacy discriminator and the model-level `@strict` flag. The
+        // AST cache is keyed by a source hash, so a field that fails to
+        // survive a round trip shows up as a stale-schema build rather than an
+        // error; assert the whole shape instead.
+        let src = "model User = people @strict {\n    id : Uuid!\n    email : Email!\n    age : Int(min=18, max=120)\n    role : Enum(\"admin\", \"user\")\n    bio : Str(max=280, nullable) @index\n}\n";
+        let before = parse_ok(src);
+        let after = deserialize_stmts(&serialize_stmts(&before).unwrap()).unwrap();
+        assert_eq!(before.len(), after.len(), "statement count");
+
+        let pick = |p: &[Stmt]| match &p[0] {
+            Stmt::Model(m) => format!("{m:?}"),
+            other => panic!("expected a model, got {other:?}"),
+        };
+        assert_eq!(pick(&before), pick(&after), "model must survive the cache");
+        let m = match &after[0] {
+            Stmt::Model(m) => m,
+            _ => unreachable!(),
+        };
+        assert!(m.brace && m.strict, "flags: {:?}", (m.brace, m.strict));
+        assert_eq!(m.table, "people");
+        assert_eq!(m.fields[2].args.len(), 2, "min/max args");
+        assert_eq!(m.fields[3].args.len(), 2, "enum members");
+        assert!(m.fields[4].attrs.iter().any(|a| a.name == "index"), "@index");
     }
 
     #[test]

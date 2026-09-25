@@ -573,18 +573,7 @@ fn walk_expr_count(e: &HirExpr, ec: &mut usize) {
 }
 
 fn module_name(m: &ast::Module) -> String {
-    match m {
-        ast::Module::Http => "http".into(),
-        ast::Module::Postgres => "postgres".into(),
-        ast::Module::WebSocket => "websocket".into(),
-        ast::Module::Crypto => "crypto".into(),
-        ast::Module::Json => "json".into(),
-        ast::Module::Fs => "fs".into(),
-        ast::Module::Jwt => "jwt".into(),
-        ast::Module::Env => "env".into(),
-        ast::Module::Runtime => "runtime".into(),
-        ast::Module::Time => "time".into(),
-    }
+    m.as_str().into()
 }
 
 impl Lowerer {

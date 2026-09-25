@@ -23,18 +23,7 @@ use std::path::{Path, PathBuf};
 const MAX_MODULE_DEPTH: usize = 256;
 
 fn module_name(m: &Module) -> &'static str {
-    match m {
-        Module::Http => "http",
-        Module::Postgres => "postgres",
-        Module::WebSocket => "websocket",
-        Module::Crypto => "crypto",
-        Module::Json => "json",
-        Module::Fs => "fs",
-        Module::Jwt => "jwt",
-        Module::Env => "env",
-        Module::Runtime => "runtime",
-        Module::Time => "time",
-    }
+    m.as_str()
 }
 
 /// One `.hard` module in the graph.

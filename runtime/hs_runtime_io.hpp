@@ -1,6 +1,8 @@
 #ifndef HS_RUNTIME_IO_HPP
 #define HS_RUNTIME_IO_HPP
 #include "hs_runtime_value.hpp"
+namespace hs {
+
 // ===========================================================================
 // fs / env / time / runtime modules
 // ===========================================================================
@@ -70,5 +72,7 @@ inline int64_t fs_size(const std::string& path) {
     if (stat(path.c_str(), &st) != 0) throw std::runtime_error("cannot stat: " + path);
     return (int64_t)st.st_size;
 }
+
+} // namespace hs
 
 #endif

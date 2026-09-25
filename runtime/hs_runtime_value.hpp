@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 #include <poll.h>
 #include <random>
+#include <regex>
 
 #ifndef HS_NOTHREAD
 #include <thread>
@@ -973,7 +974,8 @@ inline Val parse_json(std::string_view s) {
     if (p != s.size()) throw std::runtime_error("trailing data after JSON value");
     return v;
 }
-inline Val parse_json(const std::string& s) { return parse_json(std::string_view(s)); }
+// Only the string_view overload exists: `std::string` converts implicitly, and
+// keeping a second `const std::string&` overload made string literals ambiguous.
 
 // ===========================================================================
 // ms2.6 value-engine JSON parser
@@ -1283,5 +1285,7 @@ inline void log_val(const Val& v) {
 }
 inline void print_val(const Val& v) { log_val(v); }
 inline Val v_print(const Val& v) { log_val(v); return Val::nil(); }
+
+} // namespace hs
 
 #endif

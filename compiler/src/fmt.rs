@@ -12,6 +12,59 @@ pub fn format(prog: &Program) -> String {
     f.out
 }
 
+/// Canonical rendering of one field attribute in the legacy blueprint form.
+/// The blueprint grammar takes `#name` only, so an argument is dropped.
+fn field_attr(a: &FieldAttr) -> String {
+    let _ = &a.arg;
+    format!("#{}", a.name)
+}
+
+/// Canonical rendering of one field attribute in the v0.6 framework form:
+/// `@name` or `@name(arg)`.
+fn field_attr_at(a: &FieldAttr) -> String {
+    match &a.arg {
+        Some(e) => format!("@{}({})", a.name, e.render()),
+        None => format!("@{}", a.name),
+    }
+}
+
+/// Canonical rendering of one framework field: `Type`, `Type(args)` and the
+/// trailing `@attr` / `@attr(arg)` list.
+fn field_decl(f: &FieldDef) -> String {
+    let mut s = f.ty.clone();
+    // Presence rides on the type as `!` / `?`, before the constraint list, so
+    // `nick : Str?(length=2..8)` does not widen into `nick : Str(length=2..8)?`.
+    for a in &f.attrs {
+        if a.arg.is_none() {
+            match a.name.as_str() {
+                "required" => s.push('!'),
+                "nullable" | "optional" => s.push('?'),
+                _ => {}
+            }
+        }
+    }
+    if !f.args.is_empty() {
+        let inner = f
+            .args
+            .iter()
+            .map(|a| match a {
+                FieldArg::Positional(e) => e.render(),
+                FieldArg::Constraint(k, v) => format!("{k}={}", v.render()),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("({inner})"));
+    }
+    for a in &f.attrs {
+        if a.arg.is_none() && matches!(a.name.as_str(), "required" | "nullable" | "optional") {
+            continue; // already rendered as a presence marker
+        }
+        s.push(' ');
+        s.push_str(&field_attr_at(a));
+    }
+    s
+}
+
 #[derive(Default)]
 struct Fmt {
     out: String,
@@ -32,16 +85,37 @@ impl Fmt {
             Stmt::Import { path, .. } => self.line(d, &format!("bring {path:?}")),
             Stmt::App(p, _) => self.line(d, &format!("app @{p}")),
             Stmt::Model(m) => {
-                self.line(d, &format!("model {} = {} [", m.name, m.table));
-                for f in &m.fields {
-                    let attrs: String = if f.attrs.is_empty() {
-                        String::new()
+                if m.brace {
+                    let head = if m.table == m.name.to_lowercase() {
+                        format!("model {}{} {{", m.name, if m.strict { " @strict" } else { "" })
                     } else {
-                        format!(" {}", f.attrs.iter().map(|a| format!("#{a}")).collect::<Vec<_>>().join(" "))
+                        format!(
+                            "model {} = {}{} {{",
+                            m.name,
+                            m.table,
+                            if m.strict { " @strict" } else { "" }
+                        )
                     };
-                    self.line(d + 1, &format!("{} => {}{attrs},", f.name, f.ty));
+                    self.line(d, &head);
+                    for f in &m.fields {
+                        self.line(d + 1, &format!("{} : {}", f.name, field_decl(f)));
+                    }
+                    self.line(d, "}");
+                } else {
+                    self.line(d, &format!("model {} = {} [", m.name, m.table));
+                    for f in &m.fields {
+                        let attrs: String = if f.attrs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                " {}",
+                                f.attrs.iter().map(field_attr).collect::<Vec<_>>().join(" ")
+                            )
+                        };
+                        self.line(d + 1, &format!("{} => {}{attrs},", f.name, f.ty));
+                    }
+                    self.line(d, "]");
                 }
-                self.line(d, "]");
             }
             Stmt::Route(r) => {
                 let params: Vec<String> = r
@@ -225,18 +299,7 @@ impl Fmt {
     }
 
     fn module(&self, m: &Module) -> &str {
-        match m {
-            Module::Http => "http",
-            Module::Postgres => "postgres",
-            Module::WebSocket => "websocket",
-            Module::Crypto => "crypto",
-            Module::Json => "json",
-            Module::Fs => "fs",
-            Module::Jwt => "jwt",
-            Module::Env => "env",
-            Module::Runtime => "runtime",
-            Module::Time => "time",
-        }
+        m.as_str()
     }
 }
 #[cfg(test)]
@@ -265,6 +328,29 @@ mod tests {
             format(&reparsed),
             "formatting must be idempotent:\n{once}"
         );
+    }
+
+    #[test]
+    fn framework_model_survives_roundtrip() {
+        // The v0.6 brace form carries type arguments, field attributes, an
+        // explicit table name and a model-level `@strict`, all of which have
+        // to come back out of the formatter unchanged.
+        let src = "model User = people @strict {\n    id : Uuid!\n    email : Email!\n    age : Int(min=18, max=120)\n    role : Enum(\"admin\", \"user\")\n    tags : List(Str)\n    nick : Str?(length=2..8)\n    bio : Str(max=280, nullable) @index\n}\n";
+        let once = format(&crate::frontend(src, "test.hard").unwrap());
+        assert!(once.contains("model User = people @strict {"), "got:\n{once}");
+        for want in [
+            "id : Uuid!",
+            "email : Email!",
+            "age : Int(min=18, max=120)",
+            "role : Enum(\"admin\", \"user\")",
+            "tags : List(Str)",
+            "nick : Str?(length=2..8)",
+            "bio : Str(max=280, nullable) @index",
+        ] {
+            assert!(once.contains(want), "formatter lost `{want}`, got:\n{once}");
+        }
+        let twice = format(&crate::frontend(&once, "test.hard").unwrap());
+        assert_eq!(once, twice, "formatting must be idempotent:\n{once}");
     }
 
     #[test]

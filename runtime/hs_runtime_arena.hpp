@@ -6,11 +6,10 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+namespace hs {
 
-// Shared counters are declared in the (single) `hs` namespace below.
-// NOTE: this header follows the other runtime parts and contributes to the
-// open `namespace hs` span opened by hs_runtime_value.hpp and closed by
-// hs_runtime_util.hpp; include it through the umbrella to stay correct.
+
+// Shared counters are declared in the `hs` namespace below.
 
 inline std::atomic<size_t> g_arena_alloc_count{0};
 inline std::atomic<size_t> g_arena_bytes{0};
@@ -94,5 +93,7 @@ inline Stats runtime_stats() {
     s.arena_bytes = g_arena_bytes.load(std::memory_order_relaxed);
     return s;
 }
+
+} // namespace hs
 
 #endif // HS_RUNTIME_ARENA_HPP

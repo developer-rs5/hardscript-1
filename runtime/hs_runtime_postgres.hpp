@@ -1,6 +1,8 @@
 #ifndef HS_RUNTIME_POSTGRES_HPP
 #define HS_RUNTIME_POSTGRES_HPP
 #include "hs_runtime_http.hpp"
+namespace hs {
+
 // ===========================================================================
 // PostgreSQL (native wire protocol)
 // ===========================================================================
@@ -348,5 +350,7 @@ inline Value pg_query_value(int pfd, const std::string& sql) {
     }
     return Value::i64(affected);
 }
+
+} // namespace hs
 
 #endif

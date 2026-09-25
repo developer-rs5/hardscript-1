@@ -8,9 +8,9 @@ use crate::error::{Diag, ErrorKind};
 use crate::token::Span;
 use std::collections::{BTreeMap, HashMap};
 
-const MODULES: [&str; 10] = [
-    "crypto", "fs", "env", "json", "jwt", "time", "runtime", "websocket", "postgres", "http",
-];
+/// Allowed builtin modules. Derived from the AST catalog so the checker and
+/// the code generator can never disagree about the module set.
+const MODULES: &[&str] = Module::SET_NAMES;
 
 /// Run the static checks over a program. Equivalent to `check_with(prog, &[])`
 /// — no per-statement file provenance, so "declared here" related spans cannot

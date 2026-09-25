@@ -1,6 +1,8 @@
 #ifndef HS_RUNTIME_UTIL_HPP
 #define HS_RUNTIME_UTIL_HPP
 #include "hs_runtime_http.hpp"
+namespace hs {
+
 // ===========================================================================
 // CLI helpers used by generated code
 // ===========================================================================
@@ -114,4 +116,5 @@ inline Val race_val(std::vector<std::function<Val()>> tasks) {
 }
 
 } // namespace hs
+
 #endif

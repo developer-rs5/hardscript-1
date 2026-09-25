@@ -366,19 +366,10 @@ const fn builtin(
     }
 }
 
+/// The compiler owns the module catalog; mirroring it here meant every new
+/// framework module broke this match.
 pub fn module_name(module: &Module) -> &'static str {
-    match module {
-        Module::Http => "http",
-        Module::Postgres => "postgres",
-        Module::WebSocket => "websocket",
-        Module::Crypto => "crypto",
-        Module::Json => "json",
-        Module::Fs => "fs",
-        Module::Jwt => "jwt",
-        Module::Env => "env",
-        Module::Runtime => "runtime",
-        Module::Time => "time",
-    }
+    module.as_str()
 }
 
 pub fn module_documentation(name: &str) -> Option<&'static str> {

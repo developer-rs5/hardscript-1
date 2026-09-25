@@ -293,14 +293,17 @@ impl Lexer {
             ')' => Ok(Sym::RParen),
             ',' => Ok(Sym::Comma),
             '.' => {
-                if two(&self, '.') && {
-                    let mut n = 0;
-                    while self.chars.get(self.pos + n) == Some(&'.') {
-                        n += 1;
-                    }
-                    n >= 2
-                } {
-                    for _ in 0..2 {
+                // `..` and `...` are both spellings of the range operator, so a
+                // dot run of two or three becomes a single range token and
+                // never leaves a stray `.` behind (which used to be parsed as
+                // member access and fail with a confusing diagnostic).
+                // `lex_sym` already consumed the first dot, so count from 1.
+                let mut n = 1;
+                while self.chars.get(self.pos + n - 1) == Some(&'.') {
+                    n += 1;
+                }
+                if n >= 2 {
+                    for _ in 1..n.min(3) {
                         self.bump();
                     }
                     Ok(Sym::Ellipsis)

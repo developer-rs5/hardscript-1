@@ -1,0 +1,56 @@
+bring http
+
+bring json
+
+bring validation
+
+app @3031
+
+model Register {
+    email : Email!
+    age : Int!(min=18, max=120)
+    role : Enum("admin", "user")
+    site : Url
+    tags : List(Str)
+    score : Int(range=0..100)
+    bio : Str(max=280, nullable)
+}
+
+GET "/ok" :: {
+    good <- json.parse("""{"email":"a@b.com","age":30,"role":"admin","tags":["x"],"score":50}""")
+    <- { passed: validation.valid("Register", good) }
+}
+
+GET "/bad" :: {
+    bad <- json.parse("""{"email":"nope","age":5,"role":"root","tags":[1],"score":900}""")
+    r <- validation.check("Register", bad)
+    errs <- validation.errors(r)
+    <- {
+        count: r.count,
+        passed: validation.valid("Register", bad),
+        first_field: errs[0].field,
+        first_rule: errs[0].rule,
+    }
+}
+
+GET "/fmt" :: {
+    <- {
+        email: validation.email("a@b.com"),
+        not_email: validation.email("nope"),
+        url: validation.url("https://x.io"),
+        uuid: validation.uuid("123e4567-e89b-12d3-a456-426614174000"),
+        ip: validation.ip("10.0.0.1"),
+        phone: validation.phone("+14155552671"),
+        low: validation.min(5, 3),
+        high: validation.max(5, 9),
+    }
+}
+
+GET "/nullable" :: {
+    with_null <- json.parse("""{"email":"a@b.com","age":30,"bio":null}""")
+    <- { passed: validation.valid("Register", with_null) }
+}
+
+GET "/unknown" :: {
+    <- { passed: validation.valid("NoSuchSchema", { a: 1 }) }
+}

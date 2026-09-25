@@ -1,6 +1,9 @@
 #ifndef HS_RUNTIME_CRYPTO_HPP
 #define HS_RUNTIME_CRYPTO_HPP
+#include "hs_runtime_io.hpp"
 #include "hs_runtime_value.hpp"
+namespace hs {
+
 // ===========================================================================
 // Crypto
 // ===========================================================================
@@ -246,5 +249,7 @@ inline bool jwt_verify(const std::string& token, const std::string& secret) {
     } catch (...) { return false; }
     return true;
 }
+
+} // namespace hs
 
 #endif
