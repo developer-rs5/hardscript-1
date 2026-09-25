@@ -6,7 +6,7 @@ pub struct Program {
     pub path: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Module {
     Http,
     Postgres,

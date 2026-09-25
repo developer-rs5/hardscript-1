@@ -397,26 +397,14 @@ fn write_vardef(enc: &mut Enc, v: &VarDef) -> Result<(), String> {
     Ok(())
 }
 
+/// Tags are `Module::SET` indices, so the encoding and the decoder cannot
+/// drift apart when a module is added. The AST cache magic has to be bumped
+/// whenever `Module::SET` changes.
 fn module_tag(m: &Module) -> u8 {
-    match m {
-        Module::Http => 0,
-        Module::Postgres => 1,
-        Module::WebSocket => 2,
-        Module::Crypto => 3,
-        Module::Json => 4,
-        Module::Fs => 5,
-        Module::Jwt => 6,
-        Module::Env => 7,
-        Module::Runtime => 8,
-        Module::Time => 9,
-        Module::Validation => 10,
-        Module::Auth => 11,
-        Module::Db => 12,
-        Module::Cache => 13,
-        Module::Queue => 14,
-        Module::Schedule => 15,
-        Module::RateLimit => 16,
-    }
+    Module::SET
+        .iter()
+        .position(|x| *x == *m)
+        .expect("every Module variant is in Module::SET") as u8
 }
 
 fn binop_tag(op: &BinOp) -> u8 {
@@ -850,19 +838,10 @@ fn read_vardef(dec: &mut Dec) -> Result<VarDef, String> {
 }
 
 fn module_from_tag(tag: u8) -> Result<Module, String> {
-    Ok(match tag {
-        0 => Module::Http,
-        1 => Module::Postgres,
-        2 => Module::WebSocket,
-        3 => Module::Crypto,
-        4 => Module::Json,
-        5 => Module::Fs,
-        6 => Module::Jwt,
-        7 => Module::Env,
-        8 => Module::Runtime,
-        9 => Module::Time,
-        other => return Err(format!("unknown module tag {other}")),
-    })
+    Module::SET
+        .get(tag as usize)
+        .ok_or_else(|| format!("unknown module tag {tag}"))
+        .map(|m| m.clone())
 }
 
 fn binop_from_tag(tag: u8) -> Result<BinOp, String> {
@@ -1033,6 +1012,28 @@ test "hello" {
         assert_eq!(m.fields[2].args.len(), 2, "min/max args");
         assert_eq!(m.fields[3].args.len(), 2, "enum members");
         assert!(m.fields[4].attrs.iter().any(|a| a.name == "index"), "@index");
+    }
+
+    #[test]
+    fn every_module_survives_the_cache() {
+        // `bring auth` and the rest of the v0.6 catalog were encoded but the
+        // decoder still stopped at `time`, so a program that brought a
+        // framework module could never be read back from the build cache.
+        let mut src = String::new();
+        for name in Module::SET_NAMES {
+            src.push_str(&format!("bring {name}\n"));
+        }
+        let before = parse_ok(&src);
+        assert_eq!(before.len(), Module::SET.len(), "one bring per module");
+        let after = deserialize_stmts(&serialize_stmts(&before).unwrap()).unwrap();
+        assert_eq!(format!("{before:?}"), format!("{after:?}"), "modules must round-trip");
+        for name in Module::SET_NAMES {
+            assert!(
+                deserialize_stmts(&serialize_stmts(&parse_ok(&format!("bring {name}\n"))).unwrap())
+                    .is_ok(),
+                "bring {name} must decode"
+            );
+        }
     }
 
     #[test]
