@@ -1,0 +1,12 @@
+[package]
+name = "hs-pm"
+version.workspace = true
+edition.workspace = true
+description = "HardScript package manager: manifest, semver resolver, lockfile, shared cache, registry client, workspace and templates."
+
+[lib]
+name = "hs_pm"
+path = "src/lib.rs"
+
+[dependencies]
+hs-compiler = { path = "../compiler" }

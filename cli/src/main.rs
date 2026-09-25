@@ -1,4 +1,9 @@
 use hs_compiler::{compile_to_cpp, fmt, frontend, Diag};
+use hs_pm::cache::Cache;
+use hs_pm::install::{self, InstallConfig};
+use hs_pm::manifest::{default_manifest, Manifest};
+use hs_pm::templates;
+use hs_pm::workspace::Workspace;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -64,6 +69,7 @@ fn main() {
     let (cmd, rest) = args.split_first().unwrap();
     match cmd.as_str() {
         "new" => cmd_new(rest),
+        "init" => cmd_init(rest),
         "build" => cmd_build(rest),
         "run" => cmd_run(rest),
         "test" => cmd_test(rest),
@@ -71,6 +77,16 @@ fn main() {
         "docs" => cmd_docs(rest),
         "doctor" => cmd_doctor(rest),
         "add" => cmd_add(rest),
+        "remove" | "rm" => cmd_remove(rest),
+        "install" => cmd_install(rest),
+        "update" => cmd_update(rest),
+        "list" => cmd_list(rest),
+        "outdated" => cmd_outdated(rest),
+        "search" => cmd_search(rest),
+        "info" => cmd_info(rest),
+        "cache" => cmd_cache(rest),
+        "workspace" => cmd_workspace(rest),
+        "report" => cmd_report(rest),
         "bench" => cmd_bench(rest),
         "hir" => cmd_hir(rest),
         "opt" => cmd_opt(rest),
@@ -90,13 +106,24 @@ fn help() {
         "hard {VERSION} — the HardScript compiler & toolchain\n\
          \n\
          USAGE:\n\
-         \x20 hard new <name>              Create a new HardScript project\n\
+         \x20 hard new <name>              Create a project (or named template)\n\
+         \x20 hard init                    Create a manifest in the current dir\n\
          \x20 hard build [file]            Compile to a native executable\n\
          \x20 hard run   [file] [args..]   Build and run the server\n\
          \x20 hard test  [file]            Build and run the test suite\n\
          \x20 hard fmt   [file]            Reformat a source file in place\n\
          \x20 hard docs  [file]            Generate API.md for a source file\n\
-         \x20 hard add <module>            Add a module reference to hard.toml\n\
+         \x20 hard add <pkg>[@req]          Add a dependency and install it\n\
+         \x20 hard remove <pkg>            Remove a dependency\n\
+         \x20 hard install                 Resolve and lock all dependencies\n\
+         \x20 hard update [pkg]            Update locked packages to newest match\n\
+         \x20 hard list                    Show installed packages\n\
+         \x20 hard outdated                Show packages with newer releases\n\
+         \x20 hard search <q>              Search the registry\n\
+         \x20 hard info <pkg>              Show package metadata\n\
+         \x20 hard cache <info|verify|clean>  Inspect the shared package cache\n\
+         \x20 hard workspace <list|build|test>  Run across workspace members\n\
+         \x20 hard report                  Write ecosystem reports to reports/\n\
          \x20 hard doctor                  Check the toolchain (g++, runtime)\n\
          \x20 hard bench [file]            Release-build and report timings\n\
          \x20 hard hir   [file]            Print the lowered HIR (debugging)\n\
@@ -104,7 +131,10 @@ fn help() {
          \x20 hard errors                   List the diagnostic catalog (--markdown)\n\
          \x20 hard help                    Show this help\n\
          \n\
-         Files default to main.hard in the current directory."
+         Files default to main.hard in the current directory.\n\
+         \n\
+         PM: hard.toml declares [dependencies]; hard.lock pins the resolution;\n\
+         cache lives in $HARD_HOME/cache (default ~/.hard/cache)."
     );
 }
 
@@ -121,17 +151,34 @@ fn find_target(rest: &[String]) -> (PathBuf, Vec<String>) {
 
 fn cmd_new(args: &[String]) {
     let name = match args.first() {
-        Some(n) => n.clone(),
+        Some(n) => n.trim().to_string(),
         None => {
             eprintln!("hard new: missing project name");
             std::process::exit(2);
         }
     };
+    if name.is_empty() || name == "." || name == ".." {
+        eprintln!("hard new: invalid project name '{name}'");
+        std::process::exit(2);
+    }
     let dir = PathBuf::from(&name);
     if dir.exists() {
         eprintln!("hard new: '{name}' already exists");
         std::process::exit(2);
     }
+
+    // A name that matches an official template scaffolds the template.
+    if let Some(tpl) = templates::find(&name) {
+        match templates::scaffold(&tpl, &name, &dir) {
+            Ok(()) => {
+                println!("Created {name}/ from template '{name}'");
+                println!("\nNext:\n  cd {name}\n  hard run");
+                return;
+            }
+            Err(e) => die(&e),
+        }
+    }
+
     std::fs::create_dir_all(dir.join("runtime")).unwrap_or_else(|e| die(&e.to_string()));
     let main = format!(
         "bring http\n\
@@ -139,13 +186,14 @@ fn cmd_new(args: &[String]) {
          app @3000\n\
          \n\
          GET \"/\" :: {{\n\
-         \x20   <- {{ \"hello\": \"{name}\" }}\n\
+         \x20   <- {{ hello: \"{name}\" }}\n\
          }}\n\
          \n\
          test \"hello\" {{\n\
-         \x20   res <- GET \"/\" {{ }}\n\
+         \x20   res <- GET \"/\"\n\
          \x20   expect res.status == 200\n\
-         }}\n"
+         }}\n\
+         \n"
     );
     write(&dir.join("main.hard"), &main);
     let toml = format!(
@@ -160,6 +208,31 @@ fn cmd_new(args: &[String]) {
     write(&dir.join(".gitignore"), ".hard/\n*.o\n");
     println!("Created {name}/");
     println!("\nNext:\n  cd {name}\n  hard run");
+}
+
+/// `hard init` — scaffold a manifest (and default source) into the current
+/// directory without creating a subdirectory.
+fn cmd_init(args: &[String]) {
+    if args.iter().any(|a| a == "--force") && !Path::new("hard.toml").exists() {
+        // nothing to force; fall through
+    }
+    if Path::new("hard.toml").exists() {
+        eprintln!("hard init: hard.toml already exists (use --force to overwrite)");
+        std::process::exit(2);
+    }
+    let dir_name = env::current_dir()
+        .ok()
+        .and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "app".to_string());
+    let manifest = default_manifest(&dir_name);
+    write(Path::new("hard.toml"), &manifest.render());
+    if !Path::new("main.hard").exists() {
+        write(
+            Path::new("main.hard"),
+            "bring http\n\napp @3000\n\nGET \"/\" :: {\n    <- { hello: \"world\" }\n}\n\ntest \"hello\" {\n    res <- GET \"/\"\n    expect res.status == 200\n}\n\n",
+        );
+    }
+    println!("initialized {} with hard.toml", dir_name);
 }
 
 fn cmd_build(rest: &[String]) {
@@ -544,26 +617,348 @@ fn human_bytes(n: u64) -> String {
 }
 
 fn cmd_add(args: &[String]) {
-    let mod_name = match args.first() {
+    let spec = match args.first() {
         Some(m) => m.clone(),
         None => {
-            eprintln!("hard add: missing module name");
+            eprintln!("hard add: missing package name");
             std::process::exit(2);
         }
     };
-    let toml_path = PathBuf::from("hard.toml");
-    let mut content = if let Ok(s) = std::fs::read_to_string(&toml_path) {
-        s
-    } else {
-        String::from("name = \"app\"\n")
-    };
-    if !content.ends_with('\n') {
-        content.push('\n');
+    let (name, req) = install::parse_add_spec(&spec);
+    if name.is_empty() {
+        eprintln!("hard add: missing package name");
+        std::process::exit(2);
     }
-    content.push_str(&format!("{mod_name} = \"latest\"\n"));
-    write(&toml_path, &content);
-    println!("added module '{mod_name}' to hard.toml");
-    println!("note: the registry is not live yet; the module list is informational.");
+    let req = req.unwrap_or_else(|| "^1.0".to_string());
+
+    let project_root = PathBuf::from(".");
+    let (mut manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        write(&project_root.join("hard.toml"), &manifest.render());
+    }
+    manifest.dependencies.insert(name.clone(), req.clone());
+    write(&project_root.join("hard.toml"), &manifest.render());
+
+    let cfg = base_config_for(manifest, project_root.clone());
+    let report = install::install(&cfg);
+    println!("added {name} = \"{req}\" to hard.toml");
+    if report.succeeded() {
+        for (pname, pver) in &report.fetched {
+            println!("  installed {pname}@{pver}");
+        }
+        for (pname, pver) in &report.reused {
+            println!("  reused {pname}@{pver} (cached)");
+        }
+        if report.lock_written {
+            println!("  wrote {}", report.lock_path.display());
+        }
+        println!("  graph:");
+        print!("{}", report.graph);
+    } else {
+        eprintln!("warning: dependency recorded but not installed:");
+        for e in &report.errors {
+            eprintln!("  {e}");
+        }
+    }
+}
+
+fn cmd_remove(args: &[String]) {
+    let name = match args.first() {
+        Some(m) => m.clone(),
+        None => {
+            eprintln!("hard remove: missing package name");
+            std::process::exit(2);
+        }
+    };
+    let project_root = PathBuf::from(".");
+    let (mut manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        write(&project_root.join("hard.toml"), &manifest.render());
+    }
+    let had = manifest.dependencies.remove(&name).is_some()
+        || manifest.dev_dependencies.remove(&name).is_some();
+    write(&project_root.join("hard.toml"), &manifest.render());
+    if had {
+        println!("removed {name}");
+        let cfg = base_config_for(manifest, project_root.clone());
+        let report = install::install(&cfg);
+        if report.lock_written {
+            println!("  re-locked {}", report.lock_path.display());
+        }
+        for e in &report.errors {
+            eprintln!("  {e}");
+        }
+    } else {
+        println!("{name} was not a dependency");
+    }
+}
+
+fn cmd_install(args: &[String]) {
+    let offline = args.iter().any(|a| a == "--offline" || a == "-o");
+    let frozen = args.iter().any(|a| a == "--frozen" || a == "-F");
+    let project_root = PathBuf::from(".");
+    let (manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        write(&project_root.join("hard.toml"), &manifest.render());
+        println!("wrote hard.toml");
+    }
+    let mut cfg = base_config_for(manifest, project_root);
+    cfg.offline = offline;
+    cfg.frozen = frozen;
+    let report = install::install(&cfg);
+    if report.succeeded() {
+        for (pname, pver) in &report.fetched {
+            println!("installed {pname}@{pver}");
+        }
+        for (pname, pver) in &report.reused {
+            println!("reused {pname}@{pver} (cached)");
+        }
+        if report.lock_written {
+            println!("locked -> {}", report.lock_path.display());
+        }
+        print!("{}", report.graph);
+    } else {
+        for e in &report.errors {
+            eprintln!("error: {e}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn cmd_update(_args: &[String]) {
+    let project_root = PathBuf::from(".");
+    let (manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        write(&project_root.join("hard.toml"), &manifest.render());
+    }
+    let cfg = base_config_for(manifest, project_root);
+    let report = install::install(&cfg);
+    if report.succeeded() {
+        println!("updated to newest matching versions");
+        print!("{}", report.graph);
+    } else {
+        for e in &report.errors {
+            eprintln!("error: {e}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn cmd_list(_args: &[String]) {
+    let project_root = PathBuf::from(".");
+    let (manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        write(&project_root.join("hard.toml"), &manifest.render());
+    }
+    let cfg = base_config_for(manifest, project_root);
+    for l in install::list_out(cfg) {
+        println!("{l}");
+    }
+}
+
+fn cmd_outdated(args: &[String]) {
+    let offline = args.iter().any(|a| a == "--offline" || a == "-o");
+    let project_root = PathBuf::from(".");
+    let (manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        write(&project_root.join("hard.toml"), &manifest.render());
+    }
+    let mut cfg = base_config_for(manifest, project_root);
+    cfg.offline = offline;
+    for l in install::outdated(cfg) {
+        println!("{l}");
+    }
+}
+
+fn cmd_search(args: &[String]) {
+    let query = match args.first() {
+        Some(q) => q.clone(),
+        None => {
+            eprintln!("hard search: missing query");
+            std::process::exit(2);
+        }
+    };
+    let registry = hs_pm::registry::Registry::new(hs_pm::registry::RegistryConfig::resolve(None, false));
+    match registry.search(&query) {
+        Ok(results) => {
+            if results.is_empty() {
+                println!("no packages matching '{query}'");
+                return;
+            }
+            for r in results {
+                let version = r
+                    .version
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                match &r.description {
+                    Some(d) => println!("{} {version}  {d}", r.name),
+                    None => println!("{} {version}", r.name),
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_info(args: &[String]) {
+    let name = match args.first() {
+        Some(n) => n.clone(),
+        None => {
+            eprintln!("hard info: missing package name");
+            std::process::exit(2);
+        }
+    };
+    let registry = hs_pm::registry::Registry::new(hs_pm::registry::RegistryConfig::resolve(None, false));
+    match registry.metadata(&name) {
+        Ok(meta) => {
+            println!("{name}");
+            for v in &meta.versions {
+                let deps: Vec<String> = v
+                    .dependencies
+                    .iter()
+                    .map(|(k, r)| format!("{k}@{r}"))
+                    .collect();
+                let deps = if deps.is_empty() {
+                    String::from("(no dependencies)")
+                } else {
+                    deps.join(", ")
+                };
+                match &v.description {
+                    Some(d) => println!("  {}  {d}  deps: {deps}", v.version),
+                    None => println!("  {}  deps: {deps}", v.version),
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_cache(args: &[String]) {
+    let sub = args.first().map(String::as_str).unwrap_or("info");
+    match sub {
+        "info" | "stats" => {
+            let cache = Cache::new();
+            let (count, bytes) = cache.stats();
+            println!("cache root: {}", cache.root.display());
+            println!("packages: {count}");
+            println!("size: {}", human_bytes(bytes));
+        }
+        "verify" => {
+            let cache = Cache::new();
+            let bad = cache.verify_all();
+            if bad.is_empty() {
+                println!("cache ok ({} packages verified)", count_packages(&cache));
+            } else {
+                for e in &bad {
+                    eprintln!("corrupt: {e}");
+                }
+                std::process::exit(1);
+            }
+        }
+        "clean" => {
+            let cache = Cache::new();
+            match cache.clean() {
+                Ok(()) => println!("cache cleaned"),
+                Err(e) => die(&format!("cache clean failed: {e}")),
+            }
+        }
+        other => {
+            eprintln!("hard cache: unknown subcommand '{other}' (use info|verify|clean)");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn count_packages(cache: &Cache) -> usize {
+    let (n, _) = cache.stats();
+    n
+}
+
+fn cmd_workspace(args: &[String]) {
+    let verb = args.first().map(String::as_str).unwrap_or("list");
+    let log = hs_pm::tui::Logger::new(false);
+    let ws = match Workspace::discover(&PathBuf::from("."), &log) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    match verb {
+        "list" => match &ws {
+            Some(ws) => {
+                for l in ws.list_lines() {
+                    println!("{l}");
+                }
+            }
+            None => {
+                println!("not in a workspace");
+            }
+        },
+        "test" | "build" | "run" => match &ws {
+            Some(ws) => {
+                println!("workspace {} ({} member{})", ws.root.display(), ws.len(), if ws.len() == 1 { "" } else { "s" });
+                let log2 = hs_pm::tui::Logger::new(true);
+                for l in ws.run_members(verb, &log2) {
+                    println!("{l}");
+                }
+            }
+            None => {
+                eprintln!("not in a workspace");
+                std::process::exit(1);
+            }
+        },
+        other => {
+            eprintln!("hard workspace: unknown subcommand '{other}' (use list|build|test)");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn cmd_report(args: &[String]) {
+    let dir = args.first().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("reports"));
+    let cache = Cache::new();
+    match hs_pm::report::write_all(&cache, &dir) {
+        Ok(written) => {
+            println!("wrote {}/", dir.display());
+            for r in &written {
+                println!("  {r}");
+            }
+        }
+        Err(e) => die(&e),
+    }
+}
+
+/// Load `hard.toml` from `project_root`, or build a fresh default manifest.
+/// Returns `(manifest, created)`.
+fn load_manifest_or_default(project_root: &Path) -> (Manifest, bool) {
+    let path = project_root.join("hard.toml");
+    match Manifest::load(&path) {
+        Ok(Some(m)) => (m, false),
+        Ok(None) => {
+            let dir_name = project_root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("app");
+            (default_manifest(dir_name), true)
+        }
+        Err(errs) => {
+            for e in &errs {
+                eprintln!("error: {}: {}", e.key, e.message);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn base_config_for(manifest: Manifest, project_root: PathBuf) -> InstallConfig {
+    install::base_config(manifest, project_root, false, false, "hard", VERSION)
 }
 
 fn cmd_hir(rest: &[String]) {
