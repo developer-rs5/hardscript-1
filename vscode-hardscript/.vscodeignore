@@ -1,0 +1,10 @@
+.git/**
+.github/**
+.vscode/**
+.vscode-test/**
+.vscode-test-web/**
+node_modules/.cache/
+*.vsix
+*.log
+.DS_Store
+Thumbs.db

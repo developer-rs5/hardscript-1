@@ -1,0 +1,602 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "HardScript",
+  "scopeName": "source.hardscript",
+  "fileTypes": [
+    "hard"
+  ],
+  "patterns": [
+    {
+      "include": "#function-declaration"
+    },
+    {
+      "include": "#route-declaration"
+    },
+    {
+      "include": "#model-declaration"
+    },
+    {
+      "include": "#middleware-declaration"
+    },
+    {
+      "include": "#socket-declaration"
+    },
+    {
+      "include": "#socket-event"
+    },
+    {
+      "include": "#test-declaration"
+    },
+    {
+      "include": "#import-declaration"
+    },
+    {
+      "include": "#app-declaration"
+    },
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#modules"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#conditionals"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.hardscript",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.hardscript",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.hardscript",
+          "begin": "\"\"\"",
+          "end": "\"\"\""
+        },
+        {
+          "name": "string.quoted.double.hardscript",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.hardscript",
+              "match": "\\\\(?:[nrt0\\\\\"'])"
+            }
+          ]
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "match": "(#)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.attribute.hardscript"
+            },
+            "2": {
+              "name": "entity.other.attribute-name.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "function-declaration": {
+      "patterns": [
+        {
+          "name": "meta.function.hardscript",
+          "begin": "\\b(?:(async)\\s+)?(calc)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.modifier.async.hardscript"
+            },
+            "2": {
+              "name": "keyword.declaration.function.hardscript"
+            },
+            "3": {
+              "name": "entity.name.function.hardscript"
+            }
+          },
+          "end": "\\{|$",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.block.begin.hardscript"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "name": "keyword.operator.arrow.hardscript",
+              "match": "=>"
+            },
+            {
+              "name": "keyword.operator.assignment.hardscript",
+              "match": "="
+            },
+            {
+              "name": "punctuation.section.parameters.begin.hardscript",
+              "match": "\\("
+            },
+            {
+              "name": "punctuation.section.parameters.end.hardscript",
+              "match": "\\)"
+            },
+            {
+              "name": "punctuation.separator.comma.hardscript",
+              "match": ","
+            },
+            {
+              "match": "\\b([A-Z][A-Za-z0-9_]*)\\s+([a-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "support.type.hardscript"
+                },
+                "2": {
+                  "name": "variable.parameter.hardscript"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "route-declaration": {
+      "patterns": [
+        {
+          "name": "meta.route.hardscript",
+          "begin": "\\b(GET|POST|PUT|DELETE|PATCH)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.route.hardscript"
+            }
+          },
+          "end": "\\{|$",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.block.begin.hardscript"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "name": "keyword.operator.double-colon.hardscript",
+              "match": "::"
+            },
+            {
+              "match": "\\(([A-Za-z_][A-Za-z0-9_]*)(=)([A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "variable.parameter.hardscript"
+                },
+                "2": {
+                  "name": "keyword.operator.assignment.hardscript"
+                },
+                "3": {
+                  "name": "support.type.hardscript"
+                }
+              }
+            },
+            {
+              "name": "punctuation.section.parameters.begin.hardscript",
+              "match": "\\("
+            },
+            {
+              "name": "punctuation.section.parameters.end.hardscript",
+              "match": "\\)"
+            },
+            {
+              "name": "punctuation.separator.comma.hardscript",
+              "match": ","
+            }
+          ]
+        }
+      ]
+    },
+    "model-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(model)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(=)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.model.hardscript"
+            },
+            "2": {
+              "name": "entity.name.type.hardscript"
+            },
+            "3": {
+              "name": "keyword.operator.assignment.hardscript"
+            },
+            "4": {
+              "name": "entity.name.type.table.hardscript"
+            }
+          }
+        },
+        {
+          "match": "\\b(model)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.model.hardscript"
+            },
+            "2": {
+              "name": "entity.name.type.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "middleware-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(before)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.middleware.hardscript"
+            },
+            "2": {
+              "name": "entity.name.function.middleware.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "socket-declaration": {
+      "patterns": [
+        {
+          "name": "meta.socket.hardscript",
+          "begin": "\\b(socket)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.declaration.socket.hardscript"
+            }
+          },
+          "end": "\\{|$",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.block.begin.hardscript"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#strings"
+            }
+          ]
+        }
+      ]
+    },
+    "socket-event": {
+      "patterns": [
+        {
+          "match": "\\b(message)(\\()([A-Za-z_][A-Za-z0-9_]*)(\\))(?=\\s*::)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.socket-event.hardscript"
+            },
+            "2": {
+              "name": "punctuation.section.parameters.begin.hardscript"
+            },
+            "3": {
+              "name": "variable.parameter.hardscript"
+            },
+            "4": {
+              "name": "punctuation.section.parameters.end.hardscript"
+            }
+          }
+        },
+        {
+          "match": "\\b(connect|disconnect)\\b(?=\\s*::)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.socket-event.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "test-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(test)\\s+(\"[^\"]*\")",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.test.hardscript"
+            },
+            "2": {
+              "name": "string.quoted.double.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "import-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(bring)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.hardscript"
+            },
+            "2": {
+              "name": "support.module.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "app-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(app)\\s+(@)\\s*([0-9]+)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.app.hardscript"
+            },
+            "2": {
+              "name": "keyword.operator.port.hardscript"
+            },
+            "3": {
+              "name": "constant.numeric.port.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.route.hardscript",
+          "match": "\\b(?:GET|POST|PUT|DELETE|PATCH)\\b"
+        },
+        {
+          "name": "keyword.declaration.hardscript",
+          "match": "\\b(?:bring|app|model|calc)\\b"
+        },
+        {
+          "name": "keyword.declaration.socket.hardscript",
+          "match": "\\b(?:socket|connect|message|disconnect)\\b"
+        },
+        {
+          "name": "keyword.control.hardscript",
+          "match": "\\b(?:before|loop|pick|async|wait|race|test|expect)\\b"
+        },
+        {
+          "name": "keyword.control.reserved.hardscript",
+          "match": "\\b(?:run)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.hardscript",
+          "match": "\\b(?:Int|Float|Text|Bool|List|Object|Nil|Str)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.hardscript",
+          "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "name": "constant.language.nil.hardscript",
+          "match": "\\bnil\\b"
+        }
+      ]
+    },
+    "modules": {
+      "patterns": [
+        {
+          "match": "\\b(http|json|crypto|jwt|fs|env|runtime|time|websocket|postgres)(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "support.module.hardscript"
+            },
+            "2": {
+              "name": "punctuation.accessor.hardscript"
+            },
+            "3": {
+              "name": "support.function.hardscript"
+            }
+          }
+        },
+        {
+          "name": "support.module.hardscript",
+          "match": "\\b(?:http|json|crypto|jwt|fs|env|runtime|time|websocket|postgres)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.hardscript",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][-+]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.hex.hardscript",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.hardscript",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?:::=|:=)",
+          "captures": {
+            "1": {
+              "name": "variable.other.constant.hardscript"
+            }
+          }
+        },
+        {
+          "match": "^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=<-)",
+          "captures": {
+            "1": {
+              "name": "variable.other.assignment.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "conditionals": {
+      "patterns": [
+        {
+          "match": "(\\?)(\\()",
+          "captures": {
+            "1": {
+              "name": "keyword.control.conditional.hardscript"
+            },
+            "2": {
+              "name": "punctuation.section.group.begin.hardscript"
+            }
+          }
+        },
+        {
+          "match": "(:)(\\{)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.conditional.hardscript"
+            },
+            "2": {
+              "name": "punctuation.section.block.begin.hardscript"
+            }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.hardscript",
+          "match": "<-|::="
+        },
+        {
+          "name": "keyword.operator.arrow.hardscript",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.double-colon.hardscript",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.range.hardscript",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.comparison.hardscript",
+          "match": "==|!=|<=|>=|&&|\\|\\||!|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.hardscript",
+          "match": "\\+|-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.port.hardscript",
+          "match": "@"
+        },
+        {
+          "name": "punctuation.accessor.hardscript",
+          "match": "\\."
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.block.begin.hardscript",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.hardscript",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.hardscript",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.hardscript",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.section.group.begin.hardscript",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.group.end.hardscript",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.separator.comma.hardscript",
+          "match": ","
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.readwrite.hardscript",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

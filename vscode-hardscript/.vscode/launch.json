@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}"
+      ],
+      "outFiles": [],
+      "preLaunchTask": "npm: check"
+    },
+    {
+      "name": "HardScript: debug hello-world",
+      "type": "hardscript",
+      "request": "launch",
+      "program": "${workspaceFolder}/../examples/hello-world/main.hard",
+      "cwd": "${workspaceFolder}/../examples/hello-world",
+      "args": [],
+      "stopOnEntry": false
+    },
+    {
+      "name": "HardScript: debug hello-world (stop on entry)",
+      "type": "hardscript",
+      "request": "launch",
+      "program": "${workspaceFolder}/../examples/hello-world/main.hard",
+      "cwd": "${workspaceFolder}/../examples/hello-world",
+      "args": [],
+      "stopOnEntry": true
+    },
+    {
+      "name": "HardScript: debug rest-api as a stdio server",
+      "type": "hardscript",
+      "request": "launch",
+      "program": "${workspaceFolder}/../examples/rest-api/main.hard",
+      "cwd": "${workspaceFolder}/../examples/rest-api",
+      "args": [],
+      "serverMode": "stdio",
+      "serverPort": 0,
+      "stopOnEntry": false
+    },
+    {
+      "name": "HardScript: debug current file",
+      "type": "hardscript",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${fileDirname}",
+      "args": [],
+      "stopOnEntry": false
+    }
+  ]
+}

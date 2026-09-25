@@ -1,0 +1,72 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: check",
+      "type": "npm",
+      "script": "check",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "HardScript: build hello-world",
+      "type": "hardscript",
+      "command": "build",
+      "file": "../examples/hello-world/main.hard",
+      "group": "build",
+      "problemMatcher": [
+        "$hardscript"
+      ]
+    },
+    {
+      "label": "HardScript: run hello-world",
+      "type": "hardscript",
+      "command": "run",
+      "file": "../examples/hello-world/main.hard",
+      "problemMatcher": [
+        "$hardscript"
+      ]
+    },
+    {
+      "label": "HardScript: test hello-world",
+      "type": "hardscript",
+      "command": "test",
+      "file": "../examples/hello-world/main.hard",
+      "group": "test",
+      "problemMatcher": [
+        "$hardscript"
+      ]
+    },
+    {
+      "label": "HardScript: format current file",
+      "type": "hardscript",
+      "command": "format",
+      "problemMatcher": [
+        "$hardscript"
+      ]
+    },
+    {
+      "label": "HardScript: doctor",
+      "type": "hardscript",
+      "command": "doctor",
+      "problemMatcher": []
+    },
+    {
+      "label": "HardScript: debug current file",
+      "type": "hardscript",
+      "command": "debug",
+      "args": [],
+      "problemMatcher": []
+    },
+    {
+      "label": "HardScript: debug hello-world",
+      "type": "hardscript",
+      "command": "debug",
+      "file": "../examples/hello-world/main.hard",
+      "problemMatcher": []
+    }
+  ]
+}

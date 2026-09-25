@@ -1,0 +1,325 @@
+{
+  "name": "hardscript",
+  "displayName": "HardScript",
+  "description": "HardScript language support, syntax highlighting, snippets, diagnostics, formatting, tasks, debugging, and toolchain commands.",
+  "version": "0.5.0",
+  "publisher": "hardscript",
+  "license": "MIT",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Debuggers"
+  ],
+  "keywords": [
+    "hardscript",
+    "hard",
+    "language"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:hardscript",
+    "onCommand:hardscript.build",
+    "onCommand:hardscript.run",
+    "onCommand:hardscript.test",
+    "onCommand:hardscript.format",
+    "onCommand:hardscript.doctor",
+    "onCommand:hardscript.explainError",
+    "onTaskType:hardscript",
+    "onDebugResolve:hardscript"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "hardscript",
+        "aliases": [
+          "HardScript",
+          "hardscript"
+        ],
+        "extensions": [
+          ".hard"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hardscript",
+        "scopeName": "source.hardscript",
+        "path": "./syntaxes/hardscript.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "hardscript",
+        "path": "./snippets/hardscript.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "hardscript.build",
+        "title": "HardScript: Build"
+      },
+      {
+        "command": "hardscript.run",
+        "title": "HardScript: Run"
+      },
+      {
+        "command": "hardscript.test",
+        "title": "HardScript: Test"
+      },
+      {
+        "command": "hardscript.format",
+        "title": "HardScript: Format"
+      },
+      {
+        "command": "hardscript.doctor",
+        "title": "HardScript: Doctor"
+      },
+      {
+        "command": "hardscript.explainError",
+        "title": "HardScript: Explain Error"
+      }
+    ],
+    "configuration": {
+      "title": "HardScript",
+      "properties": {
+        "hardscript.serverPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Absolute path, workspace-relative path, or executable name for the HardScript language server."
+        },
+        "hardscript.serverArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "description": "Arguments passed to the HardScript language server executable."
+        },
+        "hardscript.cliPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Absolute path, workspace-relative path, or executable name for the HardScript hard CLI."
+        },
+        "hardscript.hardPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "deprecationMessage": "Use hardscript.cliPath instead.",
+          "description": "Deprecated alias for hardscript.cliPath."
+        },
+        "hardscript.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "scope": "window",
+          "description": "Traces communication between VS Code and the HardScript language server."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "hardscript",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": [
+              "build",
+              "run",
+              "test",
+              "format",
+              "doctor",
+              "debug"
+            ],
+            "description": "The hard CLI subcommand to execute, or debug to start a HardScript debug session."
+          },
+          "file": {
+            "type": "string",
+            "description": "HardScript source file passed to hard. Defaults to the active .hard file, then main.hard."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Additional arguments passed to hard."
+          },
+          "stopOnEntry": {
+            "type": "boolean",
+            "default": false,
+            "description": "Used by the debug command: stop at the first line of the program."
+          },
+          "serverMode": {
+            "type": "string",
+            "description": "Used by the debug command: passed to the program as --serverMode=<value>."
+          },
+          "serverPort": {
+            "type": "number",
+            "default": 0,
+            "description": "Used by the debug command: passed to the program as --serverPort=<value>."
+          }
+        }
+      }
+    ],
+    "problemMatcher": [
+      {
+        "name": "hardscript",
+        "owner": "hardscript",
+        "source": "hardscript",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}/"
+        ],
+        "pattern": {
+          "regexp": "^(error|warning)\\[(HS\\d{4})\\]:\\s*(.*)\\r?\\n\\s*-->\\s+(.+):(\\d+):(\\d+)",
+          "file": 4,
+          "line": 5,
+          "column": 6,
+          "severity": 1,
+          "code": 2,
+          "message": 3
+        }
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "hardscript",
+        "label": "HardScript",
+        "languages": [
+          "hardscript"
+        ],
+        "runtime": "node",
+        "debugAdapterExecutable": "./debugAdapter/hardDebugAdapter.js",
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the HardScript source file to build and run under the debug adapter."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory used to build and launch HardScript."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "Arguments passed to the compiled program."
+              },
+              "hardPath": {
+                "type": "string",
+                "description": "Override for the hard executable used by the debug adapter. Defaults to hardscript.cliPath, target/release, target/debug, then PATH."
+              },
+              "env": {
+                "type": "object",
+                "default": {},
+                "description": "Environment variables added to the debuggee process."
+              },
+              "envFile": {
+                "type": "string",
+                "description": "Path to a KEY=VALUE file whose entries are added to the debuggee environment."
+              },
+              "serverMode": {
+                "type": "string",
+                "enum": [
+                  "stdio"
+                ],
+                "description": "Appends --serverMode=<value> to the program arguments. Omit the property to keep the current behavior."
+              },
+              "serverPort": {
+                "type": "number",
+                "default": 0,
+                "description": "Appends --serverPort=<value> to the program arguments. Omit the property to keep the current behavior."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "hardscript",
+            "request": "launch",
+            "name": "HardScript: Launch",
+            "program": "${workspaceFolder}/main.hard",
+            "cwd": "${workspaceFolder}",
+            "args": [],
+            "stopOnEntry": false
+          },
+          {
+            "type": "hardscript",
+            "request": "launch",
+            "name": "HardScript: Launch stdio server",
+            "program": "${workspaceFolder}/main.hard",
+            "cwd": "${workspaceFolder}",
+            "args": [],
+            "serverMode": "stdio",
+            "serverPort": 0,
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "HardScript: Launch",
+            "description": "Build and launch a HardScript program.",
+            "body": {
+              "type": "hardscript",
+              "request": "launch",
+              "name": "HardScript: Launch",
+              "program": "^${workspaceFolder}/main.hard",
+              "cwd": "^${workspaceFolder}",
+              "args": [],
+              "stopOnEntry": false
+            }
+          },
+          {
+            "label": "HardScript: Launch stdio server",
+            "description": "Launch a HardScript program with --serverMode=stdio --serverPort=0.",
+            "body": {
+              "type": "hardscript",
+              "request": "launch",
+              "name": "HardScript: Launch stdio server",
+              "program": "^${workspaceFolder}/main.hard",
+              "cwd": "^${workspaceFolder}",
+              "args": [],
+              "serverMode": "stdio",
+              "serverPort": 0,
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "check": "node scripts/check.js",
+    "vscode:prepublish": "npm run check"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

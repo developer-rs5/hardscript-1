@@ -1,0 +1,378 @@
+{
+  "HardScript function": {
+    "prefix": "fn",
+    "body": [
+      "calc ${1:name}(${2:Int} ${3:value}) => ${4:Int} {",
+      "    <- $3",
+      "}"
+    ],
+    "description": "Declare a calc function with typed parameters and a return type."
+  },
+  "HardScript async function": {
+    "prefix": "async",
+    "body": [
+      "async calc ${1:name}(${2:Int} ${3:value}) => ${4:Int} {",
+      "    <- $3",
+      "}"
+    ],
+    "description": "Declare an async calc function. v0.1 executes async functions synchronously."
+  },
+  "HardScript model": {
+    "prefix": "model",
+    "body": [
+      "model ${1:User} = ${2:users} [",
+      "    id => Int #id,",
+      "    ${3:name} => Str,",
+      "]"
+    ],
+    "description": "Declare a model bound to a table with an #id attribute."
+  },
+  "HardScript model without table": {
+    "prefix": "modelnotable",
+    "body": [
+      "model ${1:User} [",
+      "    id => Int #id,",
+      "]"
+    ],
+    "description": "Declare a model without an explicit table name."
+  },
+  "HardScript GET route": {
+    "prefix": "get",
+    "body": [
+      "GET \"${1:/path}\" :: {",
+      "    <- { ${2:ok: true} }",
+      "}"
+    ],
+    "description": "Declare a GET route that returns a JSON object."
+  },
+  "HardScript POST route": {
+    "prefix": "post",
+    "body": [
+      "POST \"${1:/path}\" :: (body = ${2:Object}) {",
+      "    <- { ${3:status: 201} }",
+      "}"
+    ],
+    "description": "Declare a POST route that binds the JSON request body."
+  },
+  "HardScript PUT route": {
+    "prefix": "put",
+    "body": [
+      "PUT \"${1:/path}\" :: (body = ${2:Object}) {",
+      "    <- { ${3:ok: true} }",
+      "}"
+    ],
+    "description": "Declare a PUT route that binds the JSON request body."
+  },
+  "HardScript DELETE route": {
+    "prefix": "delete",
+    "body": [
+      "DELETE \"${1:/path}\" :: (id = Str) {",
+      "    <- { ${2:status: 200} }",
+      "}"
+    ],
+    "description": "Declare a DELETE route that binds a URL parameter."
+  },
+  "HardScript PATCH route": {
+    "prefix": "patch",
+    "body": [
+      "PATCH \"${1:/path}\" :: (body = ${2:Object}) {",
+      "    <- { ${3:ok: true} }",
+      "}"
+    ],
+    "description": "Declare a PATCH route that binds the JSON request body."
+  },
+  "HardScript route parameter list": {
+    "prefix": "routeparam",
+    "body": [
+      ":: (${1:id} = ${2:Str}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "Append a route binding list and handler block to a route head."
+  },
+  "HardScript route with path parameter": {
+    "prefix": "routeid",
+    "body": [
+      "GET \"${1:/items}/:${2:id}\" :: (${2:id} = Str) {",
+      "    <- { ${2:id}: ${3:value} }",
+      "}"
+    ],
+    "description": "Declare a GET route with a :name path parameter."
+  },
+  "HardScript socket": {
+    "prefix": "socket",
+    "body": [
+      "socket \"${1:/ws}\" {",
+      "    connect :: {",
+      "        $2",
+      "    }",
+      "    message(d) :: {",
+      "        $3",
+      "    }",
+      "    disconnect :: {",
+      "        $4",
+      "    }",
+      "}"
+    ],
+    "description": "Declare a WebSocket endpoint with connect, message, and disconnect events."
+  },
+  "HardScript socket connect": {
+    "prefix": "connect",
+    "body": [
+      "connect :: {",
+      "    $0",
+      "}"
+    ],
+    "description": "Add a socket connect event."
+  },
+  "HardScript socket message": {
+    "prefix": "message",
+    "body": [
+      "message(${1:d}) :: {",
+      "    $0",
+      "}"
+    ],
+    "description": "Add a socket message event with a payload binding."
+  },
+  "HardScript socket disconnect": {
+    "prefix": "disconnect",
+    "body": [
+      "disconnect :: {",
+      "    $0",
+      "}"
+    ],
+    "description": "Add a socket disconnect event."
+  },
+  "HardScript middleware": {
+    "prefix": "before",
+    "body": [
+      "before ${1:auth} :: {",
+      "    $0",
+      "}"
+    ],
+    "description": "Declare middleware that runs before every matching route."
+  },
+  "HardScript test": {
+    "prefix": "test",
+    "body": [
+      "test \"${1:name}\" {",
+      "    $0",
+      "}"
+    ],
+    "description": "Declare an in-file test block."
+  },
+  "HardScript in-process request": {
+    "prefix": "request",
+    "body": [
+      "res <- GET \"${1:/path}\""
+    ],
+    "description": "Perform an in-process GET request inside a test."
+  },
+  "HardScript in-process request with body": {
+    "prefix": "requestbody",
+    "body": [
+      "res <- POST \"${1:/path}\" { ${2:body} }"
+    ],
+    "description": "Perform an in-process POST request with a JSON body inside a test."
+  },
+  "HardScript expect": {
+    "prefix": "expect",
+    "body": [
+      "expect ${1:value}"
+    ],
+    "description": "Assert that a value is truthy."
+  },
+  "HardScript expect comparison": {
+    "prefix": "expecteq",
+    "body": [
+      "expect ${1:left} == ${2:right}"
+    ],
+    "description": "Assert equality inside a test."
+  },
+  "HardScript bring http": {
+    "prefix": "bring http",
+    "body": [
+      "bring http"
+    ],
+    "description": "Bring the http builtin module."
+  },
+  "HardScript bring json": {
+    "prefix": "bring json",
+    "body": [
+      "bring json"
+    ],
+    "description": "Bring the json builtin module."
+  },
+  "HardScript bring crypto": {
+    "prefix": "bring crypto",
+    "body": [
+      "bring crypto"
+    ],
+    "description": "Bring the crypto builtin module."
+  },
+  "HardScript bring jwt": {
+    "prefix": "bring jwt",
+    "body": [
+      "bring jwt"
+    ],
+    "description": "Bring the jwt builtin module."
+  },
+  "HardScript bring fs": {
+    "prefix": "bring fs",
+    "body": [
+      "bring fs"
+    ],
+    "description": "Bring the fs builtin module."
+  },
+  "HardScript bring env": {
+    "prefix": "bring env",
+    "body": [
+      "bring env"
+    ],
+    "description": "Bring the env builtin module."
+  },
+  "HardScript bring runtime": {
+    "prefix": "bring runtime",
+    "body": [
+      "bring runtime"
+    ],
+    "description": "Bring the runtime builtin module."
+  },
+  "HardScript bring time": {
+    "prefix": "bring time",
+    "body": [
+      "bring time"
+    ],
+    "description": "Bring the time builtin module."
+  },
+  "HardScript bring websocket": {
+    "prefix": "bring websocket",
+    "body": [
+      "bring websocket"
+    ],
+    "description": "Bring the websocket builtin module."
+  },
+  "HardScript bring postgres": {
+    "prefix": "bring postgres",
+    "body": [
+      "bring postgres"
+    ],
+    "description": "Bring the postgres builtin module."
+  },
+  "HardScript variable": {
+    "prefix": "var",
+    "body": [
+      "${1:name} <- ${2:value}"
+    ],
+    "description": "Declare a mutable variable or return a value from a block."
+  },
+  "HardScript constant": {
+    "prefix": "const",
+    "body": [
+      "${1:NAME} ::= ${2:value}"
+    ],
+    "description": "Declare a constant."
+  },
+  "HardScript return": {
+    "prefix": "return",
+    "body": [
+      "<- ${1:value}"
+    ],
+    "description": "Return a value from a block, route, middleware, or test request."
+  },
+  "HardScript if": {
+    "prefix": "if",
+    "body": [
+      "?(${1:condition}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "Conditional block without an else branch."
+  },
+  "HardScript if else": {
+    "prefix": "ifelse",
+    "body": [
+      "?(${1:condition}) {",
+      "    $2",
+      "} :{",
+      "    $3",
+      "}"
+    ],
+    "description": "Conditional block with a :{ else branch."
+  },
+  "HardScript loop": {
+    "prefix": "loop",
+    "body": [
+      "loop ${1:item} => ${2:items} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Loop over a list, text, or single value."
+  },
+  "HardScript pick": {
+    "prefix": "pick",
+    "body": [
+      "pick ${1:value} {",
+      "    ${2:1} => ${3:first},",
+      "    * => ${4:default},",
+      "}"
+    ],
+    "description": "Structural match expression with a * default arm."
+  },
+  "HardScript race": {
+    "prefix": "race",
+    "body": [
+      "race [${1:fast}, ${2:slow}]"
+    ],
+    "description": "Run expressions concurrently and continue with the first to finish."
+  },
+  "HardScript wait": {
+    "prefix": "wait",
+    "body": [
+      "${1:name} <- wait ${2:value}"
+    ],
+    "description": "Yield a value with wait."
+  },
+  "HardScript object literal": {
+    "prefix": "obj",
+    "body": [
+      "{ ${1:key}: ${2:value} }"
+    ],
+    "description": "Object literal with unquoted key."
+  },
+  "HardScript list literal": {
+    "prefix": "list",
+    "body": [
+      "[${1:item}]"
+    ],
+    "description": "List literal."
+  },
+  "HardScript app port": {
+    "prefix": "app",
+    "body": [
+      "app @${1:3000}"
+    ],
+    "description": "Declare the application listen port."
+  },
+  "HardScript websocket reply": {
+    "prefix": "websocket.reply",
+    "body": [
+      "websocket.reply(${1:text})"
+    ],
+    "description": "Reply to the current socket connection."
+  },
+  "HardScript websocket broadcast": {
+    "prefix": "websocket.broadcast",
+    "body": [
+      "websocket.broadcast(${1:text})"
+    ],
+    "description": "Broadcast text to every connection in the current room."
+  },
+  "HardScript websocket join": {
+    "prefix": "websocket.join",
+    "body": [
+      "websocket.join(${1:room})"
+    ],
+    "description": "Join a socket room."
+  }
+}
