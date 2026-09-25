@@ -1,0 +1,69 @@
+{
+  "tool": "hardscript-lsp-index-scan",
+  "binary": "/home/rishabh/Projects/hardscript/target/release/hs-lsp",
+  "corpus": "/home/rishabh/Projects/hardscript/qa/corpus",
+  "scaling": [
+    {
+      "files": 25,
+      "bytes": 4325,
+      "initialize_ms": 0.557,
+      "index_ready_ms": 21.182,
+      "workspace_symbols": 100,
+      "first_query_ms": 0.983
+    },
+    {
+      "files": 100,
+      "bytes": 17450,
+      "initialize_ms": 2.822,
+      "index_ready_ms": 13.839,
+      "workspace_symbols": 400,
+      "first_query_ms": 13.822
+    },
+    {
+      "files": 400,
+      "bytes": 71450,
+      "initialize_ms": 2.116,
+      "index_ready_ms": 53.765,
+      "workspace_symbols": 1600,
+      "first_query_ms": 53.755
+    }
+  ],
+  "multimodule": {
+    "initialize_ms": 2.525,
+    "index_ready_ms": 21.101,
+    "workspace_symbols": 6,
+    "query_latencies": [
+      {
+        "query": "greeting",
+        "ms": 0.111,
+        "symbols": 1
+      },
+      {
+        "query": "User",
+        "ms": 0.103,
+        "symbols": 1
+      },
+      {
+        "query": "item",
+        "ms": 0.108,
+        "symbols": 0
+      },
+      {
+        "query": "zzz",
+        "ms": 0.101,
+        "symbols": 0
+      }
+    ],
+    "diagnostics_count": 1,
+    "definition_ms": 0.23,
+    "definition_target": "file:///tmp/hs-index-scan-xmagf0w5/hs-multimodule-x19wzb43/handlers.hard",
+    "hover_ms": 0.1,
+    "hover_present": true,
+    "references_ms": 0.112,
+    "reference_count": 2,
+    "workspace_symbol_query_ms": 0.074,
+    "root_added_index_ms": 0.17,
+    "root_added_symbols": 6
+  },
+  "multimodule_definition": "file:///tmp/hs-index-scan-xmagf0w5/hs-multimodule-x19wzb43/handlers.hard"
+}

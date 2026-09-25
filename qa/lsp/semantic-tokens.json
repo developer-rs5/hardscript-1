@@ -1,0 +1,2214 @@
+{
+  "tool": "hardscript-lsp-semantic-scan",
+  "binary": "/home/rishabh/Projects/hardscript/target/release/hs-lsp",
+  "corpus": "/home/rishabh/Projects/hardscript/qa/corpus",
+  "files_scanned": 309,
+  "bytes_scanned": 1210946,
+  "lines_scanned": 38458,
+  "tokens_total": 179090,
+  "legend_types": [
+    "keyword",
+    "function",
+    "type",
+    "module",
+    "parameter",
+    "property",
+    "variable",
+    "const",
+    "string",
+    "number",
+    "operator",
+    "decorator",
+    "method",
+    "comment"
+  ],
+  "legend_modifiers": [],
+  "type_counts": {
+    "decorator": 51,
+    "variable": 5534,
+    "comment": 3,
+    "keyword": 385,
+    "module": 47,
+    "operator": 106797,
+    "number": 55430,
+    "type": 15,
+    "method": 5219,
+    "string": 5302,
+    "parameter": 117,
+    "property": 31,
+    "function": 154,
+    "const": 5
+  },
+  "modifier_counts": {},
+  "initialize_ms": 0.5717959993489785,
+  "index_ready_ms": 185.63869800163957,
+  "workspace_symbol_count": 5349,
+  "slowest_file": "p1_stress/121-large-5000-routes.hard",
+  "slowest_latency_ms": 6980.565,
+  "total_request_ms": 14647.556,
+  "per_file": [
+    {
+      "path": "p1_parse/001-empty.hard",
+      "bytes": 0,
+      "lines": 1,
+      "tokens": 0,
+      "latency_ms": 36.599
+    },
+    {
+      "path": "p1_parse/002-whitespace.hard",
+      "bytes": 9,
+      "lines": 4,
+      "tokens": 0,
+      "latency_ms": 18.616
+    },
+    {
+      "path": "p1_parse/003-only-comments.hard",
+      "bytes": 38,
+      "lines": 4,
+      "tokens": 6,
+      "latency_ms": 17.87
+    },
+    {
+      "path": "p1_parse/004-only-bring.hard",
+      "bytes": 11,
+      "lines": 2,
+      "tokens": 2,
+      "latency_ms": 16.911
+    },
+    {
+      "path": "p1_parse/005-only-app.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 17.048
+    },
+    {
+      "path": "p1_parse/006-only-model-empty.hard",
+      "bytes": 16,
+      "lines": 3,
+      "tokens": 6,
+      "latency_ms": 16.837
+    },
+    {
+      "path": "p1_parse/007-only-blank-route.hard",
+      "bytes": 14,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 18.862
+    },
+    {
+      "path": "p1_parse/008-nul-bytes.hard",
+      "bytes": 5,
+      "lines": 2,
+      "tokens": 0,
+      "latency_ms": 19.047
+    },
+    {
+      "path": "p1_parse/009-bom-at-start.hard",
+      "bytes": 14,
+      "lines": 2,
+      "tokens": 0,
+      "latency_ms": 17.486
+    },
+    {
+      "path": "p1_parse/010-stray-close.hard",
+      "bytes": 2,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 18.034
+    },
+    {
+      "path": "p1_parse/011-stray-open.hard",
+      "bytes": 2,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 16.82
+    },
+    {
+      "path": "p1_parse/012-unclosed-brace-route.hard",
+      "bytes": 24,
+      "lines": 3,
+      "tokens": 7,
+      "latency_ms": 16.712
+    },
+    {
+      "path": "p1_parse/013-extra-close-route.hard",
+      "bytes": 13,
+      "lines": 2,
+      "tokens": 4,
+      "latency_ms": 17.129
+    },
+    {
+      "path": "p1_parse/014-nested-empty.hard",
+      "bytes": 24,
+      "lines": 7,
+      "tokens": 6,
+      "latency_ms": 17.479
+    },
+    {
+      "path": "p1_parse/015-mismatched.hard",
+      "bytes": 5,
+      "lines": 2,
+      "tokens": 4,
+      "latency_ms": 17.908
+    },
+    {
+      "path": "p1_parse/016-only-rparen.hard",
+      "bytes": 2,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 19.09
+    },
+    {
+      "path": "p1_parse/017-only-rbracket.hard",
+      "bytes": 2,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 18.561
+    },
+    {
+      "path": "p1_parse/018-semicolons.hard",
+      "bytes": 4,
+      "lines": 2,
+      "tokens": 0,
+      "latency_ms": 17.255
+    },
+    {
+      "path": "p1_parse/023-deep-nested-expr.hard",
+      "bytes": 402,
+      "lines": 2,
+      "tokens": 401,
+      "latency_ms": 17.365
+    },
+    {
+      "path": "p1_parse/025-route-no-method.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 4,
+      "latency_ms": 17.72
+    },
+    {
+      "path": "p1_parse/026-route-no-path.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 4,
+      "latency_ms": 16.704
+    },
+    {
+      "path": "p1_parse/027-route-no-colon.hard",
+      "bytes": 11,
+      "lines": 3,
+      "tokens": 4,
+      "latency_ms": 17.353
+    },
+    {
+      "path": "p1_parse/028-route-single-colon.hard",
+      "bytes": 13,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 17.255
+    },
+    {
+      "path": "p1_parse/029-route-params-before.hard",
+      "bytes": 17,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 18.489
+    },
+    {
+      "path": "p1_parse/030-route-params-mixed.hard",
+      "bytes": 31,
+      "lines": 2,
+      "tokens": 12,
+      "latency_ms": 19.672
+    },
+    {
+      "path": "p1_parse/031-route-params-no-type.hard",
+      "bytes": 19,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 17.316
+    },
+    {
+      "path": "p1_parse/032-route-params-dup.hard",
+      "bytes": 35,
+      "lines": 2,
+      "tokens": 14,
+      "latency_ms": 17.924
+    },
+    {
+      "path": "p1_parse/033-route-params-int.hard",
+      "bytes": 25,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 16.863
+    },
+    {
+      "path": "p1_parse/034-route-params-comma-end.hard",
+      "bytes": 26,
+      "lines": 2,
+      "tokens": 11,
+      "latency_ms": 17.43
+    },
+    {
+      "path": "p1_parse/035-route-path-number.hard",
+      "bytes": 14,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 17.353
+    },
+    {
+      "path": "p1_parse/036-route-path-emoji.hard",
+      "bytes": 17,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 16.878
+    },
+    {
+      "path": "p1_parse/037-route-empty-string.hard",
+      "bytes": 13,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 19.834
+    },
+    {
+      "path": "p1_parse/038-route-wildcard.hard",
+      "bytes": 15,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 20.119
+    },
+    {
+      "path": "p1_parse/039-route-wrong-method.hard",
+      "bytes": 15,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 19.404
+    },
+    {
+      "path": "p1_parse/040-route-lower-method.hard",
+      "bytes": 14,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 20.03
+    },
+    {
+      "path": "p1_parse/041-route-dup-exact.hard",
+      "bytes": 28,
+      "lines": 3,
+      "tokens": 10,
+      "latency_ms": 20.519
+    },
+    {
+      "path": "p1_parse/042-route-dup-param.hard",
+      "bytes": 70,
+      "lines": 3,
+      "tokens": 26,
+      "latency_ms": 19.606
+    },
+    {
+      "path": "p1_parse/043-route-no-app-server.hard",
+      "bytes": 22,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 19.466
+    },
+    {
+      "path": "p1_parse/044-model-no-table.hard",
+      "bytes": 27,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 19.102
+    },
+    {
+      "path": "p1_parse/045-model-table-string.hard",
+      "bytes": 33,
+      "lines": 2,
+      "tokens": 12,
+      "latency_ms": 19.958
+    },
+    {
+      "path": "p1_parse/046-model-no-comma.hard",
+      "bytes": 46,
+      "lines": 5,
+      "tokens": 14,
+      "latency_ms": 18.427
+    },
+    {
+      "path": "p1_parse/047-model-bad-field-type.hard",
+      "bytes": 28,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 18.584
+    },
+    {
+      "path": "p1_parse/048-model-field-no-arrow.hard",
+      "bytes": 24,
+      "lines": 2,
+      "tokens": 9,
+      "latency_ms": 22.821
+    },
+    {
+      "path": "p1_parse/049-model-field-arrow-wrong.hard",
+      "bytes": 27,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 19.744
+    },
+    {
+      "path": "p1_parse/050-model-dup-field.hard",
+      "bytes": 36,
+      "lines": 2,
+      "tokens": 14,
+      "latency_ms": 20.454
+    },
+    {
+      "path": "p1_parse/051-model-dup-pk.hard",
+      "bytes": 44,
+      "lines": 2,
+      "tokens": 18,
+      "latency_ms": 19.69
+    },
+    {
+      "path": "p1_parse/052-model-empty-table.hard",
+      "bytes": 26,
+      "lines": 2,
+      "tokens": 9,
+      "latency_ms": 19.003
+    },
+    {
+      "path": "p1_parse/053-model-dup-name.hard",
+      "bytes": 62,
+      "lines": 3,
+      "tokens": 24,
+      "latency_ms": 21.662
+    },
+    {
+      "path": "p1_parse/054-model-pk-int.hard",
+      "bytes": 31,
+      "lines": 2,
+      "tokens": 12,
+      "latency_ms": 19.872
+    },
+    {
+      "path": "p1_parse/055-model-bool-field.hard",
+      "bytes": 28,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 21.38
+    },
+    {
+      "path": "p1_parse/056-model-json-field.hard",
+      "bytes": 30,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 19.464
+    },
+    {
+      "path": "p1_parse/057-model-nested.hard",
+      "bytes": 68,
+      "lines": 7,
+      "tokens": 22,
+      "latency_ms": 20.001
+    },
+    {
+      "path": "p1_parse/058-func-no-arrow.hard",
+      "bytes": 16,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 19.804
+    },
+    {
+      "path": "p1_parse/059-func-no-parens.hard",
+      "bytes": 22,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 19.622
+    },
+    {
+      "path": "p1_parse/060-func-no-body.hard",
+      "bytes": 17,
+      "lines": 2,
+      "tokens": 7,
+      "latency_ms": 22.199
+    },
+    {
+      "path": "p1_parse/061-func-dup-name.hard",
+      "bytes": 46,
+      "lines": 3,
+      "tokens": 20,
+      "latency_ms": 23.606
+    },
+    {
+      "path": "p1_parse/062-func-dup-param.hard",
+      "bytes": 26,
+      "lines": 2,
+      "tokens": 12,
+      "latency_ms": 25.172
+    },
+    {
+      "path": "p1_parse/063-func-param-literal.hard",
+      "bytes": 23,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 25.888
+    },
+    {
+      "path": "p1_parse/064-func-return-missing.hard",
+      "bytes": 20,
+      "lines": 2,
+      "tokens": 9,
+      "latency_ms": 26.921
+    },
+    {
+      "path": "p1_parse/065-func-bad-ret-type.hard",
+      "bytes": 25,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 23.847
+    },
+    {
+      "path": "p1_parse/066-func-void-ret.hard",
+      "bytes": 24,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 24.158
+    },
+    {
+      "path": "p1_parse/067-func-async-no-await.hard",
+      "bytes": 32,
+      "lines": 2,
+      "tokens": 11,
+      "latency_ms": 25.936
+    },
+    {
+      "path": "p1_parse/068-test-no-name.hard",
+      "bytes": 23,
+      "lines": 2,
+      "tokens": 7,
+      "latency_ms": 21.083
+    },
+    {
+      "path": "p1_parse/069-test-name-string.hard",
+      "bytes": 33,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 21.87
+    },
+    {
+      "path": "p1_parse/070-expect-no-op.hard",
+      "bytes": 18,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 21.401
+    },
+    {
+      "path": "p1_parse/071-expect-raw.hard",
+      "bytes": 22,
+      "lines": 2,
+      "tokens": 7,
+      "latency_ms": 25.109
+    },
+    {
+      "path": "p1_parse/072-expect-notbool.hard",
+      "bytes": 28,
+      "lines": 2,
+      "tokens": 9,
+      "latency_ms": 21.822
+    },
+    {
+      "path": "p1_parse/073-middleware-no-name.hard",
+      "bytes": 22,
+      "lines": 4,
+      "tokens": 6,
+      "latency_ms": 21.463
+    },
+    {
+      "path": "p1_parse/074-loop-no-iter.hard",
+      "bytes": 22,
+      "lines": 4,
+      "tokens": 7,
+      "latency_ms": 19.634
+    },
+    {
+      "path": "p1_parse/075-loop-string-iter.hard",
+      "bytes": 24,
+      "lines": 4,
+      "tokens": 7,
+      "latency_ms": 21.837
+    },
+    {
+      "path": "p1_parse/076-loop-list-iter.hard",
+      "bytes": 29,
+      "lines": 4,
+      "tokens": 11,
+      "latency_ms": 22.23
+    },
+    {
+      "path": "p1_parse/077-race-ok-2.hard",
+      "bytes": 35,
+      "lines": 6,
+      "tokens": 11,
+      "latency_ms": 25.389
+    },
+    {
+      "path": "p1_parse/078-race-1-arm.hard",
+      "bytes": 20,
+      "lines": 4,
+      "tokens": 6,
+      "latency_ms": 26.079
+    },
+    {
+      "path": "p1_parse/079-race-0-arm.hard",
+      "bytes": 5,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 23.823
+    },
+    {
+      "path": "p1_parse/080-pick-dup.hard",
+      "bytes": 17,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 22.776
+    },
+    {
+      "path": "p1_parse/081-assign-in-route.hard",
+      "bytes": 37,
+      "lines": 5,
+      "tokens": 11,
+      "latency_ms": 24.499
+    },
+    {
+      "path": "p1_parse/082-junk-00.hard",
+      "bytes": 93,
+      "lines": 2,
+      "tokens": 23,
+      "latency_ms": 22.033
+    },
+    {
+      "path": "p1_parse/083-junk-01.hard",
+      "bytes": 96,
+      "lines": 2,
+      "tokens": 24,
+      "latency_ms": 22.715
+    },
+    {
+      "path": "p1_parse/084-junk-02.hard",
+      "bytes": 126,
+      "lines": 2,
+      "tokens": 41,
+      "latency_ms": 21.107
+    },
+    {
+      "path": "p1_parse/085-junk-03.hard",
+      "bytes": 38,
+      "lines": 2,
+      "tokens": 9,
+      "latency_ms": 20.708
+    },
+    {
+      "path": "p1_parse/086-junk-04.hard",
+      "bytes": 140,
+      "lines": 2,
+      "tokens": 44,
+      "latency_ms": 21.682
+    },
+    {
+      "path": "p1_parse/087-junk-05.hard",
+      "bytes": 69,
+      "lines": 2,
+      "tokens": 19,
+      "latency_ms": 18.436
+    },
+    {
+      "path": "p1_parse/088-junk-06.hard",
+      "bytes": 120,
+      "lines": 2,
+      "tokens": 33,
+      "latency_ms": 17.703
+    },
+    {
+      "path": "p1_parse/089-junk-07.hard",
+      "bytes": 19,
+      "lines": 2,
+      "tokens": 8,
+      "latency_ms": 19.059
+    },
+    {
+      "path": "p1_parse/090-junk-08.hard",
+      "bytes": 124,
+      "lines": 2,
+      "tokens": 37,
+      "latency_ms": 18.267
+    },
+    {
+      "path": "p1_parse/091-junk-09.hard",
+      "bytes": 78,
+      "lines": 2,
+      "tokens": 20,
+      "latency_ms": 17.339
+    },
+    {
+      "path": "p1_parse/092-junk-10.hard",
+      "bytes": 72,
+      "lines": 2,
+      "tokens": 20,
+      "latency_ms": 18.719
+    },
+    {
+      "path": "p1_parse/093-junk-11.hard",
+      "bytes": 144,
+      "lines": 2,
+      "tokens": 36,
+      "latency_ms": 18.671
+    },
+    {
+      "path": "p1_parse/094-junk-12.hard",
+      "bytes": 133,
+      "lines": 2,
+      "tokens": 37,
+      "latency_ms": 18.78
+    },
+    {
+      "path": "p1_parse/095-junk-13.hard",
+      "bytes": 107,
+      "lines": 2,
+      "tokens": 32,
+      "latency_ms": 18.1
+    },
+    {
+      "path": "p1_parse/096-junk-14.hard",
+      "bytes": 8,
+      "lines": 2,
+      "tokens": 2,
+      "latency_ms": 18.61
+    },
+    {
+      "path": "p1_parse/097-junk-15.hard",
+      "bytes": 103,
+      "lines": 2,
+      "tokens": 30,
+      "latency_ms": 18.926
+    },
+    {
+      "path": "p1_parse/098-junk-16.hard",
+      "bytes": 46,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 18.284
+    },
+    {
+      "path": "p1_parse/099-junk-17.hard",
+      "bytes": 135,
+      "lines": 2,
+      "tokens": 37,
+      "latency_ms": 17.925
+    },
+    {
+      "path": "p1_parse/100-junk-18.hard",
+      "bytes": 184,
+      "lines": 2,
+      "tokens": 41,
+      "latency_ms": 18.754
+    },
+    {
+      "path": "p1_parse/101-junk-19.hard",
+      "bytes": 32,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 17.648
+    },
+    {
+      "path": "p1_parse/102-junk-20.hard",
+      "bytes": 59,
+      "lines": 2,
+      "tokens": 16,
+      "latency_ms": 18.734
+    },
+    {
+      "path": "p1_parse/103-junk-21.hard",
+      "bytes": 13,
+      "lines": 2,
+      "tokens": 4,
+      "latency_ms": 20.287
+    },
+    {
+      "path": "p1_parse/104-junk-22.hard",
+      "bytes": 105,
+      "lines": 2,
+      "tokens": 27,
+      "latency_ms": 20.064
+    },
+    {
+      "path": "p1_parse/105-junk-23.hard",
+      "bytes": 140,
+      "lines": 2,
+      "tokens": 34,
+      "latency_ms": 19.231
+    },
+    {
+      "path": "p1_parse/106-junk-24.hard",
+      "bytes": 4,
+      "lines": 2,
+      "tokens": 2,
+      "latency_ms": 18.95
+    },
+    {
+      "path": "p1_parse/107-junk-25.hard",
+      "bytes": 99,
+      "lines": 2,
+      "tokens": 26,
+      "latency_ms": 17.789
+    },
+    {
+      "path": "p1_parse/108-junk-26.hard",
+      "bytes": 84,
+      "lines": 2,
+      "tokens": 28,
+      "latency_ms": 18.688
+    },
+    {
+      "path": "p1_parse/109-junk-27.hard",
+      "bytes": 69,
+      "lines": 2,
+      "tokens": 21,
+      "latency_ms": 19.183
+    },
+    {
+      "path": "p1_parse/110-junk-28.hard",
+      "bytes": 69,
+      "lines": 2,
+      "tokens": 22,
+      "latency_ms": 18.87
+    },
+    {
+      "path": "p1_parse/111-junk-29.hard",
+      "bytes": 136,
+      "lines": 2,
+      "tokens": 40,
+      "latency_ms": 18.199
+    },
+    {
+      "path": "p1_parse/112-comments-everywhere.hard",
+      "bytes": 121,
+      "lines": 10,
+      "tokens": 37,
+      "latency_ms": 18.082
+    },
+    {
+      "path": "p1_parse/113-comment-multiline-str.hard",
+      "bytes": 17,
+      "lines": 2,
+      "tokens": 5,
+      "latency_ms": 18.268
+    },
+    {
+      "path": "p1_parse/114-comment-nested.hard",
+      "bytes": 16,
+      "lines": 3,
+      "tokens": 5,
+      "latency_ms": 18.02
+    },
+    {
+      "path": "p1_parse/115-unicode-identifiers.hard",
+      "bytes": 52,
+      "lines": 5,
+      "tokens": 14,
+      "latency_ms": 18.897
+    },
+    {
+      "path": "p1_parse/116-unicode-route.hard",
+      "bytes": 34,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 18.788
+    },
+    {
+      "path": "p1_parse/117-unicode-string.hard",
+      "bytes": 53,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 17.929
+    },
+    {
+      "path": "p1_parse/118-unicode-mixed.hard",
+      "bytes": 15,
+      "lines": 2,
+      "tokens": 0,
+      "latency_ms": 18.912
+    },
+    {
+      "path": "p1_parse/119-rtl-text.hard",
+      "bytes": 52,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 19.547
+    },
+    {
+      "path": "p1_parse/124-kw-as-var.hard",
+      "bytes": 9,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 20.445
+    },
+    {
+      "path": "p1_parse/125-kw-var-bring.hard",
+      "bytes": 11,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 20.605
+    },
+    {
+      "path": "p1_parse/126-kw-var-app.hard",
+      "bytes": 9,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 24.174
+    },
+    {
+      "path": "p1_parse/127-kw-var-model.hard",
+      "bytes": 11,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 25.268
+    },
+    {
+      "path": "p1_parse/128-kw-var-calc.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 24.764
+    },
+    {
+      "path": "p1_parse/129-kw-var-test.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 24.065
+    },
+    {
+      "path": "p1_parse/130-kw-var-expect.hard",
+      "bytes": 12,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 22.624
+    },
+    {
+      "path": "p1_parse/131-kw-var-socket.hard",
+      "bytes": 12,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 22.622
+    },
+    {
+      "path": "p1_parse/132-kw-var-loop.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 27.816
+    },
+    {
+      "path": "p1_parse/133-kw-var-race.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 26.826
+    },
+    {
+      "path": "p1_parse/134-kw-var-pick.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 27.061
+    },
+    {
+      "path": "p1_parse/135-kw-var-async.hard",
+      "bytes": 11,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 32.713
+    },
+    {
+      "path": "p1_parse/136-kw-var-wait.hard",
+      "bytes": 10,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 27.296
+    },
+    {
+      "path": "p1_parse/137-kw-var-before.hard",
+      "bytes": 12,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 24.92
+    },
+    {
+      "path": "p1_parse/138-kw-var-connect.hard",
+      "bytes": 13,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 22.145
+    },
+    {
+      "path": "p1_parse/139-kw-var-message.hard",
+      "bytes": 13,
+      "lines": 2,
+      "tokens": 3,
+      "latency_ms": 25.11
+    },
+    {
+      "path": "p1_parse/140-keywords-in-route-body.hard",
+      "bytes": 30,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 25.85
+    },
+    {
+      "path": "p1_parse/141-model-and-route-no-app.hard",
+      "bytes": 53,
+      "lines": 3,
+      "tokens": 20,
+      "latency_ms": 22.979
+    },
+    {
+      "path": "p1_parse/142-route-in-model.hard",
+      "bytes": 46,
+      "lines": 2,
+      "tokens": 18,
+      "latency_ms": 26.211
+    },
+    {
+      "path": "p1_parse/143-make-garbage-capitals.hard",
+      "bytes": 28,
+      "lines": 3,
+      "tokens": 10,
+      "latency_ms": 29.764
+    },
+    {
+      "path": "p1_parse/144-space-in-ident.hard",
+      "bytes": 12,
+      "lines": 2,
+      "tokens": 4,
+      "latency_ms": 27.777
+    },
+    {
+      "path": "p1_parse/145-tab-indent.hard",
+      "bytes": 23,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 23.299
+    },
+    {
+      "path": "p1_parse/146-crlf.hard",
+      "bytes": 26,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 24.855
+    },
+    {
+      "path": "p1_parse/147-double-quote-esc.hard",
+      "bytes": 31,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 23.238
+    },
+    {
+      "path": "p1_parse/148-trailing-token.hard",
+      "bytes": 24,
+      "lines": 2,
+      "tokens": 0,
+      "latency_ms": 23.119
+    },
+    {
+      "path": "p1_parse/149-only-quote.hard",
+      "bytes": 2,
+      "lines": 2,
+      "tokens": 0,
+      "latency_ms": 23.11
+    },
+    {
+      "path": "p1_parse/150-only-dcolon.hard",
+      "bytes": 3,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 24.707
+    },
+    {
+      "path": "p1_parse/151-only-arrow.hard",
+      "bytes": 3,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 23.764
+    },
+    {
+      "path": "p1_parse/152-only-at.hard",
+      "bytes": 2,
+      "lines": 2,
+      "tokens": 1,
+      "latency_ms": 23.031
+    },
+    {
+      "path": "p1_parse/153-at-in-expr.hard",
+      "bytes": 30,
+      "lines": 4,
+      "tokens": 9,
+      "latency_ms": 21.708
+    },
+    {
+      "path": "p1_parse/154-model-number-table.hard",
+      "bytes": 29,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 23.787
+    },
+    {
+      "path": "p1_parse/155-route-param-path-conflict.hard",
+      "bytes": 34,
+      "lines": 2,
+      "tokens": 10,
+      "latency_ms": 24.798
+    },
+    {
+      "path": "p1_parse/156-ws-route.hard",
+      "bytes": 63,
+      "lines": 6,
+      "tokens": 12,
+      "latency_ms": 24.782
+    },
+    {
+      "path": "p1_parse/157-ws-connect-body.hard",
+      "bytes": 69,
+      "lines": 6,
+      "tokens": 15,
+      "latency_ms": 25.175
+    },
+    {
+      "path": "p1_parse/158-ws-disconnect-body.hard",
+      "bytes": 69,
+      "lines": 6,
+      "tokens": 14,
+      "latency_ms": 22.536
+    },
+    {
+      "path": "p1_parse/159-ws-no-message.hard",
+      "bytes": 19,
+      "lines": 2,
+      "tokens": 6,
+      "latency_ms": 22.93
+    },
+    {
+      "path": "p1_parse/160-socket-no-ws.hard",
+      "bytes": 31,
+      "lines": 4,
+      "tokens": 7,
+      "latency_ms": 24.021
+    },
+    {
+      "path": "p1_parse/161-socket-in-model.hard",
+      "bytes": 46,
+      "lines": 2,
+      "tokens": 17,
+      "latency_ms": 24.581
+    },
+    {
+      "path": "p1_stress/019-deep-open-10.hard",
+      "bytes": 40,
+      "lines": 21,
+      "tokens": 20,
+      "latency_ms": 26.644
+    },
+    {
+      "path": "p1_stress/020-deep-open-120.hard",
+      "bytes": 480,
+      "lines": 241,
+      "tokens": 240,
+      "latency_ms": 22.979
+    },
+    {
+      "path": "p1_stress/021-deep-open-1000.hard",
+      "bytes": 4000,
+      "lines": 2001,
+      "tokens": 2000,
+      "latency_ms": 35.586
+    },
+    {
+      "path": "p1_stress/022-deep-open-10000.hard",
+      "bytes": 40000,
+      "lines": 20001,
+      "tokens": 20000,
+      "latency_ms": 214.831
+    },
+    {
+      "path": "p1_stress/024-deep-nested-expr2.hard",
+      "bytes": 10002,
+      "lines": 2,
+      "tokens": 10001,
+      "latency_ms": 28.192
+    },
+    {
+      "path": "p1_stress/120-large-10000-lines.hard",
+      "bytes": 447780,
+      "lines": 10001,
+      "tokens": 0,
+      "latency_ms": 124.117
+    },
+    {
+      "path": "p1_stress/121-large-5000-routes.hard",
+      "bytes": 152780,
+      "lines": 5001,
+      "tokens": 40000,
+      "latency_ms": 6980.565
+    },
+    {
+      "path": "p1_stress/122-huge-single-string.hard",
+      "bytes": 200027,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 55.82
+    },
+    {
+      "path": "p1_stress/123-huge-list.hard",
+      "bytes": 338915,
+      "lines": 4,
+      "tokens": 100008,
+      "latency_ms": 152.33
+    },
+    {
+      "path": "p2_type/001-undef-route.hard",
+      "bytes": 27,
+      "lines": 4,
+      "tokens": 7,
+      "latency_ms": 30.811
+    },
+    {
+      "path": "p2_type/002-undef-calc.hard",
+      "bytes": 61,
+      "lines": 7,
+      "tokens": 19,
+      "latency_ms": 24.321
+    },
+    {
+      "path": "p2_type/003-undef-middleware.hard",
+      "bytes": 55,
+      "lines": 7,
+      "tokens": 14,
+      "latency_ms": 21.862
+    },
+    {
+      "path": "p2_type/004-undef-socket.hard",
+      "bytes": 67,
+      "lines": 7,
+      "tokens": 17,
+      "latency_ms": 20.665
+    },
+    {
+      "path": "p2_type/005-undef-test.hard",
+      "bytes": 49,
+      "lines": 7,
+      "tokens": 13,
+      "latency_ms": 20.702
+    },
+    {
+      "path": "p2_type/006-undef-if.hard",
+      "bytes": 45,
+      "lines": 5,
+      "tokens": 15,
+      "latency_ms": 21.432
+    },
+    {
+      "path": "p2_type/007-undef-loop.hard",
+      "bytes": 52,
+      "lines": 5,
+      "tokens": 15,
+      "latency_ms": 22.62
+    },
+    {
+      "path": "p2_type/008-undef-race.hard",
+      "bytes": 42,
+      "lines": 5,
+      "tokens": 11,
+      "latency_ms": 24.715
+    },
+    {
+      "path": "p2_type/009-undef-pick.hard",
+      "bytes": 55,
+      "lines": 4,
+      "tokens": 17,
+      "latency_ms": 25.857
+    },
+    {
+      "path": "p2_type/010-undef-expect.hard",
+      "bytes": 58,
+      "lines": 7,
+      "tokens": 15,
+      "latency_ms": 22.315
+    },
+    {
+      "path": "p2_type/011-undef-in-obj.hard",
+      "bytes": 36,
+      "lines": 4,
+      "tokens": 11,
+      "latency_ms": 21.15
+    },
+    {
+      "path": "p2_type/012-undef-in-list.hard",
+      "bytes": 31,
+      "lines": 4,
+      "tokens": 9,
+      "latency_ms": 23.519
+    },
+    {
+      "path": "p2_type/013-undef-in-index-base.hard",
+      "bytes": 30,
+      "lines": 4,
+      "tokens": 10,
+      "latency_ms": 22.773
+    },
+    {
+      "path": "p2_type/014-undef-in-index-idx.hard",
+      "bytes": 32,
+      "lines": 4,
+      "tokens": 12,
+      "latency_ms": 20.476
+    },
+    {
+      "path": "p2_type/015-undef-in-member-base.hard",
+      "bytes": 33,
+      "lines": 4,
+      "tokens": 9,
+      "latency_ms": 19.983
+    },
+    {
+      "path": "p2_type/016-undef-in-binary.hard",
+      "bytes": 31,
+      "lines": 4,
+      "tokens": 9,
+      "latency_ms": 20.382
+    },
+    {
+      "path": "p2_type/017-undef-in-unary.hard",
+      "bytes": 28,
+      "lines": 4,
+      "tokens": 8,
+      "latency_ms": 21.639
+    },
+    {
+      "path": "p2_type/018-undef-in-arg.hard",
+      "bytes": 78,
+      "lines": 5,
+      "tokens": 29,
+      "latency_ms": 21.882
+    },
+    {
+      "path": "p2_type/019-undef-in-callee.hard",
+      "bytes": 75,
+      "lines": 6,
+      "tokens": 27,
+      "latency_ms": 22.474
+    },
+    {
+      "path": "p2_type/020-undef-in-var-value.hard",
+      "bytes": 34,
+      "lines": 5,
+      "tokens": 10,
+      "latency_ms": 23.713
+    },
+    {
+      "path": "p2_type/021-undef-in-const-value.hard",
+      "bytes": 35,
+      "lines": 5,
+      "tokens": 10,
+      "latency_ms": 23.888
+    },
+    {
+      "path": "p2_type/022-undef-in-nested.hard",
+      "bytes": 63,
+      "lines": 5,
+      "tokens": 23,
+      "latency_ms": 21.392
+    },
+    {
+      "path": "p2_type/023-dup-model.hard",
+      "bytes": 76,
+      "lines": 6,
+      "tokens": 27,
+      "latency_ms": 20.835
+    },
+    {
+      "path": "p2_type/024-dup-calc.hard",
+      "bytes": 84,
+      "lines": 6,
+      "tokens": 31,
+      "latency_ms": 21.484
+    },
+    {
+      "path": "p2_type/025-dup-test.hard",
+      "bytes": 60,
+      "lines": 6,
+      "tokens": 19,
+      "latency_ms": 22.505
+    },
+    {
+      "path": "p2_type/026-dup-middleware.hard",
+      "bytes": 56,
+      "lines": 6,
+      "tokens": 17,
+      "latency_ms": 21.469
+    },
+    {
+      "path": "p2_type/027-dup-route.hard",
+      "bytes": 40,
+      "lines": 3,
+      "tokens": 14,
+      "latency_ms": 20.93
+    },
+    {
+      "path": "p2_type/028-dup-route-param.hard",
+      "bytes": 74,
+      "lines": 3,
+      "tokens": 24,
+      "latency_ms": 20.798
+    },
+    {
+      "path": "p2_type/029-valid-bug3-global-chain.hard",
+      "bytes": 53,
+      "lines": 7,
+      "tokens": 20,
+      "latency_ms": 26.379
+    },
+    {
+      "path": "p2_type/030-valid-bug3-global-fwd.hard",
+      "bytes": 42,
+      "lines": 6,
+      "tokens": 15,
+      "latency_ms": 24.439
+    },
+    {
+      "path": "p2_type/031-valid-bug3-global-mod.hard",
+      "bytes": 56,
+      "lines": 6,
+      "tokens": 18,
+      "latency_ms": 25.342
+    },
+    {
+      "path": "p2_type/032-valid-globals-in-route.hard",
+      "bytes": 89,
+      "lines": 7,
+      "tokens": 32,
+      "latency_ms": 38.056
+    },
+    {
+      "path": "p2_type/033-valid-globals-in-middleware.hard",
+      "bytes": 55,
+      "lines": 6,
+      "tokens": 17,
+      "latency_ms": 35.707
+    },
+    {
+      "path": "p2_type/034-valid-globals-in-socket.hard",
+      "bytes": 73,
+      "lines": 6,
+      "tokens": 23,
+      "latency_ms": 38.074
+    },
+    {
+      "path": "p2_type/035-valid-globals-in-test.hard",
+      "bytes": 49,
+      "lines": 6,
+      "tokens": 16,
+      "latency_ms": 36.854
+    },
+    {
+      "path": "p2_type/036-valid-func-call-valid.hard",
+      "bytes": 75,
+      "lines": 5,
+      "tokens": 29,
+      "latency_ms": 36.847
+    },
+    {
+      "path": "p2_type/037-valid-func-call-nested.hard",
+      "bytes": 83,
+      "lines": 5,
+      "tokens": 34,
+      "latency_ms": 40.489
+    },
+    {
+      "path": "p2_type/038-valid-func-global-shadow.hard",
+      "bytes": 64,
+      "lines": 6,
+      "tokens": 25,
+      "latency_ms": 40.983
+    },
+    {
+      "path": "p2_type/039-valid-module-json.hard",
+      "bytes": 49,
+      "lines": 4,
+      "tokens": 16,
+      "latency_ms": 42.731
+    },
+    {
+      "path": "p2_type/040-valid-module-env.hard",
+      "bytes": 43,
+      "lines": 4,
+      "tokens": 14,
+      "latency_ms": 39.634
+    },
+    {
+      "path": "p2_type/041-valid-module-crypto.hard",
+      "bytes": 41,
+      "lines": 4,
+      "tokens": 12,
+      "latency_ms": 37.603
+    },
+    {
+      "path": "p2_type/042-valid-module-time.hard",
+      "bytes": 33,
+      "lines": 4,
+      "tokens": 11,
+      "latency_ms": 33.184
+    },
+    {
+      "path": "p2_type/043-valid-module-runtime.hard",
+      "bytes": 37,
+      "lines": 4,
+      "tokens": 11,
+      "latency_ms": 25.729
+    },
+    {
+      "path": "p2_type/044-valid-module-method-object.hard",
+      "bytes": 68,
+      "lines": 5,
+      "tokens": 20,
+      "latency_ms": 30.457
+    },
+    {
+      "path": "p2_type/045-valid-req-usage.hard",
+      "bytes": 33,
+      "lines": 4,
+      "tokens": 9,
+      "latency_ms": 25.141
+    },
+    {
+      "path": "p2_type/046-valid-req-params.hard",
+      "bytes": 41,
+      "lines": 4,
+      "tokens": 12,
+      "latency_ms": 25.341
+    },
+    {
+      "path": "p2_type/047-valid-req-body.hard",
+      "bytes": 48,
+      "lines": 4,
+      "tokens": 14,
+      "latency_ms": 26.202
+    },
+    {
+      "path": "p2_type/048-valid-scope-if.hard",
+      "bytes": 60,
+      "lines": 6,
+      "tokens": 21,
+      "latency_ms": 23.731
+    },
+    {
+      "path": "p2_type/049-valid-scope-loop.hard",
+      "bytes": 72,
+      "lines": 6,
+      "tokens": 27,
+      "latency_ms": 26.337
+    },
+    {
+      "path": "p2_type/050-valid-scope-race.hard",
+      "bytes": 42,
+      "lines": 5,
+      "tokens": 13,
+      "latency_ms": 22.745
+    },
+    {
+      "path": "p2_type/051-valid-scope-pick.hard",
+      "bytes": 52,
+      "lines": 4,
+      "tokens": 17,
+      "latency_ms": 21.342
+    },
+    {
+      "path": "p2_type/052-valid-scope-expect-route.hard",
+      "bytes": 42,
+      "lines": 5,
+      "tokens": 11,
+      "latency_ms": 21.017
+    },
+    {
+      "path": "p2_type/053-valid-test-block-uses-global.hard",
+      "bytes": 58,
+      "lines": 6,
+      "tokens": 18,
+      "latency_ms": 21.813
+    },
+    {
+      "path": "p2_type/054-valid-socket-message-global.hard",
+      "bytes": 76,
+      "lines": 6,
+      "tokens": 26,
+      "latency_ms": 24.006
+    },
+    {
+      "path": "p2_type/055-valid-model-valid.hard",
+      "bytes": 73,
+      "lines": 8,
+      "tokens": 23,
+      "latency_ms": 34.283
+    },
+    {
+      "path": "p2_type/056-valid-calc-ret-types.hard",
+      "bytes": 195,
+      "lines": 10,
+      "tokens": 73,
+      "latency_ms": 32.401
+    },
+    {
+      "path": "p2_type/057-valid-deep-nest-ok.hard",
+      "bytes": 264,
+      "lines": 4,
+      "tokens": 247,
+      "latency_ms": 26.392
+    },
+    {
+      "path": "p2_type/058-valid-chain-ok.hard",
+      "bytes": 47,
+      "lines": 5,
+      "tokens": 16,
+      "latency_ms": 25.243
+    },
+    {
+      "path": "p2_type/059-err-deep-nest-err.hard",
+      "bytes": 1224,
+      "lines": 4,
+      "tokens": 1207,
+      "latency_ms": 27.371
+    },
+    {
+      "path": "p2_type/060-lenient-unchecked-module-fn-arity.hard",
+      "bytes": 49,
+      "lines": 5,
+      "tokens": 17,
+      "latency_ms": 30.886
+    },
+    {
+      "path": "p2_type/061-lenient-unchecked-module-fn-name.hard",
+      "bytes": 42,
+      "lines": 5,
+      "tokens": 13,
+      "latency_ms": 32.886
+    },
+    {
+      "path": "p2_type/062-lenient-reassign-var.hard",
+      "bytes": 46,
+      "lines": 6,
+      "tokens": 13,
+      "latency_ms": 31.414
+    },
+    {
+      "path": "p2_type/063-lenient-redeclare-const.hard",
+      "bytes": 40,
+      "lines": 6,
+      "tokens": 13,
+      "latency_ms": 27.753
+    },
+    {
+      "path": "p2_type/064-lenient-reassign-const.hard",
+      "bytes": 39,
+      "lines": 6,
+      "tokens": 13,
+      "latency_ms": 27.205
+    },
+    {
+      "path": "p2_type/065-lenient-dup-var-global.hard",
+      "bytes": 38,
+      "lines": 6,
+      "tokens": 13,
+      "latency_ms": 27.229
+    },
+    {
+      "path": "p2_type/066-lenient-expr-stmt-noreturn.hard",
+      "bytes": 30,
+      "lines": 5,
+      "tokens": 8,
+      "latency_ms": 36.388
+    },
+    {
+      "path": "p2_type/067-valid-calc-in-calc.hard",
+      "bytes": 92,
+      "lines": 6,
+      "tokens": 36,
+      "latency_ms": 35.801
+    },
+    {
+      "path": "p2_type/068-valid-calc-in-mid.hard",
+      "bytes": 83,
+      "lines": 6,
+      "tokens": 31,
+      "latency_ms": 26.952
+    },
+    {
+      "path": "p2_type/069-valid-calc-in-socket.hard",
+      "bytes": 97,
+      "lines": 6,
+      "tokens": 34,
+      "latency_ms": 25.897
+    },
+    {
+      "path": "p2_type/070-valid-calc-in-test.hard",
+      "bytes": 88,
+      "lines": 6,
+      "tokens": 32,
+      "latency_ms": 26.867
+    },
+    {
+      "path": "p2_type/071-valid-calc-in-pick.hard",
+      "bytes": 116,
+      "lines": 8,
+      "tokens": 43,
+      "latency_ms": 30.239
+    },
+    {
+      "path": "p2_type/072-valid-calc-in-loop.hard",
+      "bytes": 146,
+      "lines": 10,
+      "tokens": 56,
+      "latency_ms": 30.849
+    },
+    {
+      "path": "p2_type/073-valid-calc-empty-body.hard",
+      "bytes": 44,
+      "lines": 5,
+      "tokens": 15,
+      "latency_ms": 26.307
+    },
+    {
+      "path": "p2_type/074-valid-async-calc.hard",
+      "bytes": 61,
+      "lines": 5,
+      "tokens": 20,
+      "latency_ms": 24.504
+    },
+    {
+      "path": "p2_type/075-valid-calc-multi.hard",
+      "bytes": 133,
+      "lines": 7,
+      "tokens": 54,
+      "latency_ms": 23.877
+    },
+    {
+      "path": "p2_type/076-valid-global-in-calc.hard",
+      "bytes": 67,
+      "lines": 6,
+      "tokens": 24,
+      "latency_ms": 24.207
+    },
+    {
+      "path": "p2_type/077-valid-multi-globals.hard",
+      "bytes": 105,
+      "lines": 8,
+      "tokens": 41,
+      "latency_ms": 22.109
+    },
+    {
+      "path": "p2_type/078-valid-global-mod-chain.hard",
+      "bytes": 55,
+      "lines": 5,
+      "tokens": 17,
+      "latency_ms": 21.302
+    },
+    {
+      "path": "p2_type/079-valid-scope-deep.hard",
+      "bytes": 143,
+      "lines": 11,
+      "tokens": 42,
+      "latency_ms": 21.349
+    },
+    {
+      "path": "p2_type/080-valid-scope-loop-nested.hard",
+      "bytes": 93,
+      "lines": 6,
+      "tokens": 38,
+      "latency_ms": 21.469
+    },
+    {
+      "path": "p2_type/081-valid-scope-shadow-param.hard",
+      "bytes": 56,
+      "lines": 5,
+      "tokens": 15,
+      "latency_ms": 22.389
+    },
+    {
+      "path": "p2_type/082-valid-scope-param-across.hard",
+      "bytes": 75,
+      "lines": 5,
+      "tokens": 27,
+      "latency_ms": 24.631
+    },
+    {
+      "path": "p2_type/083-valid-race-discard.hard",
+      "bytes": 81,
+      "lines": 6,
+      "tokens": 28,
+      "latency_ms": 21.434
+    },
+    {
+      "path": "p2_type/084-valid-wait-basic.hard",
+      "bytes": 70,
+      "lines": 6,
+      "tokens": 23,
+      "latency_ms": 22.947
+    },
+    {
+      "path": "p2_type/085-valid-pick-default-obj.hard",
+      "bytes": 74,
+      "lines": 5,
+      "tokens": 28,
+      "latency_ms": 23.714
+    },
+    {
+      "path": "p2_type/086-valid-chain-ok100.hard",
+      "bytes": 526,
+      "lines": 5,
+      "tokens": 307,
+      "latency_ms": 24.196
+    },
+    {
+      "path": "p2_type/087-valid-chain-members-ok50.hard",
+      "bytes": 64,
+      "lines": 5,
+      "tokens": 28,
+      "latency_ms": 24.961
+    },
+    {
+      "path": "p2_type/088-valid-model-doc-only.hard",
+      "bytes": 88,
+      "lines": 8,
+      "tokens": 25,
+      "latency_ms": 26.713
+    },
+    {
+      "path": "p2_type/089-valid-index-str.hard",
+      "bytes": 33,
+      "lines": 4,
+      "tokens": 10,
+      "latency_ms": 25.412
+    },
+    {
+      "path": "p2_type/090-valid-index-list-of-list.hard",
+      "bytes": 49,
+      "lines": 5,
+      "tokens": 24,
+      "latency_ms": 22.689
+    },
+    {
+      "path": "p2_type/091-valid-index-expr.hard",
+      "bytes": 40,
+      "lines": 4,
+      "tokens": 18,
+      "latency_ms": 24.351
+    },
+    {
+      "path": "p2_type/092-valid-range-lexes.hard",
+      "bytes": 34,
+      "lines": 4,
+      "tokens": 11,
+      "latency_ms": 23.274
+    },
+    {
+      "path": "p2_type/093-valid-expect-ok-route.hard",
+      "bytes": 42,
+      "lines": 5,
+      "tokens": 11,
+      "latency_ms": 22.525
+    },
+    {
+      "path": "p2_type/094-valid-expect-str-eq.hard",
+      "bytes": 46,
+      "lines": 5,
+      "tokens": 11,
+      "latency_ms": 22.407
+    },
+    {
+      "path": "p2_type/095-valid-expect-fn-call.hard",
+      "bytes": 93,
+      "lines": 6,
+      "tokens": 33,
+      "latency_ms": 29.25
+    },
+    {
+      "path": "p2_type/096-valid-boot-underscore-arg.hard",
+      "bytes": 27,
+      "lines": 4,
+      "tokens": 10,
+      "latency_ms": 25.127
+    },
+    {
+      "path": "p2_type/097-valid-route-body-expr-ret.hard",
+      "bytes": 46,
+      "lines": 5,
+      "tokens": 14,
+      "latency_ms": 25.039
+    },
+    {
+      "path": "p2_type/098-valid-socket-connect-global-call.hard",
+      "bytes": 102,
+      "lines": 7,
+      "tokens": 35,
+      "latency_ms": 24.38
+    },
+    {
+      "path": "p2_type/099-valid-nested-object-kv.hard",
+      "bytes": 56,
+      "lines": 4,
+      "tokens": 23,
+      "latency_ms": 23.338
+    },
+    {
+      "path": "p2_type/100-valid-string-escapes.hard",
+      "bytes": 38,
+      "lines": 4,
+      "tokens": 7,
+      "latency_ms": 24.747
+    },
+    {
+      "path": "p2_type/101-err-undef-in-calc-param.hard",
+      "bytes": 58,
+      "lines": 5,
+      "tokens": 21,
+      "latency_ms": 24.12
+    },
+    {
+      "path": "p2_type/102-err-undef-in-calc-body.hard",
+      "bytes": 69,
+      "lines": 6,
+      "tokens": 24,
+      "latency_ms": 24.148
+    },
+    {
+      "path": "p2_type/103-err-undef-in-global.hard",
+      "bytes": 31,
+      "lines": 5,
+      "tokens": 10,
+      "latency_ms": 23.599
+    },
+    {
+      "path": "p2_type/104-err-undef-in-const.hard",
+      "bytes": 32,
+      "lines": 5,
+      "tokens": 10,
+      "latency_ms": 23.742
+    },
+    {
+      "path": "p2_type/105-err-undef-self-ref.hard",
+      "bytes": 31,
+      "lines": 5,
+      "tokens": 10,
+      "latency_ms": 23.167
+    },
+    {
+      "path": "p2_type/106-err-undef-member.hard",
+      "bytes": 35,
+      "lines": 4,
+      "tokens": 13,
+      "latency_ms": 25.934
+    },
+    {
+      "path": "p2_type/107-err-undef-index-empty.hard",
+      "bytes": 30,
+      "lines": 4,
+      "tokens": 10,
+      "latency_ms": 23.038
+    },
+    {
+      "path": "p2_type/108-err-undef-match-arm.hard",
+      "bytes": 48,
+      "lines": 4,
+      "tokens": 17,
+      "latency_ms": 22.707
+    },
+    {
+      "path": "p2_type/109-err-undef-race-arg.hard",
+      "bytes": 78,
+      "lines": 6,
+      "tokens": 26,
+      "latency_ms": 23.919
+    },
+    {
+      "path": "p2_type/110-err-undef-fn-as-arg.hard",
+      "bytes": 34,
+      "lines": 4,
+      "tokens": 10,
+      "latency_ms": 26.436
+    },
+    {
+      "path": "p2_type/111-err-undef-user-fn.hard",
+      "bytes": 38,
+      "lines": 4,
+      "tokens": 10,
+      "latency_ms": 21.348
+    },
+    {
+      "path": "p2_type/112-err-dup-calc-params.hard",
+      "bytes": 61,
+      "lines": 5,
+      "tokens": 22,
+      "latency_ms": 21.121
+    },
+    {
+      "path": "p2_type/113-err-dup-middleware-route-name.hard",
+      "bytes": 65,
+      "lines": 6,
+      "tokens": 22,
+      "latency_ms": 22.848
+    },
+    {
+      "path": "p2_type/114-valid-mod-json-route.hard",
+      "bytes": 49,
+      "lines": 4,
+      "tokens": 16,
+      "latency_ms": 26.353
+    },
+    {
+      "path": "p2_type/115-valid-mod-json-calc.hard",
+      "bytes": 80,
+      "lines": 7,
+      "tokens": 26,
+      "latency_ms": 25.693
+    },
+    {
+      "path": "p2_type/116-valid-mod-json-middleware.hard",
+      "bytes": 81,
+      "lines": 7,
+      "tokens": 25,
+      "latency_ms": 24.163
+    },
+    {
+      "path": "p2_type/117-valid-mod-json-socket.hard",
+      "bytes": 86,
+      "lines": 6,
+      "tokens": 26,
+      "latency_ms": 23.8
+    },
+    {
+      "path": "p2_type/118-valid-mod-json-test.hard",
+      "bytes": 82,
+      "lines": 5,
+      "tokens": 26,
+      "latency_ms": 23.859
+    },
+    {
+      "path": "p2_type/119-valid-mod-crypto-route.hard",
+      "bytes": 44,
+      "lines": 4,
+      "tokens": 12,
+      "latency_ms": 24.589
+    },
+    {
+      "path": "p2_type/120-valid-mod-crypto-calc.hard",
+      "bytes": 75,
+      "lines": 7,
+      "tokens": 22,
+      "latency_ms": 29.491
+    },
+    {
+      "path": "p2_type/121-valid-mod-crypto-middleware.hard",
+      "bytes": 76,
+      "lines": 7,
+      "tokens": 21,
+      "latency_ms": 30.706
+    },
+    {
+      "path": "p2_type/122-valid-mod-crypto-socket.hard",
+      "bytes": 81,
+      "lines": 6,
+      "tokens": 22,
+      "latency_ms": 23.617
+    },
+    {
+      "path": "p2_type/123-valid-mod-crypto-test.hard",
+      "bytes": 77,
+      "lines": 5,
+      "tokens": 22,
+      "latency_ms": 26.38
+    },
+    {
+      "path": "p2_type/124-valid-mod-env-route.hard",
+      "bytes": 42,
+      "lines": 4,
+      "tokens": 14,
+      "latency_ms": 25.545
+    },
+    {
+      "path": "p2_type/125-valid-mod-env-calc.hard",
+      "bytes": 74,
+      "lines": 7,
+      "tokens": 24,
+      "latency_ms": 23.598
+    },
+    {
+      "path": "p2_type/126-valid-mod-env-middleware.hard",
+      "bytes": 75,
+      "lines": 7,
+      "tokens": 23,
+      "latency_ms": 25.193
+    },
+    {
+      "path": "p2_type/127-valid-mod-env-socket.hard",
+      "bytes": 80,
+      "lines": 6,
+      "tokens": 24,
+      "latency_ms": 32.0
+    },
+    {
+      "path": "p2_type/128-valid-mod-env-test.hard",
+      "bytes": 76,
+      "lines": 5,
+      "tokens": 24,
+      "latency_ms": 27.809
+    },
+    {
+      "path": "p2_type/129-valid-mod-time-route.hard",
+      "bytes": 43,
+      "lines": 4,
+      "tokens": 16,
+      "latency_ms": 24.466
+    },
+    {
+      "path": "p2_type/130-valid-mod-time-calc.hard",
+      "bytes": 75,
+      "lines": 7,
+      "tokens": 26,
+      "latency_ms": 20.889
+    },
+    {
+      "path": "p2_type/131-valid-mod-time-middleware.hard",
+      "bytes": 76,
+      "lines": 7,
+      "tokens": 25,
+      "latency_ms": 21.702
+    },
+    {
+      "path": "p2_type/132-valid-mod-time-socket.hard",
+      "bytes": 81,
+      "lines": 6,
+      "tokens": 26,
+      "latency_ms": 23.186
+    },
+    {
+      "path": "p2_type/133-valid-mod-time-test.hard",
+      "bytes": 77,
+      "lines": 5,
+      "tokens": 26,
+      "latency_ms": 25.629
+    },
+    {
+      "path": "p2_type/134-valid-mod-runtime-route.hard",
+      "bytes": 41,
+      "lines": 4,
+      "tokens": 11,
+      "latency_ms": 23.596
+    },
+    {
+      "path": "p2_type/135-valid-mod-runtime-calc.hard",
+      "bytes": 73,
+      "lines": 7,
+      "tokens": 21,
+      "latency_ms": 25.206
+    },
+    {
+      "path": "p2_type/136-valid-mod-runtime-middleware.hard",
+      "bytes": 74,
+      "lines": 7,
+      "tokens": 20,
+      "latency_ms": 24.217
+    },
+    {
+      "path": "p2_type/137-valid-mod-runtime-socket.hard",
+      "bytes": 79,
+      "lines": 6,
+      "tokens": 21,
+      "latency_ms": 25.759
+    },
+    {
+      "path": "p2_type/138-valid-mod-runtime-test.hard",
+      "bytes": 75,
+      "lines": 5,
+      "tokens": 21,
+      "latency_ms": 23.715
+    },
+    {
+      "path": "p2_type/139-valid-globals-pad0.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 29.96
+    },
+    {
+      "path": "p2_type/140-valid-globals-pad1.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 26.768
+    },
+    {
+      "path": "p2_type/141-valid-globals-pad2.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 23.39
+    },
+    {
+      "path": "p2_type/142-valid-globals-pad3.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 23.929
+    },
+    {
+      "path": "p2_type/143-valid-globals-pad4.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 25.436
+    },
+    {
+      "path": "p2_type/144-valid-globals-pad5.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 24.492
+    },
+    {
+      "path": "p2_type/145-valid-globals-pad6.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 22.488
+    },
+    {
+      "path": "p2_type/146-valid-globals-pad7.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 25.14
+    },
+    {
+      "path": "p2_type/147-valid-globals-pad8.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 24.261
+    },
+    {
+      "path": "p2_type/148-valid-globals-pad9.hard",
+      "bytes": 70,
+      "lines": 4,
+      "tokens": 27,
+      "latency_ms": 23.587
+    }
+  ]
+}
