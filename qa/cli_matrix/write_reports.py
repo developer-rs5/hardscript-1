@@ -55,7 +55,7 @@ for v in sorted(fam):
 lines.append("")
 lines.append("Harness hermetic, byte-reproducible runner: `qa/cli_matrix/run_matrix.py`")
 out = "\n".join(lines) + "\n"
-(ROOT / "reports" / "phase5-cli.md").write_text(rep)
+(ROOT / "reports" / "phase5-cli-report.md").write_text(rep)
 (ROOT / "reports" / "v0.1.2-cli-summary.md").write_text(out)
 print(f"reports written: lanes={total_tsv} pass={passed} findings={findings}")
 print(j[0] if j else "no results")

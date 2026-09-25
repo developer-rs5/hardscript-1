@@ -1,0 +1,22 @@
+app @3031
+
+GET "/api/v1/orders" :: {
+    <- { kind: "orders-list" }
+}
+
+POST "/api/v1/orders" :: {
+    <- { kind: "orders-create" }
+}
+
+GET "/api/v1/orders/:oid" :: (oid = Str) {
+    <- { kind: "order", oid: oid }
+}
+
+GET "/api/v1/orders/:oid/items" :: (oid = Str) {
+    <- { kind: "items", oid: oid }
+}
+
+GET "/api/v2/orders" :: {
+    <- { kind: "v2-orders" }
+}
+

@@ -1,0 +1,3 @@
+app @3000
+calc g() => Int { <- nope() }
+GET "/" :: { <- 1 }

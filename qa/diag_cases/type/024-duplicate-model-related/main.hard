@@ -1,0 +1,6 @@
+model User = users [
+  id => Int,
+]
+model User = users [
+  id => Int,
+]

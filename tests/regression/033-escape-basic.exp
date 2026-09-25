@@ -1,0 +1,5 @@
+esc
+route GET /: a = stack
+route GET /: b = immutable
+route GET /: c = escaping
+summary: 1 stack, 1 escaping, 1 immutable

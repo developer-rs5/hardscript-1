@@ -7,7 +7,7 @@ static hs::Response route_0(const hs::Request& req) {
     try {
         hs::Val id = [&]() -> hs::Val {
             auto __it = req.params.find("id");
-            if (__it != req.params.end()) return hs::Val::text(__it->second);
+            if (__it != req.params.end()) return hs::Val::text(std::string(__it->second));
             std::string __q = req.q("id");
             if (!__q.empty()) return hs::Val::text(__q);
             return hs::Val::nil();

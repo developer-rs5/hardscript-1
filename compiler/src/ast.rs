@@ -21,6 +21,21 @@ pub enum Module {
 }
 
 impl Module {
+    /// All builtin module names, in catalog order. Shared by the parser's
+    /// "unknown module" diagnostics (did-you-mean candidates) and the catalog.
+    pub const NAMES: &[&str] = &[
+        "http",
+        "postgres",
+        "websocket",
+        "crypto",
+        "json",
+        "fs",
+        "jwt",
+        "env",
+        "runtime",
+        "time",
+    ];
+
     pub fn from_name(s: &str, span: Span) -> Option<Module> {
         match s {
             "http" => Some(Module::Http),
@@ -200,7 +215,11 @@ pub struct VarDef {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    /// Builtin runtime module (`bring http`, `bring std.crypto`).
     Bring(Module, Span),
+    /// Local source module (`bring "./utils"`, `bring "../shared/handlers"`).
+    /// Stored without the `.hard` extension (added at resolution time).
+    Import { path: String, span: Span },
     App(i64, Span),
     Model(ModelDef),
     Route(RouteDef),
@@ -222,7 +241,7 @@ impl Stmt {
     pub fn span(&self) -> Span {
         use Stmt::*;
         match self {
-            Bring(_, s) | App(_, s) => *s,
+            Bring(_, s) | Import { span: s, .. } | App(_, s) => *s,
             Model(m) => m.span,
             Route(r) => r.span,
             Socket(s) => s.span,

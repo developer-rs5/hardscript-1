@@ -77,7 +77,8 @@ impl Codegen {
             msg,
             span,
             "This construct is not supported by the compiler yet.",
-        ));
+        )
+        .with_code(crate::catalog::INTERNAL_COMPILER));
     }
 
     fn run(&mut self, prog: &Program) {
@@ -180,7 +181,7 @@ impl Codegen {
                     "auto __it = req.params.find({});",
                     cstring(&p.name)
                 ));
-                self.wln("if (__it != req.params.end()) return hs::Val::text(__it->second);");
+                self.wln("if (__it != req.params.end()) return hs::Val::text(std::string(__it->second));");
                 self.wln(&format!("std::string __q = req.q({});", cstring(&p.name)));
                 self.wln("if (!__q.empty()) return hs::Val::text(__q);");
                 self.wln("return hs::Val::nil();");
@@ -334,7 +335,7 @@ impl Codegen {
 
     fn stmt(&mut self, st: &Stmt, ctx: Ctx) {
         match st {
-            Stmt::Bring(..) | Stmt::App(..) | Stmt::Model(..) => {}
+            Stmt::Bring(..) | Stmt::Import { .. } | Stmt::App(..) | Stmt::Model(..) => {}
             Stmt::Func(_) | Stmt::Route(_) | Stmt::Middleware { .. } | Stmt::Socket(_)
             | Stmt::Test(_) => {}
             Stmt::Var(v) => {

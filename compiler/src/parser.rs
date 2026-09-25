@@ -1,5 +1,7 @@
 use crate::ast::*;
+use crate::catalog as cat;
 use crate::error::{Diag, ErrorKind};
+use crate::lexer::Lexer;
 use crate::token::{Kw, Span, Sym, Tok, Token};
 
 pub struct Parser {
@@ -8,6 +10,9 @@ pub struct Parser {
     depth: usize,
     fatal: bool,
     pub imports: Vec<Module>,
+    /// Local module imports (`bring "./utils"`) resolved against the project
+    /// root at module-graph time. Stored as written (no `.hard` extension).
+    pub import_paths: Vec<String>,
     pub app_port: Option<i64>,
     pub models: Vec<ModelDef>,
     pub routes: Vec<RouteDef>,
@@ -15,6 +20,11 @@ pub struct Parser {
     pub funcs: Vec<FunDef>,
     pub middlewares: Vec<(String, Vec<Stmt>)>,
     pub tests: Vec<TestDef>,
+    /// Non-fatal parse errors recovered inside statement regions (blocks,
+    /// route/func/middleware/test bodies). Collected here so one bad statement
+    /// no longer swallows the rest of its enclosing region or the whole file;
+    /// surfaced at program level alongside the region's own error.
+    na_errs: Vec<Diag>,
 }
 
 /// Maximum recursion depth for `parse_expr`, `parse_unary` and `parse_block`,
@@ -40,6 +50,7 @@ impl Parser {
             depth: 0,
             fatal: false,
             imports: Vec::new(),
+            import_paths: Vec::new(),
             app_port: None,
             models: Vec::new(),
             routes: Vec::new(),
@@ -47,6 +58,7 @@ impl Parser {
             funcs: Vec::new(),
             middlewares: Vec::new(),
             tests: Vec::new(),
+            na_errs: Vec::new(),
         }
     }
 
@@ -60,7 +72,8 @@ impl Parser {
                 format!("{what} nesting too deep (limit {MAX_DEPTH})"),
                 self.span(),
                 format!("Simplify the nesting below {MAX_DEPTH} levels."),
-            )]);
+            )
+            .with_code(cat::NESTING_TOO_DEEP)]);
         }
         Ok(())
     }
@@ -78,7 +91,8 @@ impl Parser {
                 format!("expression too long (over {MAX_CHAIN} operands)"),
                 self.span(),
                 "Break the expression into smaller pieces or use variables.",
-            )]);
+            )
+            .with_code(cat::EXPRESSION_TOO_LONG)]);
         }
         Ok(())
     }
@@ -131,7 +145,8 @@ impl Parser {
                 format!("expected '{}' {ctx}", s.as_str()),
                 sp,
                 format!("Add the missing '{}'.", s.as_str()),
-            )])
+            )
+            .with_code(cat::EXPECTED_TOKEN)])
         }
     }
 
@@ -150,7 +165,8 @@ impl Parser {
                 "Use a name like `users`, `total`, or `handle_request`.",
             )
             .with_expected("an identifier")
-            .with_received(format!("`{other}`"))]),
+            .with_received(format!("`{other}`"))
+            .with_code(cat::EXPECTED_TOKEN)]),
         }
     }
 
@@ -172,7 +188,8 @@ impl Parser {
                 format!("expected a name after `.`"),
                 sp,
                 "Use a name like `users`, `total`, or `handle_request`.",
-            )]),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]),
         }
     }
 
@@ -197,7 +214,8 @@ impl Parser {
                         "unexpected closing `}`",
                         sp,
                         "Remove the extra `}` or close the block where it belongs.",
-                    ));
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN));
                     self.advance();
                 }
                 Tok::Kw(_) | Tok::Ident(_) | Tok::Sym(_) => {
@@ -221,11 +239,13 @@ impl Parser {
                         "unexpected token",
                         sp,
                         "Remove the token or write a complete statement.",
-                    ));
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN));
                     self.advance();
                 }
             }
         }
+        errs.append(&mut self.na_errs);
         if errs.is_empty() {
             Ok(Program { stmts, path: String::new() })
         } else {
@@ -234,8 +254,27 @@ impl Parser {
     }
 
     fn recover(&mut self) {
-        while !matches!(self.peek(), Tok::Eof | Tok::Sym(Sym::RBrace)) {
-            self.advance();
+        if self.fatal {
+            return;
+        }
+        self.sync();
+    }
+
+    /// Resync the scan to the next plausible statement boundary so recovery
+    /// stays inside the current region instead of abandoning the file. A token
+    /// is a plausible start when it introduces a statement: any keyword, an
+    /// identifier/declaration, a literal, or an expression-opening symbol.
+    /// `}` / EOF are terminators because they close (or end) the region.
+    fn sync(&mut self) {
+        loop {
+            match self.peek() {
+                Tok::Eof | Tok::Sym(Sym::RBrace) => return,
+                Tok::Kw(_) | Tok::Ident(_) | Tok::Str(_) | Tok::Int(_) | Tok::Float(_)
+                | Tok::Sym(Sym::Q) | Tok::Sym(Sym::LParen) | Tok::Sym(Sym::Minus) => return,
+                _ => {
+                    self.advance();
+                }
+            }
         }
     }
 
@@ -244,18 +283,16 @@ impl Parser {
         match self.peek() {
             Tok::Kw(Kw::Bring) => {
                 self.advance();
-                let (name, _) = self.expect_ident("after `bring`")?;
-                match Module::from_name(&name, sp) {
-                    Some(m) => {
-                        self.imports.push(m.clone());
-                        Ok(Some(Stmt::Bring(m, sp)))
-                    }
-                    None => Err(vec![Diag::new(
+                match self.advance().tok {
+                    Tok::Ident(name) => self.parse_bring_ident(name, sp),
+                    Tok::Str(path) => self.parse_bring_str(path, sp),
+                    other => Err(vec![Diag::new(
                         ErrorKind::Parse,
-                        format!("unknown module '{name}'"),
+                        format!("expected a module name or path after `bring`, found {other}"),
                         sp,
-                        "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.",
-                    )]),
+                        "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.",
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)]),
                 }
             }
             Tok::Kw(Kw::App) => {
@@ -269,7 +306,8 @@ impl Parser {
                             "expected a port number after `app @`",
                             self.span(),
                             "Use `app @3000`.",
-                        )])
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
                     }
                 };
                 self.app_port = Some(port);
@@ -308,7 +346,8 @@ impl Parser {
                         "expected `calc` after `async`",
                         self.span(),
                         "Write `async calc name(...) => ... { ... }`.",
-                    )]);
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)]);
                 }
                 self.parse_func(true).map(Some)
             }
@@ -326,7 +365,8 @@ impl Parser {
                             "expected a test name string after `test`",
                             self.span(),
                             "Write `test \"Name\" { ... }`.",
-                        )])
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
                     }
                 };
                 let body = self.parse_block()?;
@@ -421,6 +461,82 @@ impl Parser {
         Ok(Stmt::ExprStmt(e))
     }
 
+    /// `bring http`, `bring std.crypto` (ident form).
+    fn parse_bring_ident(&mut self, name: String, sp: Span) -> Result<Option<Stmt>, Vec<Diag>> {
+        // `std.<module>` — the namespaced form of a builtin module reference.
+        if name == "std" && matches!(self.peek(), Tok::Sym(Sym::Dot)) {
+            self.advance(); // `.`
+            let (mod_name, _) = self.expect_ident("after `std.`")?;
+            return match Module::from_name(&mod_name, sp) {
+                Some(m) => {
+                    self.imports.push(m.clone());
+                    Ok(Some(Stmt::Bring(m, sp)))
+                }
+                None => Err(vec![Diag::new(
+                    ErrorKind::Module,
+                    format!("unknown module 'std.{mod_name}'"),
+                    sp,
+                    crate::suggest::did_you_mean(
+                        &mod_name,
+                        &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                        "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time.".to_string(),
+                    ),
+                )
+                .with_code(cat::UNKNOWN_MODULE)]),
+            };
+        }
+        match Module::from_name(&name, sp) {
+            Some(m) => {
+                self.imports.push(m.clone());
+                Ok(Some(Stmt::Bring(m, sp)))
+            }
+None => Err(vec![Diag::new(
+                    ErrorKind::Module,
+                    format!("unknown module '{name}'"),
+                    sp,
+                    crate::suggest::did_you_mean(
+                        &name,
+                        &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                        "Use `bring http`, `bring \"./utils\"`, or `bring std.crypto`.".to_string(),
+                    ),
+                )
+                .with_code(cat::UNKNOWN_MODULE)]),
+        }
+    }
+
+    /// `bring "./utils"`, `bring "http"`, `bring "std.crypto"` (string form).
+    fn parse_bring_str(&mut self, path: String, sp: Span) -> Result<Option<Stmt>, Vec<Diag>> {
+        // A local module path (starts with `./`, `../` or `/`, or contains a
+        // directory separator) resolves to a `.hard` file on disk. Anything
+        // else is an alternate spelling of a builtin module name.
+        let is_path = path.starts_with("./")
+            || path.starts_with("../")
+            || path.starts_with('/')
+            || path.contains('/');
+        if is_path {
+            self.import_paths.push(path.clone());
+            return Ok(Some(Stmt::Import { path, span: sp }));
+        }
+        let name = path.strip_prefix("std.").unwrap_or(&path);
+        match Module::from_name(name, sp) {
+            Some(m) => {
+                self.imports.push(m.clone());
+                Ok(Some(Stmt::Bring(m, sp)))
+            }
+            None => Err(vec![Diag::new(
+                ErrorKind::Module,
+                format!("unknown module '{path}'"),
+                sp,
+                crate::suggest::did_you_mean(
+                    name,
+                    &Module::NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    "Valid modules: http, postgres, websocket, crypto, json, fs, jwt, env, runtime, time, or a local import like `bring \"./utils\"`.".to_string(),
+                ),
+            )
+            .with_code(cat::UNKNOWN_MODULE)]),
+        }
+    }
+
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Vec<Diag>> {
         self.enter_depth("block")?;
         let r = self.parse_block_inner();
@@ -439,11 +555,28 @@ impl Parser {
                     "unexpected end of file inside block",
                     sp,
                     "Close the block with `}`.",
-                )]);
+                )
+                .with_code(cat::UNEXPECTED_EOI)]);
             }
-            match self.parse_stmt()? {
-                Some(s) => stmts.push(s),
-                None => {}
+            // Region-scoped recovery: a non-fatal statement error is confined
+            // to its own statement; we report it, resync to the next statement
+            // start and keep the rest of the block (and file) parseable.
+            let before = self.pos;
+            match self.parse_stmt() {
+                Ok(Some(s)) => stmts.push(s),
+                Ok(None) => {}
+                Err(e) => {
+                    if self.fatal {
+                        return Err(e);
+                    }
+                    self.na_errs.extend(e);
+                    // Guarantee forward progress even when the resync target
+                    // is itself a failing statement start token.
+                    if self.pos == before {
+                        self.advance();
+                    }
+                    self.sync();
+                }
             }
         }
         self.expect_sym(Sym::RBrace, "to close a block")?;
@@ -471,7 +604,8 @@ impl Parser {
                         "unexpected end of file inside model",
                         sp,
                         "Close the model with `]`.",
-                    )])
+                    )
+                    .with_code(cat::UNEXPECTED_EOI)])
                 }
                 _ => {}
             }
@@ -519,7 +653,8 @@ impl Parser {
                     format!("expected a path string after {method}"),
                     self.span(),
                     format!("Use {method} \"/users\" :: {{ ... }}."),
-                )])
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
             }
         };
         let params = if self.eat_sym(Sym::DColon) {
@@ -586,7 +721,8 @@ impl Parser {
                     "expected a path string after `socket`",
                     self.span(),
                     "Use `socket \"/chat\" { ... }`.",
-                )])
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
             }
         };
         self.expect_sym(Sym::LBrace, "to start a socket block")?;
@@ -630,7 +766,8 @@ impl Parser {
                         "nested socket blocks are not allowed",
                         self.span(),
                         "Define each socket at the top level.",
-                    )])
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN)])
                 }
                 _ => {
                     return Err(vec![Diag::new(
@@ -638,7 +775,8 @@ impl Parser {
                         "unexpected keyword inside socket block",
                         self.span(),
                         "Only connect / message / disconnect blocks are allowed here.",
-                    )])
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN)])
                 }
             }
         }
@@ -944,7 +1082,8 @@ impl Parser {
                                 "expected a key in object literal",
                                 self.span(),
                                 "Write `{ name : \"value\" }`.",
-                            )])
+                            )
+                            .with_code(cat::EXPECTED_TOKEN)])
                         }
                     };
                     self.expect_sym(Sym::Colon, "after object key")?;
@@ -1004,7 +1143,15 @@ impl Parser {
                 self.advance();
                 let path = match self.advance().tok {
                     Tok::Str(s) => s,
-                    _ => return Err(vec![Diag::new(ErrorKind::Parse, "expected HTTP path string", self.span(), "")]),
+                    _ => {
+                        return Err(vec![Diag::new(
+                            ErrorKind::Parse,
+                            "expected HTTP path string",
+                            self.span(),
+                            "",
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
+                    }
                 };
                 let body = if *self.peek() == Tok::Sym(Sym::LBrace) {
                     self.advance();
@@ -1026,7 +1173,152 @@ impl Parser {
                 "expected a value",
                 sp,
                 "Write a literal, variable, or expression.",
-            )]),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]),
         }
+    }
+}
+
+/// The imports found by [`scan_imports`].
+#[derive(Debug, Default, Clone)]
+pub struct ScanImports {
+    /// Builtin runtime modules (`http`, `crypto`, …).
+    pub builtins: Vec<Module>,
+    /// Local module paths as written (`./utils`), before `.hard` resolution.
+    pub paths: Vec<String>,
+}
+
+/// A lightweight, body-agnostic scanner that extracts `bring` statements from
+/// a source file without running the full parser.
+///
+/// Used by the module-graph builder: resolving the dependency graph only needs
+/// the imports, so this stays tolerant (it never fails on a malformed file —
+/// the real parse error is raised later, when the module is actually compiled)
+/// and avoids walking function bodies. Deterministic: reports imports in
+/// source order.
+pub fn scan_imports(src: &str) -> ScanImports {
+    let Ok(toks) = Lexer::new(src).tokenize() else {
+        return ScanImports::default();
+    };
+    let toks: Vec<Token> = toks;
+    let mut out = ScanImports::default();
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i].tok == Tok::Kw(Kw::Bring) {
+            i += 1;
+            if i >= toks.len() {
+                break;
+            }
+            match &toks[i].tok {
+                Tok::Str(s) => {
+                    let path = s.clone();
+                    i += 1;
+                    let is_path = path.starts_with("./")
+                        || path.starts_with("../")
+                        || path.starts_with('/')
+                        || path.contains('/');
+                    if is_path {
+                        out.paths.push(path);
+                    } else {
+                        let name = path.strip_prefix("std.").unwrap_or(&path).to_string();
+                        if let Some(m) = Module::from_name(&name, Span::new(0, 0)) {
+                            out.builtins.push(m);
+                        }
+                    }
+                    continue;
+                }
+                Tok::Ident(name) => {
+                    i += 1;
+                    if name == "std"
+                        && i < toks.len()
+                        && toks[i].tok == Tok::Sym(Sym::Dot)
+                        && i + 1 < toks.len()
+                        && matches!(toks[i + 1].tok, Tok::Ident(_))
+                    {
+                        i += 1; // `.`
+                        if let Tok::Ident(mname) = &toks[i].tok {
+                            let mname = mname.clone();
+                            i += 1;
+                            if let Some(m) = Module::from_name(&mname, Span::new(0, 0)) {
+                                out.builtins.push(m);
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(m) = Module::from_name(name, Span::new(0, 0)) {
+                        out.builtins.push(m);
+                    }
+                    continue;
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_errs(src: &str) -> Vec<Diag> {
+        match crate::frontend(src, "t.hard") {
+            Ok(_) => Vec::new(),
+            Err(d) => d,
+        }
+    }
+
+    #[test]
+    fn junk_between_statements_reports_all_regions() {
+        // Two junk statements separated by a valid route: region-scoped
+        // recovery must resync at the `GET` and report a diagnostic for
+        // each junk line instead of abandoning the file after the first.
+        let src = "app @3000\n@@@\nGET \"/a\" :: { <- 1 }\n@@@\n";
+        let errs = parse_errs(src);
+        assert_eq!(errs.len(), 2, "expected two region errors, got {errs:?}");
+        assert!(errs[0].message.contains("expected"), "got {}", errs[0].message);
+        assert!(errs[1].message.contains("expected"), "got {}", errs[1].message);
+    }
+
+    #[test]
+    fn bad_statement_inside_block_keeps_region_alive() {
+        // An invalid statement inside a route body must not swallow the
+        // following statements in the same block: the three junk `?` tokens
+        // each become their own isolated error, `<- 2` keeps parsing, and the
+        // trailing model region stays intact (no `unexpected end of file`).
+        let src = "model User = users [\n  id => Int,\n]\n\
+                   GET \"/a\" :: {\n  <- 1\n  ?\n  ?\n  ?\n  <- 2\n}\n\
+                   model Account = accounts [\n  id => Int,\n]\n";
+        let errs = parse_errs(src);
+        assert_eq!(errs.len(), 3, "expected three region errors, got {errs:?}");
+        assert!(
+            !errs.iter().any(|d| d.message.contains("end of file")),
+            "region was swallowed: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn fatal_limit_still_aborts() {
+        // Run on a large-stack thread: triggering the depth guard recurses
+        // ~256 frames which can exceed the default test-thread stack.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let src = format!("app @3000\n{}", "(".repeat(260));
+                let errs = parse_errs(&src);
+                assert_eq!(errs.len(), 1);
+                assert!(
+                    errs[0].message.contains("nesting too deep"),
+                    "got {}",
+                    errs[0].message
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

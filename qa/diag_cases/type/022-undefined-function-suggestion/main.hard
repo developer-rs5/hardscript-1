@@ -1,0 +1,4 @@
+app @3000
+calc greet() => Int { <- 1 }
+calc g() => Int { <- greets() }
+GET "/" :: { <- 1 }

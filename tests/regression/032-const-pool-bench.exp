@@ -1,0 +1,5 @@
+cpp
+100k string dedup: allocs=0 bytes=0
+100k int dedup: allocs=0 bytes=0
+100k intern_value dedup: allocs=0 bytes=0
+ok

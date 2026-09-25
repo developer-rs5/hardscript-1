@@ -1,0 +1,127 @@
+{
+  "packages": [
+    {
+      "name": "hello",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "description": "greeting library",
+          "dependencies": {},
+          "files": [["main.hard", "calc hello_str() => Str { <- \"hello v1\" }\n"]]
+        },
+        {
+          "version": "1.2.0",
+          "description": "greeting library",
+          "dependencies": {},
+          "files": [["main.hard", "calc hello_str() => Str { <- \"hello v1.2\" }\n"]]
+        },
+        {
+          "version": "2.0.0",
+          "description": "greeting library",
+          "dependencies": {},
+          "files": [["main.hard", "calc hello_str() => Str { <- \"hello v2\" }\n"]]
+        }
+      ]
+    },
+    {
+      "name": "lib",
+      "versions": [
+        {
+          "version": "1.9.0",
+          "description": "base library",
+          "dependencies": {},
+          "files": [["main.hard", "calc lib_ping() => Str { <- \"lib 1.9\" }\n"]]
+        },
+        {
+          "version": "2.1.0",
+          "description": "base library",
+          "dependencies": { "mini": "^0.3.0" },
+          "files": [["main.hard", "calc lib_ping() => Str { <- \"lib 2.1\" }\n"]]
+        },
+        {
+          "version": "2.4.0",
+          "description": "base library",
+          "dependencies": {},
+          "files": [["main.hard", "calc lib_ping() => Str { <- \"lib 2.4\" }\n"]]
+        }
+      ]
+    },
+    {
+      "name": "mini",
+      "versions": [
+        {
+          "version": "0.3.1",
+          "description": "tiny helper",
+          "dependencies": {},
+          "files": [["main.hard", "calc mini_tiny() => Bool { <- true }\n"]]
+        }
+      ]
+    },
+    {
+      "name": "app",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "description": "application scaffold",
+          "dependencies": { "lib": "^1.0.0" },
+          "files": [["main.hard", "calc app_boot() => Str { <- \"app 1.0\" }\n"]]
+        },
+        {
+          "version": "1.5.0",
+          "description": "application scaffold",
+          "dependencies": { "lib": "^2.0.0" },
+          "files": [["main.hard", "calc app_boot() => Str { <- \"app 1.5\" }\n"]]
+        }
+      ]
+    },
+    {
+      "name": "greet",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "description": "wraps hello",
+          "dependencies": { "hello": "^1.0.0" },
+          "files": [["main.hard", "calc greet() => Str { <- hello_str() }\n"]]
+        },
+        {
+          "version": "2.0.0",
+          "description": "wraps hello",
+          "dependencies": { "hello": "^1.0.0" },
+          "files": [["main.hard", "calc greet() => Str { <- hello_str() }\n"]]
+        }
+      ]
+    },
+    {
+      "name": "broken",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "description": "serves a corrupt archive",
+          "dependencies": {},
+          "corrupt": true,
+          "files": [["main.hard", "calc broken() => Str { <- \"nope\" }\n"]]
+        }
+      ]
+    },
+    {
+      "name": "devlib",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "description": "test-only helper",
+          "dependencies": {},
+          "files": [["main.hard", "calc dev_tok() => Int { <- 7 }\n"]]
+        }
+      ]
+    }
+  ],
+  "search": {
+    "hello": [
+      { "name": "hello", "version": "2.0.0", "description": "greeting library" }
+    ],
+    "lib": [
+      { "name": "lib", "version": "2.4.0", "description": "base library" }
+    ],
+    "zzz": []
+  }
+}

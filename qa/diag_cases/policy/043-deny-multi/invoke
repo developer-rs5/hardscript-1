@@ -1,0 +1,1 @@
+build --deny hs2015,constant-condition

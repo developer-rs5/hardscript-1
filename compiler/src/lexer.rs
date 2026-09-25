@@ -1,3 +1,4 @@
+use crate::catalog as cat;
 use crate::error::{Diag, ErrorKind};
 use crate::token::{Kw, Span, Sym, Tok, Token};
 
@@ -117,7 +118,8 @@ impl Lexer {
                             "unterminated block comment",
                             sp,
                             "Close the comment with \"*/\".\n    /* comment */",
-                        ));
+                        )
+                        .with_code(cat::UNTERMINATED_DELIMITER));
                     }
                 }
                 _ => break,
@@ -191,7 +193,8 @@ impl Lexer {
                             "unterminated triple-quoted string",
                             sp,
                             "Close the string with \"\"\".",
-                        ));
+                        )
+                        .with_code(cat::UNTERMINATED_DELIMITER));
                     }
                 }
             }
@@ -222,7 +225,8 @@ impl Lexer {
                                 "unterminated string escape",
                                 sp,
                                 "Remove the trailing backslash.",
-                            ));
+                            )
+                            .with_code(cat::UNTERMINATED_DELIMITER));
                         }
                     }
                 }
@@ -232,7 +236,8 @@ impl Lexer {
                         "unterminated string literal",
                         sp,
                         "Close the string with a double quote \".",
-                    ));
+                    )
+                    .with_code(cat::UNTERMINATED_DELIMITER));
                 }
                 Some(c) => {
                     if c == '\u{0}' && self.pos >= self.chars.len() - 1 {
@@ -247,7 +252,8 @@ impl Lexer {
                         "unterminated string literal",
                         sp,
                         "Close the string with a double quote \".",
-                    ));
+                    )
+                    .with_code(cat::UNTERMINATED_DELIMITER));
                 }
             }
         }
@@ -256,7 +262,8 @@ impl Lexer {
             "unterminated string literal",
             sp,
             "Close the string with a double quote \".",
-        ))
+        )
+        .with_code(cat::UNTERMINATED_DELIMITER))
     }
 
     fn lex_ident(&mut self) -> String {
@@ -376,7 +383,8 @@ impl Lexer {
                         "unexpected '&'",
                         sp,
                         "Use \"&&\" for logical and.",
-                    ))
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN))
                 }
             }
             '|' => {
@@ -389,7 +397,8 @@ impl Lexer {
                         "unexpected '|'",
                         sp,
                         "Use \"||\" for logical or.",
-                    ))
+                    )
+                    .with_code(cat::UNEXPECTED_TOKEN))
                 }
             }
             other => Err(Diag::new(
@@ -397,7 +406,8 @@ impl Lexer {
                 format!("unexpected character '{other}'"),
                 sp,
                 "Remove the character, or replace it with a valid symbol.",
-            )),
+            )
+            .with_code(cat::UNEXPECTED_TOKEN)),
         }
     }
 }

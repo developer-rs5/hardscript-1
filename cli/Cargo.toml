@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 hs-compiler = { path = "../compiler" }
+hs-pm = { path = "../pm" }

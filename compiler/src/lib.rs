@@ -8,16 +8,29 @@
 //! [`compile_to_cpp`] (parse + typecheck + codegen).
 
 pub mod ast;
+pub mod astser;
+pub mod build;
+pub mod cache;
+pub mod catalog;
 pub mod codegen;
 pub mod diagnostics;
 pub mod docs;
+pub mod escape;
 pub mod error;
 pub mod fmt;
+pub mod graph;
+pub mod hir;
+pub mod json;
 pub mod lexer;
+pub mod manifest;
 pub mod optimizer;
+pub mod optimize;
 pub mod parser;
+pub mod sha256;
+pub mod suggest;
 pub mod token;
 pub mod typecheck;
+pub mod warn;
 
 pub use error::{render_all, Diag, ErrorKind};
 pub use lexer::Lexer;
@@ -63,6 +76,44 @@ pub fn frontend(src: &str, path: impl Into<String>) -> Result<Program, Vec<Diag>
             .map(|d| d.with_location(path.clone()))
             .collect()),
     }
+}
+
+/// Lower a source program into HIR. Errors surface as diagnostics from the
+/// front end (lex/parse); lowering itself is total for any parsed program.
+pub fn lower_hir(src: &str, path: impl Into<String>) -> Result<hir::HirProgram, Vec<Diag>> {
+    let path = path.into();
+    let prog = frontend(src, path)?;
+    Ok(hir::lower(&prog))
+}
+
+/// Render the HIR for a source file (frontend + lowering + pretty printer).
+/// This is the output of `hard hir` and the snapshot fixtures.
+pub fn hir_string(src: &str, path: impl Into<String>) -> Result<String, Vec<Diag>> {
+    Ok(lower_hir(src, path)?.render())
+}
+
+/// Optimize a source program to a fixpoint and render before / after trees plus
+/// per-pass statistics. This is the output of `hard opt`; the optimizer is
+/// pure and never affects codegen.
+pub fn opt_string(src: &str, path: impl Into<String>) -> Result<String, Vec<Diag>> {
+    let mut p = lower_hir(src, path)?;
+    let before = p.render();
+    let stats = optimize::run(&mut p);
+    let after = p.render();
+    Ok(format!(
+        "=== before ===\n{before}\n=== after ===\n{after}\n=== optimizer ===\n{}",
+        stats.summary()
+    ))
+}
+
+/// Run the escape analysis over a source program (frontend + optimizer, the
+/// same AST shape codegen would see) and return its report. Pure — never
+/// changes emitted C++ — exposed for tooling such as `hard build` report mode.
+pub fn escape_report(src: &str, path: impl Into<String>) -> Result<escape::EscapeReport, Vec<Diag>> {
+    let path = path.into();
+    let mut prog = frontend(src, path.clone())?;
+    let _ = optimizer::run(&mut prog);
+    Ok(escape::analyze(&prog))
 }
 
 /// Full pipeline: parse -> typecheck -> codegen. Returns the generated C++

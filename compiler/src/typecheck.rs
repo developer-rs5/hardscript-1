@@ -3,19 +3,35 @@
 //! Everything is reported as [`Diag`]s with friendly suggestions.
 
 use crate::ast::*;
+use crate::catalog as cat;
 use crate::error::{Diag, ErrorKind};
 use crate::token::Span;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const MODULES: [&str; 10] = [
     "crypto", "fs", "env", "json", "jwt", "time", "runtime", "websocket", "postgres", "http",
 ];
 
+/// Run the static checks over a program. Equivalent to `check_with(prog, &[])`
+/// — no per-statement file provenance, so "declared here" related spans cannot
+/// point into source files.
 pub fn check(prog: &Program) -> Vec<Diag> {
+    check_with(prog, &[])
+}
+
+/// Run the static checks with per-statement source files (Diagnostics V2).
+///
+/// `files` maps `prog.stmts[i]` to its module path (project-root-relative, as
+/// written in the build manifest); the grapher drives this so related spans
+/// render on the real declaring file (e.g. `models/user.hard:5:5`).
+pub fn check_with(prog: &Program, files: &[Option<String>]) -> Vec<Diag> {
     let mut t = Checker {
         diags: Vec::new(),
         funcs: HashMap::new(),
         globals: HashMap::new(),
+        files: files.to_vec(),
+        models: BTreeMap::new(),
+        model_files: BTreeMap::new(),
     };
     t.collect(prog);
     t.scan(prog);
@@ -23,52 +39,77 @@ pub fn check(prog: &Program) -> Vec<Diag> {
 }
 
 fn declare_unique(
-    map: &mut HashMap<String, Span>,
+    map: &mut HashMap<String, (Span, Option<String>)>,
     diags: &mut Vec<Diag>,
     name: &str,
     span: Span,
+    file: Option<String>,
 ) {
-    if let Some(prev) = map.get(name) {
-        diags.push(Diag::new(
-            ErrorKind::Type,
-            format!("duplicate declaration of `{name}`"),
-            span,
-            format!(
-                "Rename one of them; the first is declared at {}:{}.",
-                prev.line, prev.col
+    if let Some((prev, prev_file)) = map.get(name) {
+        diags.push(
+            Diag::new(
+                ErrorKind::Type,
+                format!("duplicate declaration of `{name}`"),
+                span,
+                "Rename one of the declarations.",
+            )
+            .with_code(cat::DUPLICATE_DECL)
+            .with_related(
+                prev_file.clone().unwrap_or_default(),
+                *prev,
+                "first declared here",
             ),
-        ));
+        );
     } else {
-        map.insert(name.to_string(), span);
+        map.insert(name.to_string(), (span, file));
     }
 }
 
 struct Checker {
     diags: Vec<Diag>,
-    funcs: HashMap<String, Span>,
+    funcs: HashMap<String, (Span, Option<String>)>,
     globals: HashMap<String, Span>,
+    files: Vec<Option<String>>,
+    models: BTreeMap<String, ModelDef>,
+    model_files: BTreeMap<String, Option<String>>,
 }
 
 impl Checker {
-    fn err(&mut self, msg: String, span: Span, suggestion: String) {
-        self.diags.push(Diag::new(ErrorKind::Type, msg, span, suggestion));
+    /// Look up a declared model field by its exact name. Returns the model
+    /// name, the field span (for the related frame), and the model's file.
+    fn find_model_field(&self, name: &str) -> Option<(&str, Span, Option<String>)> {
+        for (model, m) in self.models.iter() {
+            for f in &m.fields {
+                if f.name == name {
+                    return Some((model, f.span, self.model_files.get(model).cloned().flatten()));
+                }
+            }
+        }
+        None
+    }
+
+    fn err_code(&mut self, code: u16, msg: String, span: Span, suggestion: String) {
+        self.diags.push(Diag::new(ErrorKind::Type, msg, span, suggestion).with_code(code));
     }
 
     fn collect(&mut self, prog: &Program) {
-        let funcs: &mut HashMap<String, Span> = &mut self.funcs;
+        let funcs: &mut HashMap<String, (Span, Option<String>)> = &mut self.funcs;
         let diags: &mut Vec<Diag> = &mut self.diags;
-        for st in &prog.stmts {
+        for (i, st) in prog.stmts.iter().enumerate() {
+            let file = self.files.get(i).cloned().flatten();
             match st {
-                Stmt::Func(f) => declare_unique(funcs, diags, &f.name, f.span),
-                Stmt::Test(t) => declare_unique(funcs, diags, &format!("test {}", t.name), t.span),
+                Stmt::Func(f) => declare_unique(funcs, diags, &f.name, f.span, file),
+                Stmt::Test(t) => declare_unique(funcs, diags, &format!("test {}", t.name), t.span, file),
                 Stmt::Middleware { name, span, .. } => {
-                    declare_unique(funcs, diags, &format!("middleware {name}"), *span)
+                    declare_unique(funcs, diags, &format!("middleware {name}"), *span, file)
                 }
                 Stmt::Route(r) => {
-                    declare_unique(funcs, diags, &format!("{} {}", r.method, r.path), r.span);
+                    declare_unique(funcs, diags, &format!("{} {}", r.method, r.path), r.span, file);
                 }
                 Stmt::Model(m) => {
-                    declare_unique(funcs, diags, &format!("model {}", m.name), m.span);
+                    self.models.insert(m.name.clone(), m.clone());
+                    self.model_files.insert(m.name.clone(), file.clone());
+                    declare_unique(funcs, diags, &format!("model {}", m.name), m.span, file);
                 }
                 Stmt::Var(v) | Stmt::Const(v) => {
                     self.globals.entry(v.name.clone()).or_insert(v.span);
@@ -138,7 +179,7 @@ impl Checker {
         for m in MODULES {
             s.insert(m.to_string(), Span::new(0, 0));
         }
-        for (name, sp) in self.funcs.iter() {
+        for (name, (sp, _)) in self.funcs.iter() {
             s.insert(name.clone(), *sp);
         }
         if with_globals {
@@ -192,18 +233,43 @@ impl Checker {
         match e {
             Expr::Ident(name, sp) => {
                 if !scope.contains_key(name) && !self.funcs.contains_key(name) {
-                    self.diags.push(
-                        Diag::new(
-                            ErrorKind::Type,
-                            format!("`{name}` is not defined"),
-                            *sp,
-                            format!(
-                                "Define `{name} <- ...` (mutable) or `{name} ::= ...` (const) before use."
-                            ),
-                        )
-                        .with_expected(format!("a defined name or module function"))
-                        .with_received(format!("`{name}`")),
-                    );
+                    let mut d = Diag::new(
+                        ErrorKind::Type,
+                        format!("`{name}` is not defined"),
+                        *sp,
+                        "Declare the variable before use, or reference a model field.",
+                    )
+                    .with_expected("a defined name or module function".to_string())
+                    .with_received(format!("`{name}`"))
+                    .with_code(cat::UNDEFINED_VARIABLE);
+                    // Cross-file related span: if `name` is a declared model
+                    // field, point at its definition in the declaring module
+                    // (e.g. `models/user.hard:5:5`). BTreeMap iteration keeps
+                    // the first match deterministic.
+                    if let Some((model, fspan, model_file)) = self.find_model_field(name) {
+                        d = d
+                            .with_related(
+                                model_file.unwrap_or_default(),
+                                fspan,
+                                format!("field `{name}` declared in model `{model}`"),
+                            )
+                            .with_help(format!(
+                                "Access the field through the model, e.g. `{model}(..).{name}`."
+                            ));
+                    } else {
+                        // No exact model-field match: offer a "did you mean"
+                        // candidate computed over everything in scope plus all
+                        // declared model fields, when the edit distance says a
+                        // typo is plausible.
+                        let mut cands: Vec<String> = scope.keys().cloned().collect();
+                        cands.extend(self.models.values().flat_map(|m| m.fields.iter().map(|f| f.name.clone())));
+                        if let Some(cand) = crate::suggest::closest(name, &cands).filter(|c| c.as_str() != name) {
+                            d = d.with_help(format!(
+                                "Maybe you meant `{cand}`? If not, declare the variable before use."
+                            ));
+                        }
+                    }
+                    self.diags.push(d);
                 }
             }
             Expr::Member(base, _, _) => self.expr(base, scope),
@@ -216,10 +282,21 @@ impl Checker {
                     let known = self.funcs.contains_key(&name.clone()) || scope.contains_key(name);
                     let is_boot = name == "_" || name == "expect";
                     if !known && !is_boot {
-                        self.err(
+                        let fallback = format!(
+                            "Define `calc {name}(..) => .. {{ .. }}` before calling it, or use a module function like `json.parse(..)`."
+                        );
+                        let cands = self
+                            .funcs
+                            .keys()
+                            .map(|k| k.strip_prefix("calc ").unwrap_or(k).to_string())
+                            .chain(scope.keys().cloned())
+                            .collect::<Vec<_>>();
+                        let suggestion = crate::suggest::did_you_mean(name, &cands, fallback);
+                        self.err_code(
+                            cat::UNDEFINED_FUNCTION,
                             format!("call to undefined function `{name}`"),
                             *csp,
-                            format!("Define `calc {name}(..) => .. {{ .. }}` before calling it, or use a module function like `json.parse(..)`."),
+                            suggestion,
                         );
                     }
                 } else if let Expr::Member(base, field, _) = callee.as_ref() {

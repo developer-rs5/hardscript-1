@@ -20,6 +20,9 @@ import random
 import socket
 import time
 
+PAYLOAD = 0
+ENDPOINT = "mixed"
+
 
 def http_exchange(sock, req: bytes) -> bytes:
     sock.sendall(req)
@@ -51,6 +54,10 @@ def build_request(rng, ep):
         name = "bob" + str(rng.randrange(0, 999))
         return b"GET /hello/%s HTTP/1.1\r\nHost: %s\r\n\r\n" % (name.encode("ascii"), host.encode())
     body = b'{"x":7,"s":"bench"}'
+    if PAYLOAD > 0:
+        # JSON string body of ~PAYLOAD bytes so the echo response streams a
+        # large serialized payload (tests the allocation-free JSON encoder).
+        body = ('{"s":"' + ("x" * PAYLOAD) + '"}').encode("ascii")
     return (
         b"POST /echo HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n"
         b"Content-Length: %d\r\n\r\n%s" % (host.encode(), len(body), body)
@@ -61,7 +68,10 @@ def worker(deadline, keepalive, rng, out):
     socks = {}
     n = 0
     while time.monotonic() < deadline:
-        ep = rng.choices(["root", "hello", "echo"], weights=[1, 2, 1])[0]
+        if ENDPOINT == "mixed":
+            ep = rng.choices(["root", "hello", "echo"], weights=[1, 2, 1])[0]
+        else:
+            ep = ENDPOINT
         req = build_request(rng, ep)
         t0 = time.monotonic()
         try:
@@ -93,7 +103,12 @@ def main():
     ap.add_argument("--concurrency", type=int, default=32)
     ap.add_argument("--keepalive", type=int, default=0, choices=[0, 1])
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--payload", type=int, default=0)
+    ap.add_argument("--endpoint", type=str, default="mixed", choices=["mixed", "root", "hello", "echo"])
     args = ap.parse_args()
+    global PAYLOAD, ENDPOINT
+    PAYLOAD = args.payload
+    ENDPOINT = args.endpoint
 
     # warmup
     end = time.monotonic() + args.warmup

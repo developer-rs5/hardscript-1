@@ -1,0 +1,25 @@
+bring http
+app @3031
+
+seed ::= 8
+
+calc five() => Int {
+    <- 5
+}
+
+GET "/echo/:tag" :: (tag = Str, body = body) {
+    dead <- 2 * seed
+    base ::= 40
+    n <- tag
+    copied <- n
+    total <- base + 2
+    ?(true) {
+        <- copied + total + five()
+    } :{
+        <- 0
+    }
+    anyway <- total
+    loop v => [1, 2, 3] {
+    }
+    <- anyway
+}

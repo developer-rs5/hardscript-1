@@ -1,0 +1,5 @@
+cpp
+params route id=42 photo=7
+param match allocs per=2 pool_delta=0
+static match allocs per=0
+ok

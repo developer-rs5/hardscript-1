@@ -1,0 +1,22 @@
+app @3031
+
+GET "/users/me" :: {
+    <- { who: "static" }
+}
+
+POST "/users/me" :: {
+    <- { who: "post-static" }
+}
+
+GET "/users/:id" :: (id = Str) {
+    <- { who: "param" }
+}
+
+GET "/files/readme" :: {
+    <- { who: "static-wild" }
+}
+
+GET "/files/*path" :: (path = Str) {
+    <- { who: "wild" }
+}
+

@@ -1,0 +1,6 @@
+esc
+route GET /: s = stack
+route GET /: rate = immutable
+route GET /: t = escaping
+route GET /: items = stack
+summary: 2 stack, 1 escaping, 1 immutable

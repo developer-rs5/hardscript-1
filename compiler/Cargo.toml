@@ -7,3 +7,6 @@ description = "HardScript compiler: lexer, parser, type checker, C++ code genera
 [lib]
 name = "hs_compiler"
 path = "src/lib.rs"
+
+[dependencies]
+rayon = "1.12.0"

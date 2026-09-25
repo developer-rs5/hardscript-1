@@ -1,0 +1,4 @@
+ok
+GET /files/a/b/c = {"path":"a/b/c"}
+GET /files/readme.txt = {"path":"readme.txt"}
+GET /files = {"path":""}

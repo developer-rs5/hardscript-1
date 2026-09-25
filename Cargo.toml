@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["compiler", "lsp", "cli"]
+members = ["compiler", "lsp", "cli", "pm"]
 default-members = ["cli"]
 
 [workspace.package]

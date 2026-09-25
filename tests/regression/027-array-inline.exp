@@ -1,0 +1,20 @@
+cpp
+arr n=0 allocs=1 bytes=160
+obj n=0 allocs=1 bytes=288
+arr n=1 allocs=1 bytes=160
+obj n=1 allocs=1 bytes=288
+arr n=4 allocs=1 bytes=160
+obj n=4 allocs=1 bytes=288
+arr n=5 allocs=5 bytes=640
+obj n=5 allocs=5 bytes=1248
+arr n=8 allocs=5 bytes=640
+obj n=8 allocs=5 bytes=1248
+arr n=9 allocs=6 bytes=1152
+obj n=9 allocs=6 bytes=2272
+arr n=16 allocs=6 bytes=1152
+obj n=16 allocs=6 bytes=2272
+arr n=64 allocs=8 bytes=4224
+obj n=64 allocs=8 bytes=8416
+arr n=256 allocs=10 bytes=16512
+obj n=256 allocs=10 bytes=32992
+ok

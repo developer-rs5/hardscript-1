@@ -1,0 +1,8 @@
+esc
+func id: cached = immutable
+func id: tmp = escaping
+middleware gate: head = immutable
+middleware gate: walkthrough = escaping
+route GET /: keep = stack
+route GET /: derived = escaping
+summary: 1 stack, 3 escaping, 2 immutable

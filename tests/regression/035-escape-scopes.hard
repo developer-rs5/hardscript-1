@@ -1,0 +1,16 @@
+app @3031
+calc id(Num x) => Num {
+    cached ::= x
+    tmp <- { "n": x }
+    <- tmp
+}
+before gate :: {
+    head ::= "x-hard"
+    walkthrough <- [1, 2]
+    <- walkthrough
+}
+GET "/" :: {
+    keep <- [1]
+    derived <- keep[0] + 3
+    <- derived
+}

@@ -1,0 +1,4 @@
+cpp
+first json_value allocs=2 bytes=576
+memoized json_value allocs=1 bytes=288
+ok

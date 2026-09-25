@@ -1,0 +1,5 @@
+ok
+GET /users = {"ok":"list"}
+POST /users = {"ok":"created"}
+GET /about = {"ok":"about"}
+GET /missing = {"error":"not found"}

@@ -1,0 +1,6 @@
+ok
+GET /api/v1/orders = {"kind":"orders-list"}
+POST /api/v1/orders = {"kind":"orders-create"}
+GET /api/v1/orders/5 = {"kind":"order","oid":"5"}
+GET /api/v1/orders/5/items = {"kind":"items","oid":"5"}
+GET /api/v2/orders = {"kind":"v2-orders"}
