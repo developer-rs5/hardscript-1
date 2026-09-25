@@ -17,7 +17,9 @@ API.md
 
 # Editor caches
 .idea/
-.vscode/
+**/.vscode/*
+!vscode-hardscript/.vscode/launch.json
+!vscode-hardscript/.vscode/tasks.json
 *.swp
 *.swo
 *~
@@ -26,8 +28,11 @@ API.md
 # OS
 Thumbs.db
 
-# Reports are generated artifacts kept in git
 # reports/ is committed
+# Release artifacts
+/dist/
+# Node dependencies
+node_modules/
 # QA harness build output
 qa/harness/target/
 
@@ -67,5 +72,7 @@ qa/cli_matrix/results.json
 
 qa/diag_cases/
 qa/diag_snapshots/
+qa/lsp/results.json
+qa/extension/results.json
 qa/__pycache__/
 qa/*/__pycache__/
