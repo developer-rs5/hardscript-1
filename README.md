@@ -153,6 +153,8 @@ hard docs  [file]            Generate API.md for a source file
 hard add   <module>          Add a module reference to hard.toml
 hard doctor                  Check the toolchain (g++, runtime)
 hard bench [file]            Release-build and report timings
+hard migrate <diff|up|down|status>  Diff models and run migrations
+hard seed   [file]           Run seed files against the database
 hard help                    Show help
 ```
 

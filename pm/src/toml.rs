@@ -169,15 +169,17 @@ impl<'a> Parser<'a> {
             if self.peek().is_none() {
                 break;
             }
-            let was_table = self.try_parse_table_header();
-            if self.peek().is_none() {
-                break;
-            }
-            if was_table {
+            // Headers may follow headers: an empty `[server]` section before
+            // `[database]` is valid TOML, and treating the second header as a
+            // key would report a key error on a line that has no key.
+            while self.try_parse_table_header() {
                 self.skip_ws_comments();
                 if self.peek().is_none() {
                     break;
                 }
+            }
+            if self.peek().is_none() {
+                break;
             }
             self.parse_key_value();
         }

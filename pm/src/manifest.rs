@@ -42,6 +42,7 @@ pub struct Manifest {
     pub registry: Option<String>,
     pub compiler: CompilerConfig,
     pub server: ServerConfig,
+    pub database: DatabaseConfig,
     pub dependencies: BTreeMap<String, String>,
     pub dev_dependencies: BTreeMap<String, String>,
     pub workspace: Vec<String>,
@@ -75,6 +76,18 @@ impl Default for ServerConfig {
     }
 }
 
+/// Which database the ORM and the migration commands talk to.
+///
+/// `dialect` is `"sqlite"` or `"postgres"`. A SQLite database is a file named
+/// by `path`; a PostgreSQL database is named by `url`, either a
+/// `postgresql://` URL or `key=value` pairs.
+#[derive(Clone, Debug, Default)]
+pub struct DatabaseConfig {
+    pub dialect: Option<String>,
+    pub path: Option<String>,
+    pub url: Option<String>,
+}
+
 /// Results of parsing a manifest: the model plus any accumulated diagnostics.
 #[derive(Clone, Debug, Default)]
 pub struct ParseResult {
@@ -84,11 +97,12 @@ pub struct ParseResult {
 
 const KNOWN_TOP: &[&str] = &[
     "schema", "name", "version", "edition", "description", "authors", "license", "registry",
-    "compiler", "server", "dependencies", "dev-dependencies", "dev_dependencies", "workspace",
+    "compiler", "server", "database", "dependencies", "dev-dependencies", "dev_dependencies", "workspace",
     "modules",
 ];
 const KNOWN_COMPILER: &[&str] = &["opt", "warnings", "jobs"];
 const KNOWN_SERVER: &[&str] = &["port", "host"];
+const KNOWN_DATABASE: &[&str] = &["dialect", "path", "url"];
 
 /// How detailed diagnostics the caller wants.
 #[derive(Clone, Copy, PartialEq)]
@@ -203,6 +217,32 @@ pub fn parse(src: &str, mode: ManifestMode) -> Result<ParseResult, Vec<ManifestE
                         key: format!("server.{other}"),
                         message: format!("unknown server setting '{other}'"),
                         suggestion: suggest(other, KNOWN_SERVER),
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(t) = doc.table("database") {
+        for (k, v) in t {
+            match k.as_str() {
+                "dialect" => match v.as_str() {
+                    Some(s) => res.manifest.database.dialect = Some(s.to_string()),
+                    None => errors.push(manifest_err("database.dialect", "'dialect' must be a string")),
+                },
+                "path" => match v.as_str() {
+                    Some(s) => res.manifest.database.path = Some(s.to_string()),
+                    None => errors.push(manifest_err("database.path", "'path' must be a string")),
+                },
+                "url" => match v.as_str() {
+                    Some(s) => res.manifest.database.url = Some(s.to_string()),
+                    None => errors.push(manifest_err("database.url", "'url' must be a string")),
+                },
+                other => {
+                    res.warnings.push(ManifestWarning {
+                        key: format!("database.{other}"),
+                        message: format!("unknown database setting '{other}'"),
+                        suggestion: suggest(other, KNOWN_DATABASE),
                     });
                 }
             }
@@ -476,6 +516,20 @@ impl Manifest {
         }
         s.push('\n');
 
+        if self.database.dialect.is_some() {
+            s.push_str("[database]\n");
+            if let Some(d) = &self.database.dialect {
+                s.push_str(&format!("dialect = {}\n", toml_quote(d)));
+            }
+            if let Some(p) = &self.database.path {
+                s.push_str(&format!("path = {}\n", toml_quote(p)));
+            }
+            if let Some(u) = &self.database.url {
+                s.push_str(&format!("url = {}\n", toml_quote(u)));
+            }
+            s.push('\n');
+        }
+
         if !self.dependencies.is_empty() || !self.dev_dependencies.is_empty() {
             if !self.dependencies.is_empty() {
                 s.push_str("[dependencies]\n");
@@ -602,6 +656,28 @@ http = "^1.0.0"
         assert_eq!(m.dependencies.get("http").map(String::as_str), Some("^1.0.0"));
         assert_eq!(m.workspace, vec!["a", "b"]);
         assert!(res.warnings.is_empty(), "unexpected warnings: {:?}", res.warnings);
+    }
+
+    #[test]
+    fn a_database_section_names_the_dialect_and_where_it_lives() {
+        let src = "schema = 1\nname = \"x\"\nversion = \"0.1.0\"\n\n[database]\ndialect = \"sqlite\"\npath = \"app.db\"\n";
+        let res = parse(src, ManifestMode::Strict).expect("database parses");
+        assert_eq!(res.manifest.database.dialect.as_deref(), Some("sqlite"));
+        assert_eq!(res.manifest.database.path.as_deref(), Some("app.db"));
+        assert!(res.manifest.database.url.is_none());
+        let back = res.manifest.render();
+        assert!(back.contains("[database]"), "rendered:\n{back}");
+        assert!(back.contains("[database]"), "rendered:\n{back}");
+        let again = parse(&back, ManifestMode::Strict).expect("rendered manifest parses");
+        assert_eq!(again.manifest.database.dialect.as_deref(), Some("sqlite"));
+    }
+
+    #[test]
+    fn an_unknown_database_key_is_a_warning_with_a_suggestion() {
+        let src = "schema = 1\nname = \"x\"\nversion = \"0.1.0\"\n\n[database]\ndialects = \"sqlite\"\n";
+        let res = parse(src, ManifestMode::Lenient).expect("still parses");
+        assert!(res.manifest.database.dialect.is_none());
+        assert!(res.warnings.iter().any(|w| w.key == "database.dialects"), "{:?}", res.warnings);
     }
 
     #[test]

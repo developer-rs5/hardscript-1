@@ -2404,6 +2404,434 @@ pub fn default_join_table(from: &str, to: &str) -> String {
     format!("{}_{}", singular_of(&from.to_lowercase()), singular_of(&to.to_lowercase()))
 }
 
+// ===========================================================================
+// Migrations: what changed between two schemas
+// ===========================================================================
+
+/// One change between two schemas.
+///
+/// Each variant knows both the SQL that applies it and the SQL that undoes it,
+/// because a migration whose down side is written by hand drifts from its up
+/// side within a month. Generated together, they cannot.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    /// A table that did not exist. Up creates it and its indexes; down drops
+    /// the indexes first, because `DROP TABLE` takes them with it and a later
+    /// `DROP INDEX` would then fail on a name that is already gone.
+    CreateTable { table: String, def: TableDef },
+    /// A table that is no longer declared.
+    DropTable { table: String, def: TableDef },
+    /// A new column on a table that exists in both schemas.
+    AddColumn { table: String, column: ColumnDef },
+    DropColumn { table: String, column: ColumnDef },
+    /// A column whose storage changed. Only PostgreSQL can alter a column in
+    /// place; everywhere else this is never produced, and a rebuild is.
+    AlterColumn { table: String, from: ColumnDef, to: ColumnDef },
+    /// A foreign key added to or removed from a column that otherwise stayed
+    /// the same. Only PostgreSQL can add a constraint to an existing table.
+    AddForeignKey { table: String, column: ColumnDef },
+    DropForeignKey { table: String, column: ColumnDef },
+    /// A table built again under a new name, filled with the columns both
+    /// definitions share, then swapped in. This is the recipe SQLite's own
+    /// documentation gives for a change `ALTER TABLE` cannot express, in the
+    /// four steps that matter. The down side rebuilds the old definition the
+    /// same way, which restores the schema but not the data of columns the
+    /// migration dropped.
+    RebuildTable { table: String, from: TableDef, to: TableDef, copy: Vec<String> },
+    CreateIndex { table: String, column: String, unique: bool },
+    DropIndex { table: String, column: String, unique: bool },
+}
+
+impl Change {
+    /// The statements that apply this change, in the order they must run.
+    pub fn up_sql(&self, d: Dialect) -> Vec<String> {
+        match self {
+            Change::CreateTable { def, .. } => def.create_sql(d),
+            Change::DropTable { def, .. } => def.drop_sql(d),
+            Change::AddColumn { table, column } => vec![add_column_sql(d, table, column)],
+            Change::DropColumn { table, column } => vec![drop_column_sql(d, table, column)],
+            Change::AlterColumn { table, from, to } => alter_column_sql(d, table, from, to),
+            Change::AddForeignKey { table, column } => {
+                vec![format!(
+                    "ALTER TABLE {} ADD CONSTRAINT {} {}",
+                    quote_ident(d, table),
+                    quote_ident(d, &fk_constraint_name(table, &column.name)),
+                    foreign_key_clause(d, column)
+                )]
+            }
+            Change::DropForeignKey { table, column } => vec![format!(
+                "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                quote_ident(d, table),
+                quote_ident(d, &fk_constraint_name(table, &column.name))
+            )],
+            Change::RebuildTable { to, copy, .. } => rebuild_sql(d, to, copy),
+            Change::CreateIndex { table, column, unique } => vec![create_index_sql(d, table, column, *unique)],
+            Change::DropIndex { table, column, .. } => {
+                vec![format!("DROP INDEX IF EXISTS {}", quote_ident(d, &index_name(table, column)))]
+            }
+        }
+    }
+
+    /// The statements that undo it, in reverse of the up side.
+    pub fn down_sql(&self, d: Dialect) -> Vec<String> {
+        match self {
+            Change::CreateTable { def, .. } => def.drop_sql(d),
+            Change::DropTable { def, .. } => def.create_sql(d),
+            Change::AddColumn { table, column } => vec![drop_column_sql(d, table, column)],
+            Change::DropColumn { table, column } => vec![add_column_sql(d, table, column)],
+            Change::AlterColumn { table, from, to } => alter_column_sql(d, table, to, from),
+            Change::AddForeignKey { table, column } => vec![format!(
+                "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                quote_ident(d, table),
+                quote_ident(d, &fk_constraint_name(table, &column.name))
+            )],
+            Change::DropForeignKey { table, column } => {
+                vec![format!(
+                    "ALTER TABLE {} ADD CONSTRAINT {} {}",
+                    quote_ident(d, table),
+                    quote_ident(d, &fk_constraint_name(table, &column.name)),
+                    foreign_key_clause(d, column)
+                )]
+            }
+            Change::RebuildTable { from, copy, .. } => rebuild_sql(d, from, copy),
+            Change::CreateIndex { table, column, .. } => {
+                vec![format!("DROP INDEX IF EXISTS {}", quote_ident(d, &index_name(table, column)))]
+            }
+            Change::DropIndex { table, column, unique } => {
+                vec![create_index_sql(d, table, column, *unique)]
+            }
+        }
+    }
+
+    /// A one-line description, for `migrate status` and for a comment above
+    /// the generated statements.
+    pub fn summary(&self) -> String {
+        match self {
+            Change::CreateTable { table, .. } => format!("create table {}", table),
+            Change::DropTable { table, .. } => format!("drop table {}", table),
+            Change::AddColumn { table, column, .. } => {
+                format!("add column {}.{}", table, column.name)
+            }
+            Change::DropColumn { table, column, .. } => {
+                format!("drop column {}.{}", table, column.name)
+            }
+            Change::AlterColumn { table, from, to } => format!(
+                "alter column {}.{} from {} to {}",
+                table,
+                from.name,
+                from.sql_type.ddl(Dialect::Sqlite),
+                to.sql_type.ddl(Dialect::Sqlite)
+            ),
+            Change::AddForeignKey { table, column, .. } => {
+                format!("add foreign key {}.{}", table, column.name)
+            }
+            Change::DropForeignKey { table, column, .. } => {
+                format!("drop foreign key {}.{}", table, column.name)
+            }
+            Change::RebuildTable { table, .. } => format!("rebuild table {}", table),
+            Change::CreateIndex { table, column, unique } => format!(
+                "create {}index {}.{}",
+                if *unique { "unique " } else { "" },
+                table,
+                column
+            ),
+            Change::DropIndex { table, column, .. } => format!("drop index {}.{}", table, column),
+        }
+    }
+}
+
+/// The name PostgreSQL would give a hand-added constraint, so the drop side can
+/// name the same constraint the add side made.
+fn fk_constraint_name(table: &str, column: &str) -> String {
+    format!("{}_{}_fkey", table, column)
+}
+
+/// `FOREIGN KEY ("col") REFERENCES "table" ("col")`, for an `ADD CONSTRAINT`
+/// on an existing table. The inline form in a `CREATE TABLE` body is spelled
+/// where it is used; reusing it here would put the keywords in the wrong place.
+fn foreign_key_clause(d: Dialect, column: &ColumnDef) -> String {
+    match &column.foreign {
+        Some(fk) => format!(
+            "FOREIGN KEY ({}) REFERENCES {}({})",
+            quote_ident(d, &column.name),
+            quote_ident(d, &fk.ref_table),
+            quote_ident(d, &fk.ref_column)
+        ),
+        None => String::new(),
+    }
+}
+
+fn create_index_sql(d: Dialect, table: &str, column: &str, unique: bool) -> String {
+    format!(
+        "CREATE {}INDEX {} ON {} ({})",
+        if unique { "UNIQUE " } else { "" },
+        quote_ident(d, &index_name(table, column)),
+        quote_ident(d, table),
+        quote_ident(d, column)
+    )
+}
+
+/// The `ADD COLUMN` line, spelled the way the table's own body spells it, so a
+/// column that was added back after a removal is byte-identical to the one it
+/// replaced.
+fn add_column_sql(d: Dialect, table: &str, column: &ColumnDef) -> String {
+    let mut one = TableDef {
+        model: String::new(),
+        table: table.to_string(),
+        columns: vec![column.clone()],
+        ordinal: 0,
+        span: column.span,
+    };
+    // A standalone column carries no key of its own: the table's key is not
+    // being re-declared here.
+    one.columns[0].primary = false;
+    format!(
+        "ALTER TABLE {} ADD COLUMN {}",
+        quote_ident(d, table),
+        one.column_ddl(d).join(",\n")
+    )
+}
+
+fn drop_column_sql(d: Dialect, table: &str, column: &ColumnDef) -> String {
+    format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        quote_ident(d, table),
+        quote_ident(d, &column.name)
+    )
+}
+
+/// PostgreSQL can change a column in place, in as many statements as the change
+/// has parts. The order is type, then nullability, then default: a type change
+/// that fails has to fail before anything else was altered. Other dialects
+/// never reach this function through `diff`; the comment is what a hand-fed
+/// call gets instead of a syntax error.
+fn alter_column_sql(d: Dialect, table: &str, from: &ColumnDef, to: &ColumnDef) -> Vec<String> {
+    if d != Dialect::Postgres {
+        return vec![format!(
+            "-- unsupported on this dialect: alter column {}.{}; regenerate the migration for the target dialect",
+            table, to.name
+        )];
+    }
+    let mut out = Vec::new();
+    let col = quote_ident(d, &to.name);
+    let tbl = quote_ident(d, table);
+    if from.sql_type != to.sql_type {
+        out.push(format!("ALTER TABLE {} ALTER COLUMN {} TYPE {}", tbl, col, to.sql_type.ddl(d)));
+    }
+    if from.nullable != to.nullable {
+        out.push(format!(
+            "ALTER TABLE {} ALTER COLUMN {} {}NOT NULL",
+            tbl,
+            col,
+            if to.nullable { "DROP " } else { "SET " }
+        ));
+    }
+    if from.default != to.default {
+        match &to.default {
+            Some(def) => out.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                tbl,
+                col,
+                def.sql(d)
+            )),
+            None => out.push(format!("ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT", tbl, col)),
+        }
+    }
+    out
+}
+
+/// Build the table again under a new name, copy the shared columns, drop the
+/// old one, rename. `copy` lists the columns that exist in both definitions,
+/// which is why a dropped column's data is gone after this runs.
+fn rebuild_sql(d: Dialect, def: &TableDef, copy: &[String]) -> Vec<String> {
+    let tmp = format!("{}_hs_new", def.table);
+    let tmp_q = quote_ident(d, &tmp);
+    let tbl_q = quote_ident(d, &def.table);
+    let mut tmp_def = def.clone();
+    tmp_def.table = tmp.clone();
+    let mut out = vec![tmp_def.create_table_sql(d)];
+    let cols: Vec<String> = if copy.is_empty() {
+        def.columns.iter().map(|c| quote_ident(d, &c.name)).collect()
+    } else {
+        copy.iter().map(|c| quote_ident(d, c)).collect()
+    };
+    if !cols.is_empty() {
+        let list = cols.join(", ");
+        out.push(format!(
+            "INSERT INTO {0} ({1}) SELECT {1} FROM {2}",
+            tmp_q, list, tbl_q
+        ));
+    }
+    out.push(format!("DROP TABLE IF EXISTS {}", tbl_q));
+    out.push(format!("ALTER TABLE {} RENAME TO {}", tmp_q, tbl_q));
+    out.extend(def.create_index_sql(d));
+    out
+}
+
+/// Whether two columns would render the same storage. The source type name is
+/// deliberately ignored: `Email` and `String` are the same column, and
+/// renaming the annotation is not a migration.
+fn same_storage(a: &ColumnDef, b: &ColumnDef) -> bool {
+    a.sql_type == b.sql_type
+        && a.nullable == b.nullable
+        && a.default == b.default
+        && a.primary == b.primary
+        && a.auto_increment == b.auto_increment
+        && a.unique == b.unique
+        && a.foreign == b.foreign
+}
+
+/// The index a table has a `CREATE INDEX` statement for on this column. A
+/// `@unique` column's index comes from its own constraint and needs no
+/// statement, so only `@index` shows up here -- the same rule
+/// `TableDef::create_index_sql` follows, read from the same place, so the two
+/// cannot disagree.
+fn standalone_index(t: &TableDef, c: &ColumnDef) -> Option<bool> {
+    if c.primary {
+        return None;
+    }
+    let found = t.column(&c.name)?;
+    if found.index && !found.primary {
+        Some(found.unique)
+    } else {
+        None
+    }
+}
+
+/// Compare two schemas and return the changes that turn the first into the
+/// second.
+///
+/// The order is not cosmetic. Tables come before the columns and indexes that
+/// refer to them, and drops come last in reverse, so the statements run in the
+/// order they are written.
+pub fn diff(from: &Schema, to: &Schema, d: Dialect) -> Vec<Change> {
+    let mut out: Vec<Change> = Vec::new();
+    let from_tables: Vec<&TableDef> = from.canonical_tables();
+    let to_tables: Vec<&TableDef> = to.canonical_tables();
+
+    for t in &to_tables {
+        if from.table(&t.table).is_none() {
+            out.push(Change::CreateTable { table: t.table.clone(), def: (*t).clone() });
+        }
+    }
+
+    for t in &to_tables {
+        if let Some(old) = from.table(&t.table) {
+            table_changes(old, t, d, &mut out);
+        }
+    }
+
+    // Drops last, and in reverse order, so a table that something else referred
+    // to is still there while the things that referred to it are being removed.
+    for t in from_tables.iter().rev() {
+        if to.table(&t.table).is_none() {
+            out.push(Change::DropTable { table: t.table.clone(), def: (*t).clone() });
+        }
+    }
+    out
+}
+
+/// The changes to one table that exists in both schemas.
+fn table_changes(old: &TableDef, new: &TableDef, d: Dialect, out: &mut Vec<Change>) {
+    let added: Vec<&ColumnDef> =
+        new.columns.iter().filter(|n| old.column(&n.name).is_none()).collect();
+    let dropped: Vec<&ColumnDef> =
+        old.columns.iter().filter(|o| new.column(&o.name).is_none()).collect();
+    let changed: Vec<(&ColumnDef, &ColumnDef)> = new
+        .columns
+        .iter()
+        .filter_map(|n| old.column(&n.name).map(|o| (o, n)))
+        .filter(|(o, n)| !same_storage(o, n))
+        .collect();
+
+    let storage_changed = changed.iter().any(|(o, n)| {
+        o.sql_type != n.sql_type || o.nullable != n.nullable || o.default != n.default
+    });
+    let constraint_changed = changed.iter().any(|(o, n)| {
+        o.primary != n.primary
+            || o.auto_increment != n.auto_increment
+            || o.unique != n.unique
+            || o.foreign != n.foreign
+    });
+    let foreign_only = constraint_changed
+        && !storage_changed
+        && changed.iter().all(|(o, n)| {
+            o.sql_type == n.sql_type
+                && o.nullable == n.nullable
+                && o.default == n.default
+                && o.primary == n.primary
+                && o.auto_increment == n.auto_increment
+                && o.unique == n.unique
+        });
+    // SQLite cannot add a key or a uniqueness constraint to an existing table,
+    // and this build supports databases older than `DROP COLUMN`, so those
+    // changes rebuild the table on that dialect.
+    let sqlite_rebuild = d == Dialect::Sqlite
+        && (!dropped.is_empty()
+            || storage_changed
+            || constraint_changed
+            || added.iter().any(|n| n.primary || n.unique));
+    // Any other constraint-level change is a rebuild everywhere: the portable
+    // statements above only cover storage and foreign keys.
+    if sqlite_rebuild || (constraint_changed && !foreign_only) {
+        let copy: Vec<String> = new
+            .columns
+            .iter()
+            .filter(|n| old.column(&n.name).is_some())
+            .map(|n| n.name.clone())
+            .collect();
+        out.push(Change::RebuildTable {
+            table: new.table.clone(),
+            from: old.clone(),
+            to: new.clone(),
+            copy,
+        });
+        return;
+    }
+
+    for n in added {
+        out.push(Change::AddColumn { table: new.table.clone(), column: (*n).clone() });
+    }
+    for (o, n) in changed {
+        if foreign_only {
+            if n.foreign.is_some() {
+                out.push(Change::AddForeignKey { table: new.table.clone(), column: n.clone() });
+            } else {
+                out.push(Change::DropForeignKey { table: new.table.clone(), column: n.clone() });
+            }
+            continue;
+        }
+        out.push(Change::AlterColumn {
+            table: new.table.clone(),
+            from: (*o).clone(),
+            to: (*n).clone(),
+        });
+    }
+    for o in dropped {
+        out.push(Change::DropColumn { table: new.table.clone(), column: (*o).clone() });
+    }
+
+    // Indexes last: an index on a column that was just added needs the column
+    // to exist first.
+    for n in &new.columns {
+        match (standalone_index(old, n), standalone_index(new, n)) {
+            (None, Some(u)) => out.push(Change::CreateIndex {
+                table: new.table.clone(),
+                column: n.name.clone(),
+                unique: u,
+            }),
+            // A column that is on its way out takes its index with it, on both
+            // backends, so only a surviving column's index is dropped.
+            (Some(_), None) if old.column(&n.name).is_some() => out.push(Change::DropIndex {
+                table: new.table.clone(),
+                column: n.name.clone(),
+                unique: false,
+            }),
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3805,5 +4233,114 @@ mod tests {
         let s = schema_of("model User = users [ id => Int, email => String ]").expect("schema");
         assert_eq!(s.table("User").unwrap().table, "users");
         assert_eq!(s.table("users").unwrap().model, "User");
+    }
+
+    // ---------------- migrations ----------------
+
+    const MIG_BASE: &str = "model User { id : Int @primary @auto_increment, name : String }";
+
+    fn diff_of(from_src: &str, to_src: &str, d: Dialect) -> Vec<Change> {
+        let from = if from_src.is_empty() {
+            Schema::default()
+        } else {
+            schema_of(from_src).expect("from schema")
+        };
+        let to = if to_src.is_empty() {
+            Schema::default()
+        } else {
+            schema_of(to_src).expect("to schema")
+        };
+        diff(&from, &to, d)
+    }
+
+    #[test]
+    fn identical_schemas_have_no_changes() {
+        // Reordering fields is not a change either: the fingerprint already
+        // says so, and the diff must agree with it.
+        let reordered = "model User { name : String, id : Int @primary @auto_increment }";
+        assert!(diff_of(MIG_BASE, MIG_BASE, Dialect::Sqlite).is_empty());
+        assert!(diff_of(MIG_BASE, reordered, Dialect::Sqlite).is_empty());
+        assert!(diff_of(MIG_BASE, MIG_BASE, Dialect::Postgres).is_empty());
+    }
+
+    #[test]
+    fn a_new_table_is_created_with_its_indexes() {
+        let to = "model User { id : Int @primary @auto_increment, email : String @unique @index }";
+        let changes = diff_of("", to, Dialect::Sqlite);
+        assert_eq!(changes.len(), 1);
+        let up = changes[0].up_sql(Dialect::Sqlite);
+        assert!(up[0].starts_with("CREATE TABLE"), "table first: {}", up[0]);
+        assert!(up[1].starts_with("CREATE UNIQUE INDEX"), "then its index: {}", up[1]);
+        let down = changes[0].down_sql(Dialect::Sqlite);
+        assert!(down[0].starts_with("DROP INDEX"), "indexes first on the way out: {}", down[0]);
+        assert!(down[1].starts_with("DROP TABLE"), "then the table: {}", down[1]);
+    }
+
+    #[test]
+    fn a_new_column_is_added_and_removed() {
+        let to = "model User { id : Int @primary @auto_increment, name : String, nick : String @nullable }";
+        let changes = diff_of(MIG_BASE, to, Dialect::Sqlite);
+        assert_eq!(changes.len(), 1);
+        let up = changes[0].up_sql(Dialect::Sqlite);
+        assert!(up[0].contains("ADD COLUMN") && up[0].contains("nick") && up[0].contains("NULL"), "{}", up[0]);
+        let down = changes[0].down_sql(Dialect::Sqlite);
+        assert!(down[0].contains("DROP COLUMN") && down[0].contains("nick"), "{}", down[0]);
+    }
+
+    #[test]
+    fn sqlite_rebuilds_a_table_it_cannot_alter() {
+        // `DROP COLUMN` is new enough that this build does not assume it, so a
+        // removed column rebuilds the table on SQLite: create, copy, drop,
+        // rename.
+        let from = "model User { id : Int @primary @auto_increment, name : String, nick : String @nullable }";
+        let changes = diff_of(from, MIG_BASE, Dialect::Sqlite);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(changes[0], Change::RebuildTable { .. }));
+        let up = changes[0].up_sql(Dialect::Sqlite);
+        assert_eq!(up.len(), 4);
+        assert!(up[0].contains("user_hs_new"), "{}", up[0]);
+        assert!(up[1].contains("INSERT INTO") && up[1].contains("SELECT"), "{}", up[1]);
+        assert!(!up[1].contains("nick"), "the dropped column is not copied: {}", up[1]);
+        assert!(up[2].contains("DROP TABLE"), "{}", up[2]);
+        assert!(up[3].contains("RENAME TO"), "{}", up[3]);
+    }
+
+    #[test]
+    fn a_changed_type_is_an_alter_on_postgres_and_a_rebuild_on_sqlite() {
+        let from = "model User { id : Int @primary @auto_increment, age : Int }";
+        let to = "model User { id : Int @primary @auto_increment, age : Float }";
+        let pg = diff_of(from, to, Dialect::Postgres);
+        assert_eq!(pg.len(), 1);
+        let up = pg[0].up_sql(Dialect::Postgres);
+        assert_eq!(up.len(), 1);
+        assert!(up[0].contains("ALTER COLUMN") && up[0].contains("TYPE DOUBLE PRECISION"), "{}", up[0]);
+        let lite = diff_of(from, to, Dialect::Sqlite);
+        assert_eq!(lite.len(), 1);
+        assert!(matches!(lite[0], Change::RebuildTable { .. }));
+    }
+
+    #[test]
+    fn a_new_foreign_key_is_a_constraint_on_postgres_and_a_rebuild_on_sqlite() {
+        let from = "model User { id : Int @primary, name : String }\nmodel Post { id : Int @primary, user_id : Int }";
+        let to = "model User { id : Int @primary, name : String }\nmodel Post { id : Int @primary, user_id : Int @foreign(user.id) }";
+        let pg = diff_of(from, to, Dialect::Postgres);
+        assert_eq!(pg.len(), 1);
+        let up = pg[0].up_sql(Dialect::Postgres);
+        assert!(up[0].contains("ADD CONSTRAINT") && up[0].contains("REFERENCES"), "{}", up[0]);
+        let down = pg[0].down_sql(Dialect::Postgres);
+        assert!(down[0].contains("DROP CONSTRAINT"), "{}", down[0]);
+        let lite = diff_of(from, to, Dialect::Sqlite);
+        assert_eq!(lite.len(), 1);
+        assert!(matches!(lite[0], Change::RebuildTable { .. }));
+    }
+
+    #[test]
+    fn an_added_index_is_created_after_its_column() {
+        let to = "model User { id : Int @primary @auto_increment, name : String, email : String @index }";
+        let changes = diff_of(MIG_BASE, to, Dialect::Sqlite);
+        assert_eq!(
+            changes.iter().map(|c| c.summary()).collect::<Vec<_>>(),
+            vec!["add column user.email", "create index user.email"]
+        );
     }
 }

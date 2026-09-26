@@ -91,11 +91,29 @@ def setup_readonly(d):
         p.chmod(0o555)
 
 
+MAIN_MODELS = F("main_models.hard")
+DB_TOML = """schema = 1
+name = "hsdb"
+version = "0.1.0"
+
+[database]
+dialect = "sqlite"
+path = "app.db"
+"""
+
+
+def setup_db(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_MODELS)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
+    "db": setup_db,
 }
 
 # id, argv, expected_rc, setup, note
@@ -163,6 +181,14 @@ CASES = [
     ("dc002", ["doctor"], 0, "ro", "doctor read-only leniency"),
     ("bm001", ["bench", "main.hard"], 0, "ok", "bench ok"),
     ("bm002", ["bench", "missing.hard"], 1, "missing", "bench missing"),
+    # migrations ===============================================================
+    ("mg001", ["migrate", "diff"], 1, "missing", "diff with no dialect configured"),
+    ("mg002", ["migrate", "diff", "--name", "init"], 0, "db", "diff writes the first migration"),
+    ("mg003", ["migrate", "status"], 0, "db", "status with no migrations"),
+    ("mg004", ["migrate", "up"], 0, "db", "up with nothing pending"),
+    ("mg005", ["migrate", "down"], 1, "db", "down with nothing applied"),
+    ("mg006", ["migrate", "diff", "--dialect", "mysql"], 1, "db", "diff with an unknown dialect"),
+    ("mg007", ["seed"], 2, "db", "seed with no seed files"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

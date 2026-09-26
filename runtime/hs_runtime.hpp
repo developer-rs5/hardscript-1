@@ -15,6 +15,7 @@
 //   hs_runtime_validation.hpp  validation engine (M5.1)
 //   hs_runtime_auth.hpp        JWT auth, route guard, password hashing (M5.2)
 //   hs_runtime_orm.hpp         model metadata, query builder, backend seam (M5.3)
+//   hs_runtime_migrate.hpp     migration files, history, runner, seeds
 //   hs_runtime_sqlite.hpp      SQLite backend, libsqlite3 loaded at run time
 //   hs_runtime_pgsql.hpp       PostgreSQL backend, extended query protocol
 //   hs_runtime_util.hpp      CLI/args helpers + codegen glue (hs_respond, tests)
@@ -34,6 +35,7 @@
 #include "hs_runtime_validation.hpp"
 #include "hs_runtime_auth.hpp"
 #include "hs_runtime_orm.hpp"
+#include "hs_runtime_migrate.hpp"
 #include "hs_runtime_sqlite.hpp"
 #include "hs_runtime_pgsql.hpp"
 #include "hs_runtime_util.hpp"

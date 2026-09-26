@@ -8,6 +8,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod migrate;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // The runtime headers are embedded into the CLI binary at build time so
@@ -64,13 +66,17 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_orm.hpp"),
     ),
     (
+        "hs_runtime_migrate.hpp",
+        include_str!("../../runtime/hs_runtime_migrate.hpp"),
+    ),
+    (
         "hs_runtime_util.hpp",
         include_str!("../../runtime/hs_runtime_util.hpp"),
     ),
     ("hs_runtime.hpp", include_str!("../../runtime/hs_runtime.hpp")),
 ];
 
-fn write_runtime(dir: &Path) {
+pub(crate) fn write_runtime(dir: &Path) {
     for (name, content) in RUNTIME_FILES {
         write(&dir.join(name), content);
     }
@@ -111,6 +117,8 @@ fn main() {
         "hir" => cmd_hir(rest),
         "opt" => cmd_opt(rest),
         "errors" => cmd_errors(rest),
+        "migrate" => migrate::cmd_migrate(rest),
+        "seed" => migrate::cmd_seed(rest),
         "--version" | "-V" => println!("hard {VERSION}"),
         "--help" | "-h" | "help" => help(),
         other => {
@@ -147,9 +155,11 @@ fn help() {
          \x20 hard doctor                  Check the toolchain (g++, runtime)\n\
          \x20 hard bench [file]            Release-build and report timings\n\
          \x20 hard hir   [file]            Print the lowered HIR (debugging)\n\
-         \x20 hard opt   [file]            Optimize and show before/after (debugging)\n\
-         \x20 hard errors                   List the diagnostic catalog (--markdown)\n\
-         \x20 hard help                    Show this help\n\
+          \x20 hard opt   [file]            Optimize and show before/after (debugging)\n\
+          \x20 hard errors                   List the diagnostic catalog (--markdown)\n\
+          \x20 hard migrate <diff|up|down|status> [--dialect <name>] [--database <target>]\n\
+          \x20 hard seed   [file]            Run seed files against the database\n\
+          \x20 hard help                    Show this help\n\
          \n\
          Files default to main.hard in the current directory.\n\
          \n\
@@ -158,7 +168,7 @@ fn help() {
     );
 }
 
-fn find_target(rest: &[String]) -> (PathBuf, Vec<String>) {
+pub(crate) fn find_target(rest: &[String]) -> (PathBuf, Vec<String>) {
     // first argument ending in .hard is the target; the rest are passed on.
     if let Some((_, t)) = rest.iter().find(|a| a.ends_with(".hard")).map(|a| (0, a.clone())) {
         let mut rem = rest.to_vec();
@@ -220,6 +230,10 @@ fn cmd_new(args: &[String]) {
         "name = \"{name}\"\n\
          version = \"0.1.0\"\n\
          description = \"A HardScript application\"\n\
+         \n\
+         [database]\n\
+         dialect = \"sqlite\"\n\
+         path = \"{name}.db\"\n\
          \n\
          [modules]\n"
     );
@@ -1168,16 +1182,16 @@ fn exec(bin: &Path, args: &[String]) -> i32 {
     }
 }
 
-fn write(path: &Path, content: &str) {
+pub(crate) fn write(path: &Path, content: &str) {
     std::fs::write(path, content).unwrap_or_else(|e| die(&format!("cannot write {}: {e}", path.display())));
 }
 
-fn report(diags: &[Diag]) {
+pub(crate) fn report(diags: &[Diag]) {
     eprint!("{}", hs_compiler::diagnostics::render_error(diags));
     std::process::exit(1);
 }
 
-fn die(msg: &str) -> ! {
+pub(crate) fn die(msg: &str) -> ! {
     eprintln!("hard: {msg}");
     std::process::exit(1);
 }
