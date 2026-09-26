@@ -1221,7 +1221,7 @@ impl CompareOp {
 /// One builder call, in source order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryStep {
-    /// `where(col = value)`, `where(col, value)`, `where_like(col, pat)`,
+    /// `where(col == value)`, `where(col, value)`, `where_like(col, pat)`,
     /// `where_in(col, [..])`. `value` is an index into the call's argument
     /// list, so the plan stays independent of how a value is generated.
     Where { column: String, op: CompareOp, arg: usize, kind: WhereKind },
@@ -2087,14 +2087,14 @@ fn parse_where(
     let model = &table.model;
     match kind {
         WhereKind::Compare => {
-            // `where(col = value)` — the documented spelling.
+            // `where(col == value)` — the documented spelling.
             if args.len() == 1 {
                 let Expr::Binary(op, _l, _r, bsp) = &args[0] else {
                     diags.push(err(
                         args[0].span(),
                         cat::ORM_BAD_QUERY,
                         format!("`{name}` needs a comparison, e.g. `where({model}.field = value)`."),
-                        "Write `where(column = value)` or `where(column, value)`.",
+                        "Write `where(column == value)` or `where(column, value)`.",
                     ));
                     return None;
                 };

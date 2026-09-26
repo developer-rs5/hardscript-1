@@ -939,6 +939,92 @@ Fixes:
 - Name the join table, e.g. `@through(post_tag)`.
 - Declare the join table as a model with a column for each side, e.g. `post_id` and `tag_id`.
 
+### `HS0230` — Transaction Scope
+
+`db.savepoint` or `db.rollback_to` was used outside a `db.transaction` block, where there is no transaction to mark.
+
+Example:
+
+```hardscript
+db.savepoint("before_post")
+```
+
+Common causes:
+
+- The call sits at the top level of a route or function instead of inside `db.transaction { ... }`.
+- The transaction block it belonged to was removed.
+
+Fixes:
+
+- Move the call inside a `db.transaction { ... }` block.
+- Open the transaction first: savepoints mark a point inside one, they do not open one.
+
+### `HS0231` — Unknown Savepoint
+
+`db.rollback_to` names a savepoint that no `db.savepoint` created in the same transaction block.
+
+Example:
+
+```hardscript
+db.transaction {
+    db.rollback_to("before_post")
+}
+```
+
+Common causes:
+
+- The `db.savepoint("before_post")` call is missing.
+- The savepoint was created in a nested `db.transaction` block, which releases its savepoints when it ends.
+- The name is misspelled.
+
+Fixes:
+
+- Create the savepoint first: `db.savepoint("before_post")` before rolling back to it.
+- Keep the pair in the same block: a nested block's savepoints do not survive it.
+
+### `HS0232` — Bad Savepoint
+
+A `db.savepoint` or `db.rollback_to` call is malformed: it does not name exactly one savepoint, or the name is not a valid identifier.
+
+Example:
+
+```hardscript
+db.savepoint()
+```
+
+Common causes:
+
+- The call has no name, or more than one.
+- The name is not a string literal, so the compiler cannot check it.
+- The name contains characters outside `[A-Za-z_][A-Za-z0-9_]*`, which a savepoint name cannot carry into SQL.
+
+Fixes:
+
+- Pass exactly one name: `db.savepoint("before_post")`.
+- Write the name as a string literal using letters, digits and underscores, starting with a letter or underscore.
+
+### `HS0233` — Transaction Value
+
+`db.transaction { ... }` was used where a value was expected, but a transaction is an effect, not a value.
+
+Example:
+
+```hardscript
+u <- db.transaction {
+    User.create({ name: "ann" })
+}
+```
+
+Common causes:
+
+- The block was assigned to a variable or returned.
+- The block was passed as a call argument.
+
+Fixes:
+
+- Use the block as a statement: `db.transaction { ... }` on its own line.
+- Read back what the block wrote instead of capturing the block itself.
+
 ### `HS0301` — Import Cycle
 
 Two or more modules import each other (directly or transitively).

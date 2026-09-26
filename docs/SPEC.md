@@ -506,3 +506,138 @@ atom       ::= int | float | text | bool | ident
              | "pick" expr block-arm
              | (GET|POST|PUT|DELETE|PATCH) string (block-body)?
 ```
+
+---
+
+## 23. ORM (models at runtime)
+
+Models declared with the framework form (§11) map to database tables. A
+model's table defaults to the lowercased model name (`model User` → `user`);
+`model Name = table { ... }` pins the table name.
+
+```
+model User {
+    id    : Int @primary @auto_increment
+    email : Email
+    name  : String
+    age   : Int @default(18)
+}
+```
+
+Field attributes: `@primary`, `@auto_increment`, `@unique`, `@index`,
+`@nullable`, `@default(value)`, `@default(now())`, `@foreign(table.column)`,
+`@belongs_to`, `@has_many`, `@has_one`, `@many_to_many @through(table)`,
+`@created_at`, `@updated_at`.
+
+### 23.1 CRUD
+
+```
+u <- User.create({ email: "a@b.c", name: "Ada" })
+u <- User.find(1)
+u <- User.upsert({ id: 1, name: "Ada" })
+User.delete(1)
+found <- User.find_or_create_by({ email: "a@b.c", name: "Ada" })
+```
+
+`create` returns the row with its generated key. `find` returns one row or
+`nil`. `upsert` updates by key and inserts when the row is absent. A record
+read back can be written in place (`u <- User.find(1)` then `u.save()`,
+`u.touch()`, `u.destroy()`).
+
+### 23.2 Queries
+
+```
+adults <- User.where(age >= 18).order_by(age, desc).limit(10).all()
+one    <- User.where(email == "a@b.c").first()
+n      <- User.where(age >= 18).count()
+yes    <- User.where(email == "a@b.c").exists()
+teens  <- User.where_in(age, [13, 14, 15]).all()
+```
+
+Equality is `==`, as everywhere else in the language. `where` also takes the
+two-argument form `where(age, 20)` and a trailing operator string
+`where(age, 20, ">=")`. A query without a terminal reads nothing until `.all()`,
+`.first()`, `.count()` or `.exists()` ends it.
+
+### 23.3 Relationships
+
+```
+model Post {
+    id      : Int @primary @auto_increment
+    title   : String
+    user_id : Int @foreign(user.id)
+    user    : User @belongs_to
+    tags    : Tag @many_to_many @through(post_tag)
+}
+model User {
+    id    : Int @primary @auto_increment
+    posts : Post @has_many
+}
+```
+
+```
+posts <- user.posts.all()
+owner <- post.user.first()
+tags  <- post.tags.all()
+```
+
+`belongs_to` and `has_one` read one row; `has_many` and `many_to_many` read a
+list and need a list terminal (`.all()`). A many-to-many names its join table
+with `@through`, and the join table is declared as a model with a column per
+side (`post_id`, `tag_id`).
+
+### 23.4 Transactions
+
+```
+db.transaction {
+    User.create({ email: "a@b.c", name: "Ada" })
+    db.savepoint("before_post")
+    Post.create({ title: "hi", user_id: 1 })
+    db.rollback_to("before_post")
+}
+```
+
+The block commits when it completes and rolls back when an error escapes it.
+A nested block marks a savepoint instead of beginning, so an inner failure
+rolls back the inner block without killing the outer one. `db.savepoint` and
+`db.rollback_to` only appear inside a block, a rollback names a savepoint the
+same block created, and the block itself is a statement, not a value.
+
+### 23.5 Batches
+
+```
+users <- User.create_many([{ email: "a@b.c", name: "Ada" }, { email: "b@c.d", name: "Bo" }])
+users <- User.update_many([{ id: 1, name: "Ada" }])
+n     <- User.delete_many([1, 2, 3])
+users <- User.find_many([3, 1])
+```
+
+Every write batch runs in one transaction: a bad record fails the batch, not
+half of it. `update_many` needs each record to carry its key. `find_many`
+returns rows in the keys' order, skipping keys with no row.
+
+### 23.6 Migrations and seeds
+
+```
+hard migrate diff --name add_posts
+hard migrate up
+hard migrate down
+hard migrate status
+hard seed
+```
+
+`migrate diff` compares the project's models against the models embedded in
+the newest migration file and writes `migrations/NNNN_name.sql` with an up
+side and a down side generated together. `migrate up` applies pending
+migrations oldest first, each in its own transaction with its history row;
+`down` rolls back the newest first. The project names its database once:
+
+```
+[database]
+dialect = "sqlite"
+path = "app.db"
+```
+
+`dialect` is `"sqlite"` or `"postgres"`; PostgreSQL takes `url` instead of
+`path`. `hard seed [file]` runs seed files, each in one transaction.
+```
