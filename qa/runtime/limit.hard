@@ -1,0 +1,11 @@
+limit 100 requests / minute
+
+GET "/api" :: {
+    limit 10 requests / second sliding key "api"
+    <- "ok"
+}
+
+GET "/user" :: {
+    limit 5 requests / minute key "user"
+    <- "ok"
+}

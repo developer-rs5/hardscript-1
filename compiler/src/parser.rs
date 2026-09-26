@@ -94,6 +94,18 @@ fn sched_time(t: &str, span: Span) -> Result<(u8, u8, u8), Vec<Diag>> {
     Ok((h as u8, m as u8, s as u8))
 }
 
+/// Seconds per duration unit, shared by TTLs and rate windows: `10m` is 600
+/// whether it follows `ttl` or `/`.
+fn duration_unit_secs(unit: &str) -> Option<i64> {
+    match unit {
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(60),
+        "h" | "hour" | "hours" => Some(3600),
+        "d" | "day" | "days" => Some(86400),
+        _ => None,
+    }
+}
+
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Parser {
         Parser {
@@ -486,12 +498,9 @@ impl Parser {
                 .with_code(cat::EXPECTED_TOKEN)])
             }
         };
-        let mult: i64 = match unit.as_str() {
-            "s" | "sec" | "secs" | "second" | "seconds" => 1,
-            "m" | "min" | "mins" | "minute" | "minutes" => 60,
-            "h" | "hour" | "hours" => 3600,
-            "d" | "day" | "days" => 86400,
-            _ => {
+        let mult: i64 = match duration_unit_secs(unit.as_str()) {
+            Some(m) => m,
+            None => {
                 return Err(vec![Diag::new(
                     ErrorKind::Parse,
                     format!("unknown duration unit `{unit}`"),
@@ -639,6 +648,112 @@ impl Parser {
     /// The job must be declared above: its parameter names become the body's
     /// bindings. Codegen registers every `__worker_*` function in `main`.
     /// Workers live at the top level, like the functions they lower to.
+    /// `limit 100 requests / minute [sliding] [key expr]`: cap how often the
+    /// enclosing scope runs. Desugars to a `ratelimit.check` call carrying a
+    /// position-derived identity (shared by every copy, so top-level limits
+    /// collected into route prologues stay one bucket), the algorithm, budget
+    /// and window, plus the key expression or nil for client IP.
+    fn parse_limit(&mut self) -> Result<Expr, Vec<Diag>> {
+        let sp = self.span();
+        self.advance(); // `limit`
+        let n = match self.peek().clone() {
+            Tok::Int(n) => {
+                self.advance();
+                n
+            }
+            other => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("expected a request count after `limit`, found {other}"),
+                    self.span(),
+                    "Write `limit 100 requests / minute`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        };
+        if n <= 0 {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                "a rate limit budget must be 1 or more".to_string(),
+                sp,
+                "Write `limit 100 requests / minute`.".to_string(),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]);
+        }
+        match self.peek().clone() {
+            Tok::Ident(w) if w == "requests" => {
+                self.advance();
+            }
+            other => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("expected `requests` after the count, found {other}"),
+                    self.span(),
+                    "Write `limit 100 requests / minute`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        }
+        self.expect_sym(Sym::Slash, "between `requests` and the window")?;
+        let per_ms = match self.peek().clone() {
+            Tok::Ident(u) => {
+                let u = u.clone();
+                self.advance();
+                match duration_unit_secs(&u.to_lowercase()) {
+                    Some(s) => s * 1000,
+                    None => {
+                        return Err(vec![Diag::new(
+                            ErrorKind::Parse,
+                            format!("unknown rate window `{u}`"),
+                            self.span(),
+                            "Use a second, minute, hour or day: `/ second`, `/ minute`, `/ hour`, `/ day`.",
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)])
+                    }
+                }
+            }
+            other => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("expected a rate window after `/`, found {other}"),
+                    self.span(),
+                    "Use a second, minute, hour or day: `/ second`, `/ minute`, `/ hour`, `/ day`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        };
+        let sliding = if matches!(self.peek(), Tok::Ident(w) if w == "sliding") {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let key = if matches!(self.peek(), Tok::Ident(w) if w == "key") {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let id = format!("__limit_{}_{}", sp.line, sp.col);
+        let callee = Expr::Member(
+            Box::new(Expr::Ident("ratelimit".to_string(), sp)),
+            "check".to_string(),
+            sp,
+        );
+        // No key clause means client IP: codegen substitutes `req.peer_ip`
+        // for the missing fifth argument, so the desugared call carries four.
+        let mut args = vec![
+            Expr::Str(id, sp),
+            Expr::Int(if sliding { 1 } else { 0 }, sp),
+            Expr::Int(n, sp),
+            Expr::Int(per_ms, sp),
+        ];
+        if let Some(k) = key {
+            args.push(k);
+        }
+        Ok(Expr::Call { callee: Box::new(callee), args, span: sp })
+    }
+
     fn parse_worker(&mut self) -> Result<Stmt, Vec<Diag>> {
         let sp = self.span();
         self.advance(); // `worker`
@@ -807,9 +922,23 @@ impl Parser {
                 return self.parse_worker();
             }
         }
+        // `limit 100 requests / minute [sliding] [key expr]`: recognized by
+        // shape (the word, a count, `requests`, a slash). Anything else
+        // starting with `limit` parses as an expression, exactly as before.
+        if matches!(self.peek(), Tok::Ident(n) if n == "limit") {
+            if matches!(self.peek_at(1), Tok::Int(_)) {
+                if matches!(self.peek_at(2), Tok::Ident(n) if n == "requests") {
+                    if matches!(self.peek_at(3), Tok::Sym(Sym::Slash)) {
+                        let e = self.parse_limit()?;
+                        return Ok(Stmt::ExprStmt(e));
+                    }
+                }
+            }
+        }
         // `every 1h { }`, `every day at "03:00" [timezone "Z"] { }`,
-        // `every monday at "09:00" { }`, `every startup { }`. Anything else
-        // starting with `every` parses as an expression, exactly as before.
+        // `every monday at "09:00" { }`, `every startup { }`: recognized by
+        // shape; anything else starting with `every` parses as an expression,
+        // exactly as before.
         if matches!(self.peek(), Tok::Ident(n) if n == "every") {
             match self.peek_at(1) {
                 Tok::Int(_) => return self.parse_every(),
@@ -2505,6 +2634,57 @@ mod tests {
         // `every` stays an ordinary identifier: a variable read is not a
         // declaration, the same boundary `cache` keeps.
         let toks: Vec<Token> = crate::Lexer::new("every\n").tokenize().unwrap();
+        let prog = crate::Parser::new(toks).parse_program().unwrap();
+        assert_eq!(prog.stmts.len(), 1);
+    }
+
+    fn limit_call(src: &str) -> (String, i64, i64, i64, usize) {
+        // (limiter id, algo, rate, window_ms, arg count) of the desugared call.
+        let prog = crate::frontend(src, "t.hard").expect("parses");
+        let call = match &prog.stmts[0] {
+            Stmt::ExprStmt(Expr::Call { callee, args, .. }) => (callee.as_ref(), args),
+            other => panic!("expected a desugared call, got {other:?}"),
+        };
+        let (base, method) = match call.0 {
+            Expr::Member(b, m, _) => (b.as_ref(), m.clone()),
+            other => panic!("expected ratelimit.check, got {other:?}"),
+        };
+        assert!(matches!(base, Expr::Ident(n, _) if n == "ratelimit"));
+        assert_eq!(method, "check");
+        let str_arg = |i: usize| match &call.1[i] {
+            Expr::Str(s, _) => s.clone(),
+            other => panic!("expected a string, got {other:?}"),
+        };
+        let int_arg = |i: usize| match &call.1[i] {
+            Expr::Int(n, _) => *n,
+            other => panic!("expected an integer, got {other:?}"),
+        };
+        (str_arg(0), int_arg(1), int_arg(2), int_arg(3), call.1.len())
+    }
+
+    #[test]
+    fn limit_desugars_with_position_identity() {
+        let (id, algo, rate, per, nargs) = limit_call("limit 100 requests / minute\n");
+        assert_eq!(id, "__limit_1_1");
+        assert_eq!((algo, rate, per, nargs), (0, 100, 60000, 4));
+        let (_, algo, rate, per, nargs) = limit_call("limit 10 requests / second sliding key user\n");
+        assert_eq!((algo, rate, per, nargs), (1, 10, 1000, 5));
+        let (_, _, _, per, _) = limit_call("limit 5 requests / hour\n");
+        assert_eq!(per, 3600 * 1000);
+    }
+
+    #[test]
+    fn limit_rejects_bad_shapes() {
+        assert!(!parse_errs("limit 0 requests / minute\n").is_empty(), "zero budget");
+        assert!(!parse_errs("limit 100 request / minute\n").is_empty(), "singular");
+        assert!(!parse_errs("limit 100 requests minute\n").is_empty(), "missing slash");
+        assert!(!parse_errs("limit 100 requests / fortnight\n").is_empty(), "bad window");
+        assert!(!parse_errs("limit 100 requests / minute key\n").is_empty(), "key needs a value");
+    }
+
+    #[test]
+    fn limit_without_shape_is_not_a_declaration() {
+        let toks: Vec<Token> = crate::Lexer::new("limit\n").tokenize().unwrap();
         let prog = crate::Parser::new(toks).parse_program().unwrap();
         assert_eq!(prog.stmts.len(), 1);
     }

@@ -72,6 +72,22 @@ fn cstring(s: &str) -> String {
     format!("{:?}", s)
 }
 
+/// A desugared `ratelimit.check(..)` call (or one written by hand): the shape
+/// the parser produces for `limit ...`, collected for route prologues when it
+/// appears at the top level.
+fn is_ratelimit_check(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => match callee.as_ref() {
+            Expr::Member(base, name, _) => {
+                matches!(base.as_ref(), Expr::Ident(root, _) if root == "ratelimit")
+                    && name == "check"
+                    && (args.len() == 4 || args.len() == 5)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
 /// A desugared `queue.enqueue(..)` call (or one written by hand): the shape
 /// the parser produces for `queue Name(..)`, collected for `main` when it
 /// appears at the top level.
@@ -300,6 +316,9 @@ impl Codegen {
         let mut job_decls: Vec<(String, Vec<String>)> = Vec::new();
         let mut top_enqueues: Vec<String> = Vec::new();
         let mut worker_regs: Vec<String> = Vec::new();
+        // Top-level `limit ...` declarations guard every route: one shared
+        // bucket per declaration, checked before anything else runs.
+        let mut global_limits: Vec<String> = Vec::new();
         // Top-level `every ...` schedules register in `main` with their
         // lowered functions.
         let mut sched_regs: Vec<String> = Vec::new();
@@ -349,6 +368,16 @@ impl Codegen {
                 Stmt::ExprStmt(e) if is_queue_enqueue_call(e) => {
                     top_enqueues.push(self.expr(e));
                 }
+                Stmt::ExprStmt(e) if is_ratelimit_check(e) => {
+                    // Rendered for route prologues, where a request exists:
+                    // temporarily borrow the route context so the
+                    // request-gated builtin lowers instead of erroring.
+                    let outer = self.ctx;
+                    self.ctx = Ctx::Route;
+                    let rendered = self.expr(e);
+                    self.ctx = outer;
+                    global_limits.push(rendered);
+                }
                 _ => {}
             }
         }
@@ -380,7 +409,7 @@ impl Codegen {
             self.emit_orm_models(&schema);
         }
         for (i, r) in routes.iter().enumerate() {
-            self.emit_route(r, i);
+            self.emit_route(r, i, &global_limits);
         }
         for (i, (name, body)) in mws.iter().zip(mw_bodies.iter()).enumerate() {
             self.emit_middleware(name, body, i);
@@ -893,7 +922,7 @@ impl Codegen {
         None
     }
 
-    fn emit_route(&mut self, r: &RouteDef, idx: usize) {
+    fn emit_route(&mut self, r: &RouteDef, idx: usize, global_limits: &[String]) {
         // Locals do not outlive their body, so the record types start empty.
         self.record_types.clear();
         let line = format!("static hs::Response route_{idx}(const hs::Request& req) {{");
@@ -901,6 +930,11 @@ impl Codegen {
         self.ind += 1;
         self.wln("try {");
         self.ind += 1;
+        // Global limits run before everything, including auth: shedding load
+        // is cheaper than authenticating it.
+        for check in global_limits {
+            self.wln(&format!("(void)({check});"));
+        }
         // `protect` runs before parameter binding, so a request without a
         // valid token never reaches body validation and never sees the field
         // names in the schema.
@@ -1586,7 +1620,8 @@ impl Codegen {
                 | ("auth", "bearer")
                 | ("auth", "require")
                 | ("auth", "optional")
-                | ("session", _))
+                | ("session", _)
+                | ("ratelimit", _))
     }
 
     fn builtin(&mut self, module: &str, name: &str, args: &[Expr], span: Span) -> Option<String> {
@@ -1696,6 +1731,23 @@ impl Codegen {
             (_, _) if module == "queue" && name == "enqueue" => {
                 let (a, b, c) = (self.arg_at(args, 0), self.arg_at(args, 1), self.arg_at(args, 2));
                 Some(format!("hs::queue_enqueue({a}, {b}, {c})"))
+            }
+            // ratelimit (M6.5): `limit ...` desugars to this form, which
+            // users may also write directly. Missing keys become client IP;
+            // the check throws the 429 itself.
+            (_, _) if module == "ratelimit" && name == "check" => {
+                let id = self.ttx(args, 0);
+                let algo = self.tin(args, 1);
+                let rate = self.tin(args, 2);
+                let per = self.tin(args, 3);
+                let key = if args.len() > 4 {
+                    self.arg_at(args, 4)
+                } else {
+                    "hs::Val::nil()".to_string()
+                };
+                Some(format!(
+                    "hs::limit_check_or_abort({id}, (int)({algo}), {rate}, {per}, hs::limit_key_or_ip({key}, req.peer_ip))"
+                ))
             }
             (_, _) if module == "json" && name == "stringify" => {
                 Some(format!("hs::Val::text(hs::to_json({}))", self.arg_at(args, 0)))

@@ -1,0 +1,6 @@
+limit 100 requests / minute
+
+GET "/api" :: {
+    limit 10 requests / second sliding key "api"
+    <- "ok"
+}

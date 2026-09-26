@@ -60,3 +60,5 @@ s001	build main.hard	0	sched	build a schedule program
 s002	fmt main.hard	0	sched	format schedule declarations
 ss001	build main.hard	0	session	build a session program
 ss002	fmt main.hard	0	session	format session calls
+rl001	build main.hard	0	limit	build a limit program
+rl002	fmt main.hard	0	limit	format limit declarations

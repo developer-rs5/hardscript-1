@@ -1,0 +1,2 @@
+hs::limit_check_or_abort(hs::to_text(hs::Val::text("__limit_1_1")).sv, (int)(hs::to_int(hs::Val::int_(0)).iv), hs::to_int(hs::Val::int_(100)).iv, hs::to_int(hs::Val::int_(60000)).iv, hs::limit_key_or_ip(hs::Val::nil(), req.peer_ip))
+hs::limit_check_or_abort(hs::to_text(hs::Val::text("__limit_4_5")).sv, (int)(hs::to_int(hs::Val::int_(1)).iv), hs::to_int(hs::Val::int_(10)).iv, hs::to_int(hs::Val::int_(1000)).iv, hs::limit_key_or_ip(hs::Val::text("api"), req.peer_ip))

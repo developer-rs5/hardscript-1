@@ -86,6 +86,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_session.hpp"),
     ),
     (
+        "hs_runtime_ratelimit.hpp",
+        include_str!("../../runtime/hs_runtime_ratelimit.hpp"),
+    ),
+    (
         "hs_runtime_util.hpp",
         include_str!("../../runtime/hs_runtime_util.hpp"),
     ),

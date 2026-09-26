@@ -1,5 +1,6 @@
 #ifndef HS_RUNTIME_HTTP_HPP
 #define HS_RUNTIME_HTTP_HPP
+#include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include "hs_runtime_crypto.hpp"
 #include "hs_runtime_value.hpp"
@@ -91,6 +92,9 @@ struct Hdr {
 
 struct Request {
     std::string method;   // small copy (verb), fine
+    /// Peer address as text, filled once per connection ("203.0.113.7").
+    /// Empty for in-process calls, which have no socket.
+    std::string peer_ip;
     std::string_view path;    // decoded path, no query — view into conn buffer
     std::string_view query;   // raw query string — view into conn buffer
     std::string_view body;    // request body — view into conn buffer
@@ -932,9 +936,22 @@ static void handle_connection(int fd, Server& srv, hs::Arena& arena, hs::Arena::
     std::string buf;
     buf.reserve(4096);
     unsigned long long nreq = 0;
+    // The peer address, once per connection: rate limiters and logs key on
+    // it, and a syscall per request would be pure overhead on keep-alive.
+    std::string peer_ip;
+    {
+        struct sockaddr_storage ss;
+        socklen_t slen = sizeof ss;
+        if (getpeername(fd, (struct sockaddr*)&ss, &slen) == 0 && ss.ss_family == AF_INET) {
+            char text[INET_ADDRSTRLEN] = {};
+            const struct sockaddr_in* in = (const struct sockaddr_in*)&ss;
+            if (inet_ntop(AF_INET, &in->sin_addr, text, sizeof text)) peer_ip = text;
+        }
+    }
     for (;;) {
         if (!hs_fill_request(fd, buf, 5000)) break; // EOF / timeout / error
         Request req;
+        req.peer_ip = peer_ip;
         size_t consumed = 0;
         bool keep = false;
         if (!hs_parse_request(buf, req, consumed, keep)) break;

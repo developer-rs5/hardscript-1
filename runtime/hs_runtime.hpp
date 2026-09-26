@@ -20,6 +20,7 @@
 //   hs_runtime_queue.hpp       background job queue: memory + SQL backends (M6.2)
 //   hs_runtime_schedule.hpp    schedule engine: intervals, cron, startup (M6.3)
 //   hs_runtime_session.hpp     cookie session manager: sign, flash, CSRF (M6.4)
+//   hs_runtime_ratelimit.hpp   rate limiter: token bucket + sliding window (M6.5)
 //   hs_runtime_sqlite.hpp      SQLite backend, libsqlite3 loaded at run time
 //   hs_runtime_pgsql.hpp       PostgreSQL backend, extended query protocol
 //   hs_runtime_util.hpp      CLI/args helpers + codegen glue (hs_respond, tests)
@@ -44,6 +45,7 @@
 #include "hs_runtime_queue.hpp"
 #include "hs_runtime_schedule.hpp"
 #include "hs_runtime_session.hpp"
+#include "hs_runtime_ratelimit.hpp"
 #include "hs_runtime_sqlite.hpp"
 #include "hs_runtime_pgsql.hpp"
 #include "hs_runtime_util.hpp"
