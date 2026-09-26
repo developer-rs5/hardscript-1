@@ -126,10 +126,10 @@ void a_join_is_emitted_between_the_table_and_the_where() {
 void a_qualified_column_in_the_join_is_quoted_per_part() {
     qa::FakeBackend b;
     (void)hs::OrmQuery(&post_model())
-        .of_record(user(7), "id", "post_tag.tag_id", "INNER JOIN \"post_tag\" ON 1 = 1")
+        .of_record(user(7), "id", "post_tag.post_id", "INNER JOIN \"post_tag\" ON 1 = 1")
         .all(&b);
     CHECK_EQ(b.last_sql(),
-             post_sel() + " INNER JOIN \"post_tag\" ON 1 = 1 WHERE \"post_tag\".\"tag_id\" = ?",
+             post_sel() + " INNER JOIN \"post_tag\" ON 1 = 1 WHERE \"post_tag\".\"post_id\" = ?",
              "a qualified name is two identifiers, not one name with a dot in it");
 }
 
@@ -217,9 +217,9 @@ void a_join_selects_the_target_columns_and_not_the_join_tables() {
     // listed are the target's, whatever the join brought in.
     qa::FakeBackend b;
     const std::string join = "INNER JOIN \"post_tag\" ON \"post_tag\".\"tag_id\" = \"tag\".\"id\"";
-    (void)hs::OrmQuery(&tag_model()).of_record(post(3), "id", "post_tag.tag_id", join).all(&b);
+    (void)hs::OrmQuery(&tag_model()).of_record(post(3), "id", "post_tag.post_id", join).all(&b);
     CHECK_EQ(b.last_sql(),
-             "SELECT \"id\", \"name\" FROM \"tag\" " + join + " WHERE \"post_tag\".\"tag_id\" = ?",
+             "SELECT \"id\", \"name\" FROM \"tag\" " + join + " WHERE \"post_tag\".\"post_id\" = ?",
              "the target's own columns, and the junction's only in the predicate");
 }
 

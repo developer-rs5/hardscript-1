@@ -20,6 +20,7 @@ FAILED=0
 TOTAL=0
 
 CXX="${CXX:-g++}"
+# -ldl is what the SQLite backend needs on Linux, where dlopen is not in libc.
 CXXFLAGS="-std=c++17 -O1 -pthread -Werror"
 
 TMP=$(mktemp -d)
@@ -31,7 +32,7 @@ for f in "$DIR"/*.cpp; do
     name="orm-$(basename "${f%.cpp}")"
     TOTAL=$((TOTAL + 1))
 
-    if ! $CXX $CXXFLAGS -I "$ROOT/runtime" -I "$DIR" "$f" -o "$TMP/$name" 2>"$TMP/err"; then
+    if ! $CXX $CXXFLAGS -I "$ROOT/runtime" -I "$DIR" "$f" -o "$TMP/$name" -ldl 2>"$TMP/err"; then
         echo "orm: FAIL $name (compile: $(head -3 "$TMP/err" | tr '\n' ' '))"
         FAILED=$((FAILED + 1))
         continue

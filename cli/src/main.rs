@@ -44,6 +44,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_postgres.hpp"),
     ),
     (
+        "hs_runtime_sqlite.hpp",
+        include_str!("../../runtime/hs_runtime_sqlite.hpp"),
+    ),
+    (
         "hs_runtime_validation.hpp",
         include_str!("../../runtime/hs_runtime_validation.hpp"),
     ),

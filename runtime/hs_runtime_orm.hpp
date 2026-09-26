@@ -378,6 +378,16 @@ struct OrmQuery {
                 sql += ")";
                 continue;
             }
+            // A comparison against nothing is a question SQL answers with
+            // `NULL`, and `col = NULL` is never true -- so asking for a row
+            // whose column is null by writing a bound nil would silently match
+            // nothing. `IS NULL` is what the programmer meant, and it binds
+            // nothing at all.
+            if ((c.op == CondOp::Eq || c.op == CondOp::Ne) && c.values.size() == 1 &&
+                c.values[0].is_nil()) {
+                sql += col + (c.op == CondOp::Eq ? " IS NULL" : " IS NOT NULL");
+                continue;
+            }
             sql += col;
             if (c.op == CondOp::Like) {
                 // ILIKE on PostgreSQL, LIKE on SQLite: SQLite's LIKE is already
@@ -467,6 +477,11 @@ struct OrmQuery {
                 if (const Val* pv = parent.find(c.parent_col)) params.push_back(*pv);
                 continue;
             }
+            // `IS NULL` binds nothing, so a nil value is not a parameter here
+            // either. The two have to agree or the placeholders shift.
+            if ((c.op == CondOp::Eq || c.op == CondOp::Ne) && c.values.size() == 1 &&
+                c.values[0].is_nil())
+                continue;
             for (const auto& v : c.values) params.push_back(v);
         }
         DbDialect d = b->dialect();
@@ -517,8 +532,12 @@ struct OrmQuery {
         std::vector<std::string> bound;
         where_sql(b->dialect(), sql, bound);
         std::vector<Val> params;
-        for (const auto& c : conds)
+        for (const auto& c : conds) {
+            if ((c.op == CondOp::Eq || c.op == CondOp::Ne) && c.values.size() == 1 &&
+                c.values[0].is_nil())
+                continue;
             for (const auto& v : c.values) params.push_back(v);
+        }
         DbResult r = b->run(sql, params);
         if (r.rows.empty() || r.rows[0].empty()) return Val::int_(0);
         const Val& v = r.rows[0][0];

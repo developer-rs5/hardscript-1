@@ -2324,8 +2324,11 @@ pub fn resolve_join(schema: &Schema, rel: &Relation) -> Result<JoinPath, Vec<Dia
                     "Declare the join table as a model, so its columns are real columns.",
                 )]);
             };
-            let from_side = format!("{}_id", singular_of(&rel.from.to_lowercase()));
-            let to_side = format!("{}_id", singular_of(&rel.to.to_lowercase()));
+            // The junction's two columns are named after the two models, and
+            // named after their *tables*: `model BlogPost` is the table
+            // `blog_post`, so its column is `blog_post_id`.
+            let from_side = format!("{}_id", singular_of(&from.table));
+            let to_side = format!("{}_id", singular_of(&to.table));
             for c in [&from_side, &to_side] {
                 if join.column(c).is_none() {
                     return Err(vec![no_key(
@@ -2359,9 +2362,11 @@ pub fn resolve_join(schema: &Schema, rel: &Relation) -> Result<JoinPath, Vec<Dia
                 to: rel.to.clone(),
                 field: rel.field.clone(),
                 parent_col: pk.to_string(),
-                // Qualified, because the comparison happens on the join table
-                // rather than on the target.
-                target_col: format!("{through}.{to_side}"),
+                // The predicate is on the *parent's* side of the junction. The
+                // other column is already spoken for by the join condition, so
+                // comparing the target's side here would ask the same question
+                // twice and match only one row.
+                target_col: format!("{through}.{from_side}"),
                 join: format!(
                     "INNER JOIN {jt} ON {jt}.{to_side} = {tt}.{to_pk}",
                     jt = quote_ident(Dialect::Sqlite, &join.table),
@@ -2658,7 +2663,27 @@ mod tests {
         let rel = s.relations_from("Post").find(|r| r.field == "tags").unwrap();
         let j = resolve_join(&s, rel).expect("join");
         assert_eq!(j.parent_col, "id");
-        assert_eq!(j.target_col, "post_tag.tag_id", "the comparison is on the join table");
+        assert_eq!(j.target_col, "post_tag.post_id", "the comparison is on the parent's side of the junction");
+        assert_eq!(j.join, "INNER JOIN \"post_tag\" ON \"post_tag\".\"tag_id\" = \"tag\".\"id\"");
+    }
+
+    #[test]
+    fn a_junction_column_is_named_after_the_table_not_the_model() {
+        // `model BlogPost = blog_post` is a table called `blog_post`, so the
+        // column pointing at it is `blog_post_id`. Taking the name from the
+        // model would look for `blogpost_id`, which is a column nobody wrote.
+        let s = schema_of(
+            r#"
+            model BlogPost = blog_post { id : Int @primary, tags : Tag @many_to_many @through(post_tag) }
+            model Tag { id : Int @primary, name : String }
+            model post_tag { blog_post_id : Int, tag_id : Int }
+            "#,
+        )
+        .expect("schema");
+        let rel = s.relations_from("BlogPost").find(|r| r.field == "tags").unwrap();
+        let j = resolve_join(&s, rel).expect("join");
+        assert_eq!(j.parent_col, "id");
+        assert_eq!(j.target_col, "post_tag.blog_post_id");
         assert_eq!(j.join, "INNER JOIN \"post_tag\" ON \"post_tag\".\"tag_id\" = \"tag\".\"id\"");
     }
 
