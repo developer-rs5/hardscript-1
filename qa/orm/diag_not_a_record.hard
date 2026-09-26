@@ -1,0 +1,13 @@
+bring http
+app @3133
+
+model User {
+    id    : Int @primary @auto_increment
+    email : Email
+    name  : String
+}
+
+GET "/n" :: {
+    n <- User.count()
+    <- n.save()
+}

@@ -578,7 +578,8 @@ pub fn index_name(table: &str, column: &str) -> String {
     format!("idx_{table}_{column}")
 }
 
-fn err(span: Span, code: u16, msg: impl Into<String>, fix: impl Into<String>) -> Diag {
+/// A diagnostic with an ORM code and a suggested fix.
+pub fn err(span: Span, code: u16, msg: impl Into<String>, fix: impl Into<String>) -> Diag {
     Diag::new(ErrorKind::Type, msg, span, fix).with_code(code)
 }
 
@@ -1238,7 +1239,7 @@ impl QueryPlan {
 
 /// Methods that finish a query. Anything after one of these is a mistake,
 /// because the result is rows, not a builder.
-fn terminal_of(name: &str) -> Option<Terminal> {
+pub fn terminal_of(name: &str) -> Option<Terminal> {
     Some(match name {
         "all" => Terminal::All,
         "first" => Terminal::First,
@@ -1482,7 +1483,7 @@ pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>>
                     *sp,
                     cat::ORM_BAD_QUERY,
                     format!("`{other}` is not a query method."),
-                    "Use all, first, count, exists, where, where_like, where_in, limit, offset, or order_by.",
+                    "A query uses all, first, count, exists, where, where_like, where_in, limit, offset, or order_by; a write uses create, upsert, delete, find_or_create_by, save, touch, or destroy.",
                 ));
             }
         }
@@ -1497,6 +1498,286 @@ pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>>
         steps,
         terminal: terminal.unwrap_or(Terminal::All),
     })
+}
+
+// ---- writes (M5.3.3) ------------------------------------------------------
+
+/// The fields of a write's object literal, as `(name, value, span)`.
+pub type WriteFields = Vec<(String, Expr, Span)>;
+
+/// The field names of a write, which is what a test usually wants to compare.
+pub fn write_field_names(fields: &WriteFields) -> Vec<&str> {
+    fields.iter().map(|(n, _, _)| n.as_str()).collect()
+}
+
+/// A write against one model: `Model.create(..)`, `Model.upsert(..)`,
+/// `Model.delete(..)`, `Model.find_or_create_by(..)`, and a record's own
+/// `save`, `touch` and `destroy`.
+///
+/// A write is validated the same way a read is. The object literal is the
+/// interesting part: its keys are checked against the model's columns, and a
+/// column with neither a value nor a database default has to be an error here
+/// rather than a constraint violation the caller discovers in production.
+#[derive(Debug, Clone)]
+pub enum WriteOp {
+    /// `User.create({..})` — insert.
+    Create(WriteFields),
+    /// `User.upsert({..})` — update by key, insert when there is no such row.
+    Upsert(WriteFields),
+    /// `User.delete(key)` — remove by key.
+    DeleteKey,
+    /// `User.find_or_create_by({..})` — read by attributes, insert if absent.
+    FindOrCreate(WriteFields),
+    /// `record.save()` — update the row it came from, or insert when it has
+    /// no key yet.
+    Save,
+    /// `record.touch()` — refresh its `@updated_at`.
+    Touch,
+    /// `record.destroy()` — delete the row it came from.
+    Destroy,
+}
+
+#[derive(Debug, Clone)]
+pub struct WritePlan {
+    pub model: String,
+    pub table: String,
+    pub op: WriteOp,
+    /// For a record method, the model is known from the object's type rather
+    /// than from the root of the chain.
+    pub on_record: bool,
+    pub span: Span,
+}
+
+/// Is this a write rather than a read? The two are told apart by their
+/// methods, so a chain is classified before it is validated.
+pub fn is_orm_write_method(name: &str) -> bool {
+    matches!(name, "create" | "upsert" | "delete" | "find_or_create_by" | "save" | "touch" | "destroy")
+}
+
+pub fn is_orm_write_method_on_record(name: &str) -> bool {
+    matches!(name, "save" | "touch" | "destroy")
+}
+
+/// A one-method call like `record.save()`, if that is what `call` is.
+pub fn record_write(call: &Expr) -> Option<(String, Vec<Expr>, Span)> {
+    let Expr::Call { callee, args, span } = call else { return None };
+    let Expr::Member(base, name, _) = callee.as_ref() else { return None };
+    // Only a bare name can be a record: `req.body.save()` is something else.
+    if !matches!(base.as_ref(), Expr::Ident(..)) {
+        return None;
+    }
+    if !is_orm_write_method_on_record(name) {
+        return None;
+    }
+    Some((name.clone(), args.clone(), *span))
+}
+
+/// Validate a write, given the model it targets.
+///
+/// `model` is resolved by the caller: for `Model.create(..)` from the root
+/// identifier, for `record.save()` from the record's declared type.
+pub fn parse_write(model: &str, method: &str, args: &[Expr], on_record: bool, schema: &Schema) -> Result<WritePlan, Vec<Diag>> {
+    let Some(table) = schema.table(model) else {
+        return Err(vec![err(
+            args.first().map(|a| a.span()).unwrap_or_default(),
+            cat::ORM_UNKNOWN_MODEL,
+            format!("no model named `{model}`."),
+            "Check the name, or declare the model before using it.",
+        )]);
+    };
+    let span = args.first().map(|a| a.span()).unwrap_or_default();
+    let mut diags: Vec<Diag> = Vec::new();
+
+    let op = if on_record {
+        match method {
+            "save" if !args.is_empty() => {
+                diags.push(arity_err(span, method, 0, args.len()));
+                WriteOp::Save
+            }
+            "save" => WriteOp::Save,
+            "touch" if !args.is_empty() => {
+                diags.push(arity_err(span, method, 0, args.len()));
+                WriteOp::Touch
+            }
+            "touch" => WriteOp::Touch,
+            "destroy" if !args.is_empty() => {
+                diags.push(arity_err(span, method, 0, args.len()));
+                WriteOp::Destroy
+            }
+            "destroy" => WriteOp::Destroy,
+            other => {
+                diags.push(bad_write(span, other));
+                WriteOp::Save
+            }
+        }
+    } else {
+        match method {
+            "create" | "upsert" | "find_or_create_by" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(span, method, 1, args.len()));
+                    WriteOp::Create(Vec::new())
+                } else {
+                    // Only a create has to be complete: an upsert updates the
+                    // fields it is given, and a find names attributes rather
+                    // than a whole row.
+                    let fields = check_write_fields(model, table, &args[0], &mut diags, method);
+                    match method {
+                        "create" => WriteOp::Create(fields),
+                        "upsert" => WriteOp::Upsert(fields),
+                        _ => WriteOp::FindOrCreate(fields),
+                    }
+                }
+            }
+            "delete" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(span, method, 1, args.len()));
+                }
+                WriteOp::DeleteKey
+            }
+            other => {
+                diags.push(bad_write(span, other));
+                WriteOp::DeleteKey
+            }
+        }
+    };
+
+    if !diags.is_empty() {
+        return Err(diags);
+    }
+    Ok(WritePlan { model: model.to_string(), table: table.table.clone(), op, on_record, span })
+}
+
+fn bad_write(span: Span, name: &str) -> Diag {
+    err(
+        span,
+        cat::ORM_BAD_QUERY,
+        format!("`{name}` is not a write method."),
+        "Use `create`, `upsert`, `delete` or `find_or_create_by` on a model, or `save`, `touch` and `destroy` on a record.",
+    )
+}
+
+/// How much of a row a write's object has to carry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WriteCompleteness {
+    /// `create` — every column the database will not fill in.
+    Complete,
+    /// `upsert` — the fields being changed; the rest are left alone.
+    Partial,
+    /// `find_or_create_by` — attributes to match on, and the row to insert if
+    /// nothing matches, so it is complete enough to insert.
+    Attributes,
+}
+
+/// Check an object literal's keys against the model.
+fn check_write_fields(
+    model: &str,
+    table: &TableDef,
+    arg: &Expr,
+    diags: &mut Vec<Diag>,
+    method: &str,
+) -> WriteFields {
+    let completeness = match method {
+        "upsert" => WriteCompleteness::Partial,
+        "find_or_create_by" => WriteCompleteness::Attributes,
+        _ => WriteCompleteness::Complete,
+    };
+    // An upsert identifies its row *by* the key, so naming it is the point.
+    let key_is_writable = completeness == WriteCompleteness::Partial;
+    let require_all = completeness != WriteCompleteness::Partial;
+    let Expr::Obj(fields, span) = arg else {
+        diags.push(err(
+            arg.span(),
+            cat::ORM_BAD_QUERY,
+            format!("`{model}` writes take an object of column values."),
+            "Write `{ column: value }`, naming the model's fields.",
+        ));
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Expr, Span)> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for (name, value) in fields {
+        let fsp = value.span();
+        let Some(col) = table.column(name) else {
+            diags.push(err(
+                fsp,
+                cat::ORM_UNKNOWN_COLUMN,
+                format!("`{model}` has no field `{name}`."),
+                suggest_field(table, name),
+            ));
+            continue;
+        };
+        if seen.contains(&name.as_str()) {
+            diags.push(err(
+                fsp,
+                cat::ORM_DUPLICATE_COLUMN,
+                format!("`{name}` is given twice."),
+                "Keep one value per field.",
+            ));
+            continue;
+        }
+        // A value for a generated column is refused on a key the database
+        // owns: an insert that names its own auto-increment key is either
+        // ignored or a constraint violation, depending on the backend.
+        if col.auto_increment && !key_is_writable {
+            diags.push(err(
+                fsp,
+                cat::ORM_BAD_DEFAULT,
+                format!("`{model}.{name}` is generated by the database."),
+                "Leave the field out and read it back from the created record, or use `upsert` to name the row.",
+            ));
+            continue;
+        }
+        seen.push(name);
+        out.push((name.clone(), value.clone(), fsp));
+    }
+
+    if require_all {
+        for col in &table.columns {
+            if col.required_clause() && !seen.contains(&col.name.as_str()) {
+                diags.push(err(
+                    *span,
+                    cat::ORM_MISSING_FIELD,
+                    format!("`{model}.{}` has no default, so a write must give it a value.", col.name),
+                    format!("Add `{}` to the object, or give the field a default.", col.name),
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn suggest_field(table: &TableDef, name: &str) -> String {
+    let mut best: Option<(&str, usize)> = None;
+    for col in &table.columns {
+        let d = edit_distance(name, &col.name);
+        if d <= 2 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((&col.name, d));
+        }
+    }
+    match best {
+        Some((n, _)) => format!("Did you mean `{n}`?"),
+        None => format!("`{}` has: {}.", table.model, column_list(table)),
+    }
+}
+
+fn column_list(table: &TableDef) -> String {
+    table.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 fn arity_err(span: Span, name: &str, want: usize, got: usize) -> Diag {
@@ -1665,6 +1946,231 @@ mod tests {
         let mut prog = crate::frontend(src, "test.hard").expect("parse");
         prog.models = Vec::new();
         prog
+    }
+
+    // ---------------- writes (M5.3.3) ----------------
+
+    const WRITE_SRC: &str = r#"
+        model User {
+            id : Int @primary @auto_increment
+            email : Email
+            name : String
+            age : Int @default(18)
+            updated : Time @updated_at
+        }
+    "#;
+
+    /// The plan for a model-rooted write.
+    fn w(src: &str) -> Result<WritePlan, Vec<u16>> {
+        let schema = build(&parse_models(WRITE_SRC), BuildOpts::strict()).expect("schema");
+        let prog = crate::frontend(src, "w.hard").expect("parse");
+        let expr = first_call(&prog).expect("a call");
+        let (model, chain, _) = orm_chain(&expr).expect("a model-rooted chain");
+        let (method, args, _) = chain[0].clone();
+        match parse_write(&model, &method, &args, false, &schema) {
+            Ok(p) => Ok(p),
+            Err(d) => Err(d.iter().map(|x| x.code).collect()),
+        }
+    }
+
+    /// The plan for a record's own write, given the model it holds.
+    fn wr(method: &str, args: &str) -> Result<WritePlan, Vec<u16>> {
+        let schema = build(&parse_models(WRITE_SRC), BuildOpts::strict()).expect("schema");
+        let src = format!("GET \"/\" :: {{ <- u.{method}({args}) }}");
+        let prog = crate::frontend(&src, "w.hard").expect("parse");
+        let expr = first_call(&prog).expect("a call");
+        let (name, args, _) = record_write(&expr).expect("a record write");
+        match parse_write("User", &name, &args, true, &schema) {
+            Ok(p) => Ok(p),
+            Err(d) => Err(d.iter().map(|x| x.code).collect()),
+        }
+    }
+
+    fn created(src: &str) -> Vec<String> {
+        let p = w(src).expect("plan");
+        match p.op {
+            WriteOp::Create(f) | WriteOp::Upsert(f) | WriteOp::FindOrCreate(f) => {
+                write_field_names(&f).iter().map(|s| s.to_string()).collect()
+            }
+            other => panic!("expected fields, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_takes_the_columns_it_names() {
+        assert_eq!(
+            created("GET \"/\" :: { <- User.create({email: \"a@b.c\", name: \"Ada\"}) }"),
+            vec!["email".to_string(), "name".to_string()],
+            "fields keep the order they were written in"
+        );
+    }
+
+    #[test]
+    fn a_create_must_give_every_column_the_database_will_not() {
+        let c = w("GET \"/\" :: { <- User.create({email: \"a@b.c\"}) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_MISSING_FIELD], "name has no default");
+        // `age` has a default and `id` is generated, so neither is required.
+        assert!(w("GET \"/\" :: { <- User.create({email: \"a@b.c\", name: \"Ada\"}) }").is_ok());
+    }
+
+    #[test]
+    fn a_nullable_field_is_not_required() {
+        let src = "model User { id : Int @primary @auto_increment, nick : String @nullable }";
+        let schema = build(&parse_models(src), BuildOpts::strict()).expect("schema");
+        let t = schema.table("User").unwrap();
+        assert!(!t.column("nick").unwrap().required_clause(), "nullable needs no value");
+        assert!(!t.column("id").unwrap().required_clause(), "and a generated key does not either");
+    }
+
+    #[test]
+    fn an_unknown_field_is_reported_with_a_suggestion() {
+        // The typo leaves the real field unset, so the write is also
+        // incomplete: both are reported, because both have to be fixed.
+        let c = w("GET \"/\" :: { <- User.create({emial: \"a@b.c\", name: \"Ada\"}) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_COLUMN, cat::ORM_MISSING_FIELD]);
+    }
+
+    #[test]
+    fn a_write_cannot_set_the_generated_key() {
+        let c = w("GET \"/\" :: { <- User.create({id: 4, email: \"a@b.c\", name: \"Ada\"}) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_DEFAULT], "an insert may not name its own key");
+    }
+
+    #[test]
+    fn a_field_given_twice_is_reported() {
+        let c = w("GET \"/\" :: { <- User.create({email: \"a@b.c\", name: \"Ada\", age: 1, age: 2}) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_DUPLICATE_COLUMN]);
+    }
+
+    #[test]
+    fn a_write_needs_an_object() {
+        let c = w("GET \"/\" :: { <- User.create(1) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn write_arity_is_checked() {
+        assert_eq!(w("GET \"/\" :: { <- User.create() }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(w("GET \"/\" :: { <- User.delete() }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(w("GET \"/\" :: { <- User.delete(1, 2) }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn delete_takes_a_key_and_nothing_else() {
+        assert!(matches!(w("GET \"/\" :: { <- User.delete(3) }").unwrap().op, WriteOp::DeleteKey));
+    }
+
+    #[test]
+    fn an_upsert_names_the_row_it_changes() {
+        // The spec's own example: an upsert identifies its row by key and
+        // updates only the fields it was given.
+        assert_eq!(
+            created("GET \"/\" :: { <- User.upsert({id: 1, name: \"Ada\"}) }"),
+            vec!["id".to_string(), "name".to_string()],
+            "the key is written on an upsert"
+        );
+        assert!(w("GET \"/\" :: { <- User.upsert({name: \"Ada\"}) }").is_ok(), "and may be left out");
+    }
+
+    #[test]
+    fn find_or_create_needs_a_complete_enough_object() {
+        // The literal is both the lookup and the insert, so it has to satisfy
+        // the insert when nothing matches.
+        assert_eq!(
+            created("GET \"/\" :: { <- User.find_or_create_by({email: \"a@b.c\", name: \"Ada\"}) }"),
+            vec!["email".to_string(), "name".to_string()]
+        );
+        let c = w("GET \"/\" :: { <- User.find_or_create_by({email: \"a@b.c\"}) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_MISSING_FIELD], "the create half would fail without name");
+    }
+
+    #[test]
+    fn a_record_writes_without_a_schema_round_trip() {
+        assert!(matches!(wr("save", "").unwrap().op, WriteOp::Save));
+        assert!(matches!(wr("touch", "").unwrap().op, WriteOp::Touch));
+        assert!(matches!(wr("destroy", "").unwrap().op, WriteOp::Destroy));
+    }
+
+    #[test]
+    fn a_record_write_takes_no_arguments() {
+        assert_eq!(wr("save", "1").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(wr("touch", "1").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn a_write_on_an_unknown_model_is_reported() {
+        let schema = build(&parse_models(WRITE_SRC), BuildOpts::strict()).unwrap();
+        let c = match parse_write("Nope", "create", &[Expr::Obj(vec![], crate::token::Span::default())], false, &schema) {
+            Err(d) => d.iter().map(|x| x.code).collect::<Vec<_>>(),
+            Ok(_) => panic!("expected an error"),
+        };
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_MODEL]);
+    }
+
+    #[test]
+    fn only_a_bare_name_can_be_a_record() {
+        // `req.body.save()` is not a record write: the receiver is a
+        // computation rather than a local, so nothing is known about what it
+        // holds. The same shape with a bare name is a record write.
+        let prog = crate::frontend("GET \"/\" :: { <- req.body.save() }", "x.hard").unwrap();
+        let crate::ast::Stmt::Route(r) = &prog.stmts[prog.stmts.len() - 1] else { panic!("a route") };
+        let crate::ast::Stmt::Return(e, _) = &r.body[0] else { panic!("a return") };
+        assert!(record_write(e).is_none());
+        let prog = crate::frontend("GET \"/\" :: { <- u.save() }", "x.hard").unwrap();
+        let crate::ast::Stmt::Route(r) = &prog.stmts[prog.stmts.len() - 1] else { panic!("a route") };
+        let crate::ast::Stmt::Return(e, _) = &r.body[0] else { panic!("a return") };
+        assert!(record_write(e).is_some());
+    }
+
+    /// The codes a whole program reports, which is the only way to see a
+    /// diagnostic that codegen raises.
+    fn compiled(src: &str) -> Vec<u16> {
+        match crate::compile_to_cpp(src, "w.hard") {
+            Ok(_) => Vec::new(),
+            Err(d) => d.iter().map(|x| x.code).collect(),
+        }
+    }
+
+    #[test]
+    fn writing_a_value_that_is_not_a_record_is_reported() {
+        // `count()` yields a number, so there is nothing to save. Falling
+        // through to a field read would say the field was missing instead,
+        // which names the wrong problem.
+        let src = format!("{WRITE_SRC}\nGET \"/\" :: {{ n <- User.count()\n <- n.save() }}");
+        assert_eq!(compiled(&src), vec![cat::ORM_NOT_A_RECORD]);
+
+        let src = format!("{WRITE_SRC}\nGET \"/\" :: {{ m <- {{a: 1}}\n <- m.destroy() }}");
+        assert_eq!(compiled(&src), vec![cat::ORM_NOT_A_RECORD], "a map is not a row either");
+    }
+
+    #[test]
+    fn a_record_from_a_query_can_be_written_back() {
+        // The other half of the same rule: the value has to carry a model for
+        // the write to have anything to validate against.
+        let src = format!("{WRITE_SRC}\nGET \"/\" :: {{ u <- User.find(1)\n <- u.save()\n <- u.touch() }}");
+        assert_eq!(compiled(&src), Vec::<u16>::new(), "a record from find() is a record");
+    }
+
+    #[test]
+    fn writes_and_queries_are_told_apart() {
+        for m in ["create", "upsert", "delete", "find_or_create_by", "save", "touch", "destroy"] {
+            assert!(is_orm_write_method(m), "{m} is a write");
+            assert!(!is_orm_method(m), "{m} is not a query method");
+        }
+        for m in ["all", "where", "find", "count"] {
+            assert!(!is_orm_write_method(m), "{m} is not a write");
+        }
+        // The record methods are the ones a value can call, not a model.
+        assert!(is_orm_write_method_on_record("save"));
+        assert!(!is_orm_write_method_on_record("create"));
+    }
+
+    #[test]
+    fn the_column_list_in_a_suggestion_is_the_models_own() {
+        let s = build(&parse_models(WRITE_SRC), BuildOpts::strict()).unwrap();
+        let t = s.table("User").unwrap();
+        let msg = suggest_field(t, "zzzzz");
+        assert!(msg.contains("id, email, name, age, updated"), "{msg}");
     }
 
     #[test]

@@ -65,6 +65,8 @@ pub const ORM_BAD_QUERY: u16 = 221;
 pub const ORM_NO_DIALECT: u16 = 222;
 pub const MIGRATION_CONFLICT: u16 = 223;
 pub const SEED_FAILED: u16 = 224;
+pub const ORM_MISSING_FIELD: u16 = 225;
+pub const ORM_NOT_A_RECORD: u16 = 226;
 pub const IMPORT_CYCLE: u16 = 301;
 pub const MODULE_NOT_FOUND: u16 = 302;
 pub const IMPORT_CHAIN_TOO_DEEP: u16 = 303;
@@ -417,7 +419,7 @@ pub fn catalog() -> &'static [CodeDef] {
                 "Pass the value you need in as an argument.",
             ],
         },
-        // ---------------- ORM schema & migrations (HS0211..=HS0224) ----------------
+        // ---------------- ORM schema, writes & migrations (HS0211..=HS0225) ----------------
         CodeDef {
             number: 211,
             name: "Unknown Column Type",
@@ -543,6 +545,24 @@ pub fn catalog() -> &'static [CodeDef] {
             example: "hard seed",
             causes: &["A seed file does not parse.", "A statement violates a constraint or references a missing table."],
             fixes: &["Fix the reported seed file.", "Run the migrations first so the tables exist."],
+        },
+        CodeDef {
+            number: 225,
+            name: "Missing Field",
+            kind: ErrorKind::Type,
+            meaning: "A write left out a column the database will not fill in, so the insert could not succeed.",
+            example: "model User {\n    id : Int @primary @auto_increment\n    email : Email\n}\n\nUser.create({})",
+            causes: &["A field has no `@default`, no `@auto_increment` and no timestamp attribute.", "A field was renamed and the write still uses the old name."],
+            fixes: &["Give the field a value in the write.", "Give the field a default, or mark it `@nullable` if absence is allowed."],
+        },
+        CodeDef {
+            number: 226,
+            name: "Not a Record",
+            kind: ErrorKind::Type,
+            meaning: "`save`, `touch` and `destroy` were called on something that is not a model row.",
+            example: "n <- User.count()\n<- n.save()",
+            causes: &["The value came from a query that returns a number or a list, such as `count()` or `all()`.", "The value is a map, a request body or anything else that is not a row."],
+            fixes: &["Read one row first: `u <- User.find(1)` gives a record `save` can write.", "Use the model-rooted write instead: `User.create(..)`, `User.upsert(..)` or `User.delete(..)`."],
         },
         // ---------------- Modules (HS0300..=HS0399) ----------------
         CodeDef {

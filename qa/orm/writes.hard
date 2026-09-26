@@ -1,0 +1,41 @@
+bring http
+app @3132
+
+model User {
+    id      : Int @primary @auto_increment
+    email   : Email @unique
+    name    : String
+    age     : Int @default(18)
+    updated : Time @updated_at
+}
+
+GET "/new" :: {
+    <- User.create({email: "a@b.c", name: "Ada"})
+}
+
+GET "/put" :: {
+    <- User.upsert({id: 1, name: "Ada"})
+}
+
+GET "/gone" :: {
+    <- User.delete(4)
+}
+
+GET "/sure" :: {
+    <- User.find_or_create_by({email: "a@b.c", name: "Ada"})
+}
+
+GET "/keep" :: {
+    u <- User.find(1)
+    <- u.save()
+}
+
+GET "/poke" :: {
+    u <- User.find(1)
+    <- u.touch()
+}
+
+GET "/drop" :: {
+    u <- User.find(1)
+    <- u.destroy()
+}

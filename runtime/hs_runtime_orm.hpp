@@ -31,11 +31,18 @@ struct OrmModel {
     // matching the order the SELECT lists, so it is never sorted per query.
     std::vector<std::string> columns;
     std::vector<OrmKind> kinds;
+    // Columns the database fills in: an auto-increment key, a `@default`, a
+    // timestamp. An insert may leave these out, and the one for `@updated_at`
+    // is what `touch` writes.
+    std::vector<std::string> generated;
+    std::string updated_col;
 
     OrmModel(std::string n, std::string t, std::string p, std::vector<std::string> cols,
-             std::vector<OrmKind> ks)
+             std::vector<OrmKind> ks, std::vector<std::string> gen = {},
+             std::string upd = "")
         : name(std::move(n)), table(std::move(t)), pk(std::move(p)),
-          columns(std::move(cols)), kinds(std::move(ks)) {}
+          columns(std::move(cols)), kinds(std::move(ks)), generated(std::move(gen)),
+          updated_col(std::move(upd)) {}
 
     int idx(const std::string& c) const {
         for (size_t i = 0; i < columns.size(); i++)
@@ -46,6 +53,11 @@ struct OrmModel {
     OrmKind kind_of(const std::string& c) const {
         int i = idx(c);
         return i >= 0 && (size_t)i < kinds.size() ? kinds[i] : OrmKind::Text;
+    }
+    bool is_generated(const std::string& c) const {
+        for (const auto& g : generated)
+            if (g == c) return true;
+        return false;
     }
     size_t size() const { return columns.size(); }
 };
@@ -450,6 +462,225 @@ struct OrmQuery {
         return Val::boolean(!r.rows.empty());
     }
 };
+
+// ---- writes (M5.3.3) ------------------------------------------------------
+//
+// A write is assembled from the same model metadata a read is, so the column
+// names in an INSERT or UPDATE come from the schema and never from the record
+// being saved. The record only decides *which* columns are present.
+
+/// The columns and values of an insert built from `obj`.
+///
+/// A column the database generates is left out unless the record carries it,
+/// so `create({name: "x"})` on an auto-increment table inserts without naming
+/// the key. A column that is neither present nor generated has no value to
+/// insert, which the compiler has already rejected; here it is a hard error
+/// rather than a malformed statement.
+inline bool orm_insert_parts(const OrmModel& m, const Val& obj, std::vector<std::string>& cols,
+                             std::vector<Val>& vals) {
+    if (!obj.is_obj()) return false;
+    for (const auto& c : m.columns) {
+        const Val* v = obj.find(c);
+        if (v) {
+            cols.push_back(c);
+            vals.push_back(*v);
+        } else if (!m.is_generated(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline std::string orm_insert_sql(const OrmModel& m, DbDialect d, const std::vector<std::string>& cols) {
+    std::string sql = "INSERT INTO ";
+    sql += db_quote_ident(m.table);
+    sql += " (";
+    for (size_t i = 0; i < cols.size(); i++) {
+        if (i) sql += ", ";
+        sql += db_quote_ident(cols[i]);
+    }
+    sql += ") VALUES (";
+    for (size_t i = 0; i < cols.size(); i++) {
+        if (i) sql += ", ";
+        sql += db_placeholder(d, (int)i + 1);
+    }
+    sql += ")";
+    return sql;
+}
+
+/// The `SET` half of an update, from the record's own columns.
+///
+/// The key is excluded: it is the `WHERE`, not a value to write, and letting it
+/// be reassigned would make a save able to move a row.
+inline bool orm_update_parts(const OrmModel& m, const Val& obj, std::vector<std::string>& cols,
+                             std::vector<Val>& vals) {
+    if (!obj.is_obj()) return false;
+    for (const auto& c : m.columns) {
+        if (c == m.pk) continue;
+        if (const Val* v = obj.find(c)) {
+            cols.push_back(c);
+            vals.push_back(*v);
+        }
+    }
+    return !cols.empty();
+}
+
+inline std::string orm_update_sql(const OrmModel& m, DbDialect d,
+                                  const std::vector<std::string>& cols) {
+    std::string sql = "UPDATE ";
+    sql += db_quote_ident(m.table);
+    sql += " SET ";
+    for (size_t i = 0; i < cols.size(); i++) {
+        if (i) sql += ", ";
+        sql += db_quote_ident(cols[i]);
+        sql += " = ";
+        sql += db_placeholder(d, (int)i + 1);
+    }
+    sql += " WHERE ";
+    sql += db_quote_ident(m.pk);
+    sql += " = ";
+    sql += db_placeholder(d, (int)cols.size() + 1);
+    return sql;
+}
+
+inline std::string orm_delete_sql(const OrmModel& m, DbDialect d) {
+    std::string sql = "DELETE FROM ";
+    sql += db_quote_ident(m.table);
+    sql += " WHERE ";
+    sql += db_quote_ident(m.pk);
+    sql += " = ";
+    sql += db_placeholder(d, 1);
+    return sql;
+}
+
+/// `INSERT` one record. Returns the new row as an object, including the key the
+/// database assigned, so the caller does not have to read it back.
+inline Val orm_create(const OrmModel* mp, DbBackend* b, const Val& obj) {
+    const OrmModel& m = *mp;
+    std::vector<std::string> cols;
+    std::vector<Val> vals;
+    if (!orm_insert_parts(m, obj, cols, vals)) {
+        throw std::runtime_error("orm: " + m.name + " is missing a value for a column with no default");
+    }
+    DbResult r = b->run(orm_insert_sql(m, b->dialect(), cols), vals);
+    Val out = obj.is_obj() ? obj : Val::object({});
+    // A generated key that was left out is the one number worth reading back.
+    // A key the record already carried is the caller's, and is kept: an upsert
+    // that inserts a keyed row has to come back with the key it was given.
+    if (!m.pk.empty() && r.last_id > 0 && !out.find(m.pk)) out.set(m.pk, Val::int_(r.last_id));
+    return out;
+}
+
+/// The primary key of a loaded record, or a clear failure. A record that came
+/// back from a projection without its key cannot be written, and saying so is
+/// better than a statement that matches nothing.
+inline Val orm_key_of(const OrmModel* mp, const Val& rec) {
+    const OrmModel& m = *mp;
+    if (!rec.is_obj()) throw std::runtime_error("orm: " + m.name + " record is not an object");
+    const Val* k = rec.find(m.pk);
+    if (!k || k->is_nil()) {
+        throw std::runtime_error("orm: " + m.name + " record has no " + m.pk +
+                                 " to identify it; include it in the projection");
+    }
+    return *k;
+}
+
+/// Update the row a record came from, then return the record with its new
+/// values. A record without a key is an insert, which is what `save` means
+/// for a value that was never stored.
+inline Val orm_save(const OrmModel* mp, DbBackend* b, const Val& rec) {
+    const OrmModel& m = *mp;
+    const Val* k = rec.is_obj() ? rec.find(m.pk) : nullptr;
+    if (!k || k->is_nil()) return orm_create(mp, b, rec);
+
+    std::vector<std::string> cols;
+    std::vector<Val> vals;
+    if (!orm_update_parts(m, rec, cols, vals)) {
+        // Nothing to write: the record holds only its key. Leave the row alone
+        // rather than issuing `UPDATE ... SET` with an empty list.
+        return rec;
+    }
+    vals.push_back(*k);
+    b->run(orm_update_sql(m, b->dialect(), cols), vals);
+    return rec;
+}
+
+/// Refresh a row's `@updated_at` column. The value is the database's clock, so
+/// two servers writing the same row cannot disagree about the time.
+inline Val orm_touch(const OrmModel* mp, DbBackend* b, const Val& rec) {
+    const OrmModel& m = *mp;
+    const Val key = orm_key_of(mp, rec);
+    if (m.updated_col.empty()) {
+        throw std::runtime_error("orm: " + m.name + " has no @updated_at column to touch");
+    }
+    std::string sql = "UPDATE ";
+    sql += db_quote_ident(m.table);
+    sql += " SET ";
+    sql += db_quote_ident(m.updated_col);
+    if (b->dialect() == DbDialect::Postgres) {
+        sql += " = NOW() WHERE ";
+    } else {
+        sql += " = CURRENT_TIMESTAMP WHERE ";
+    }
+    sql += db_quote_ident(m.pk);
+    sql += " = ";
+    sql += db_placeholder(b->dialect(), 1);
+    b->run(sql, {key});
+    return rec;
+}
+
+/// Delete the row a record came from. Reports whether a row went away, so a
+/// delete of something already gone is distinguishable from a delete that hit.
+inline Val orm_delete(const OrmModel* mp, DbBackend* b, const Val& rec) {
+    const OrmModel& m = *mp;
+    const Val key = orm_key_of(mp, rec);
+    DbResult r = b->run(orm_delete_sql(m, b->dialect()), {key});
+    return Val::boolean(r.affected > 0);
+}
+
+/// `Model.delete(key)`, for a key rather than a loaded record.
+inline Val orm_delete_key(const OrmModel* mp, DbBackend* b, const Val& key) {
+    const OrmModel& m = *mp;
+    if (key.is_nil()) throw std::runtime_error("orm: " + m.name + " delete needs a key");
+    DbResult r = b->run(orm_delete_sql(m, b->dialect()), {key});
+    return Val::boolean(r.affected > 0);
+}
+
+/// Update by key, inserting when the key names no row. The key is written
+/// explicitly rather than left to the sequence, so an upsert with an id
+/// behaves the same on both backends.
+inline Val orm_upsert(const OrmModel* mp, DbBackend* b, const Val& obj) {
+    const OrmModel& m = *mp;
+    const Val* k = obj.is_obj() ? obj.find(m.pk) : nullptr;
+    if (!k || k->is_nil()) return orm_create(mp, b, obj);
+
+    std::vector<std::string> cols;
+    std::vector<Val> vals;
+    if (orm_update_parts(m, obj, cols, vals)) {
+        vals.push_back(*k);
+        DbResult r = b->run(orm_update_sql(m, b->dialect(), cols), vals);
+        if (r.affected > 0) return obj;
+    }
+    return orm_create(mp, b, obj);
+}
+
+/// Read by a set of attributes, inserting them as a new row if nothing
+/// matches. The lookup is a conjunction of equality, so the record that comes
+/// back is one the caller would have got from the same `where`.
+inline Val orm_find_or_create(const OrmModel* mp, DbBackend* b, const Val& attrs) {
+    const OrmModel& m = *mp;
+    if (!attrs.is_obj()) throw std::runtime_error("orm: " + m.name + " find_or_create needs an object");
+    OrmQuery q(&m);
+    for (const auto& kv : attrs.obj) {
+        if (!m.has(kv.first)) {
+            throw std::runtime_error("orm: " + m.name + " has no field " + kv.first);
+        }
+        q.where_eq(kv.first, kv.second);
+    }
+    Val found = q.first(b);
+    if (!found.is_nil()) return found;
+    return orm_create(mp, b, attrs);
+}
 
 // Register a model. Generated code calls this once per `model` declaration.
 inline OrmModel& orm_register_model(const std::string& name, const std::string& table,

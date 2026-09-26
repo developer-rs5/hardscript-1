@@ -1,0 +1,9 @@
+static const hs::OrmModel __hs_orm_User("User", "user", "id", std::vector<std::string>{ "id", "email", "name", "age", "updated" }, std::vector<hs::OrmKind>{ hs::OrmKind::Int, hs::OrmKind::Text, hs::OrmKind::Text, hs::OrmKind::Int, hs::OrmKind::Time }, std::vector<std::string>{ "id", "age", "updated" }, "updated");
+hs::orm_create(&__hs_orm_User, hs::db_need(), hs::Val::object({ {"email", hs::Val::text("a@b.c")}, {"name", hs::Val::text("Ada")} }))
+hs::orm_upsert(&__hs_orm_User, hs::db_need(), hs::Val::object({ {"id", hs::Val::int_(1)}, {"name", hs::Val::text("Ada")} }))
+hs::orm_delete_key(&__hs_orm_User, hs::db_need(), hs::Val::int_(4))
+hs::orm_find_or_create(&__hs_orm_User, hs::db_need(), hs::Val::object({ {"email", hs::Val::text("a@b.c")}, {"name", hs::Val::text("Ada")} }))
+hs::Val u = hs::OrmQuery(&__hs_orm_User).where_eq("id", hs::Val::int_(1)).first(hs::db_need());
+hs::orm_save(&__hs_orm_User, hs::db_need(), u)
+hs::orm_touch(&__hs_orm_User, hs::db_need(), u)
+hs::orm_delete(&__hs_orm_User, hs::db_need(), u)

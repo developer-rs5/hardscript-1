@@ -154,6 +154,13 @@ struct Codegen {
     /// The `protect` declaration, if any: decides which routes get the auth
     /// guard and which stay public (M5.2).
     protect: Option<ProtectDef>,
+    /// Which model a local holds, for a record's own `save`/`touch`/`destroy`.
+    ///
+    /// A record is an ordinary `Val` at runtime, so the only thing tying
+    /// `user.save()` to the `user` table is knowing what `user` was read
+    /// from. That is a fact about the program text, and codegen is where the
+    /// program text is in hand.
+    record_types: std::collections::HashMap<String, String>,
     /// The ORM schema, built leniently so a model nobody queries keeps
     /// compiling exactly as it did before the ORM existed. Strictness is
     /// applied per model, when a query actually touches it.
@@ -174,6 +181,7 @@ pub fn generate(prog: &Program) -> Result<String, Vec<Diag>> {
         diags: Vec::new(),
         model_names: std::collections::BTreeSet::new(),
         orm: None,
+        record_types: std::collections::HashMap::new(),
         protect: None,
         ctx: Ctx::Func,
     };
@@ -239,6 +247,9 @@ impl Codegen {
                     let n = safe_id(&v.name);
                     let line = format!("hs::Val {n} = {val};");
                     self.wln(&line);
+                    if let Some(m) = self.expr_record_type(&v.value) {
+                        self.record_types.insert(v.name.clone(), m);
+                    }
                 }
                 Stmt::Func(f) => funcs.push(f),
                 Stmt::Route(r) => routes.push(r),
@@ -331,25 +342,146 @@ impl Codegen {
         for t in schema.canonical_tables() {
             let mut cols = Vec::new();
             let mut kinds = Vec::new();
+            // The database fills these in, so a write may leave them out and
+            // `touch` knows which one to refresh.
+            let mut generated = Vec::new();
+            let mut updated = String::new();
             for c in &t.columns {
                 cols.push(format!("{:?}", c.name));
                 kinds.push(orm_kind_cpp(c.sql_type));
+                if c.has_db_default() {
+                    generated.push(format!("{:?}", c.name));
+                }
+                if c.updated_at {
+                    updated = c.name.clone();
+                }
             }
             let pk = t.primary_key_name().unwrap_or("");
             self.wln(&format!(
-                "static const hs::OrmModel {}({:?}, {:?}, {:?}, std::vector<std::string>{{ {} }}, std::vector<hs::OrmKind>{{ {} }});",
+                "static const hs::OrmModel {}({:?}, {:?}, {:?}, std::vector<std::string>{{ {} }}, std::vector<hs::OrmKind>{{ {} }}, std::vector<std::string>{{ {} }}, {:?});",
                 Self::orm_sym(&t.model),
                 t.model,
                 t.table,
                 pk,
                 cols.join(", "),
-                kinds.join(", ")
+                kinds.join(", "),
+                generated.join(", "),
+                updated
             ));
         }
     }
 
     /// Emit a validated query chain.
     ///
+    /// The model a value holds, when it is knowable from its own expression.
+    ///
+    /// A query's terminal decides it: `User.all()` and `User.find(1)` both
+    /// yield `User` rows, `User.count()` yields a number and so yields no
+    /// model at all.
+    fn expr_record_type(&mut self, e: &Expr) -> Option<String> {
+        let (model, chain, _) = crate::orm::orm_chain(e)?;
+        if !self.model_names.contains(&model) {
+            return None;
+        }
+        // The terminal is the last step; without one the chain is a
+        // collection query. `find` spells no terminal but implies one.
+        let terminal = chain.last().map(|(n, _, _)| n.as_str()).unwrap_or("all");
+        if terminal == "find" {
+            return Some(model);
+        }
+        match crate::orm::terminal_of(terminal) {
+            Some(crate::orm::Terminal::All) | Some(crate::orm::Terminal::First) => Some(model),
+            _ => None,
+        }
+    }
+
+    /// A write against a model, or a record's own write.
+    ///
+    /// Model-rooted writes (`User.create(..)`) name their model in the source,
+    /// so they need nothing but the schema. A record's write (`user.save()`)
+    /// names a variable instead, and the model comes from what that variable
+    /// was read as.
+    fn orm_write(&mut self, call: &Expr) -> Option<String> {
+        let schema = self.orm.as_ref()?;
+
+        // `user.save()`
+        if let Some((method, args, span)) = crate::orm::record_write(call) {
+            let Expr::Call { callee, .. } = call else { return None };
+            let Expr::Member(base, _, _) = callee.as_ref() else { return None };
+            let Expr::Ident(name, _) = base.as_ref() else { return None };
+            // HardScript has no methods of its own, so a bare name with no
+            // record type is a mistake rather than some other kind of call:
+            // falling through would read it as a field and report that the
+            // field is missing, which names the wrong problem.
+            let Some(model) = self.record_types.get(name).cloned() else {
+                self.diags.push(crate::orm::err(
+                    span,
+                    crate::catalog::ORM_NOT_A_RECORD,
+                    format!("`{name}` is not a record, so it has nothing to write."),
+                    "Read one row first, then write it: `u <- User.find(1)`.",
+                ));
+                return Some("hs::Val::nil()".to_string());
+            };
+            let plan = match crate::orm::parse_write(&model, &method, &args, true, schema) {
+                Ok(p) => p,
+                Err(mut d) => {
+                    self.diags.append(&mut d);
+                    return Some("hs::Val::nil()".to_string());
+                }
+            };
+            let rec = self.expr(base);
+            let m = self.model_ref(&plan.model);
+            return Some(match plan.op {
+                crate::orm::WriteOp::Save => {
+                    format!("hs::orm_save({m}, hs::db_need(), {rec})")
+                }
+                crate::orm::WriteOp::Touch => {
+                    format!("hs::orm_touch({m}, hs::db_need(), {rec})")
+                }
+                _ => format!("hs::orm_delete({m}, hs::db_need(), {rec})"),
+            });
+        }
+
+        // `User.create(..)`
+        let (model, chain, _) = crate::orm::orm_chain(call)?;
+        if !self.model_names.contains(&model) {
+            return None;
+        }
+        let (method, args, _) = chain.first()?.clone();
+        if !crate::orm::is_orm_write_method(&method) {
+            return None;
+        }
+        if chain.len() > 1 {
+            self.diags.push(crate::orm::err(
+                chain[1].2,
+                crate::catalog::ORM_BAD_QUERY,
+                format!("`{method}` runs immediately, so nothing can be chained after it."),
+                "End the write there.",
+            ));
+            return Some("hs::Val::nil()".to_string());
+        }
+        let plan = match crate::orm::parse_write(&model, &method, &args, false, schema) {
+            Ok(p) => p,
+            Err(mut d) => {
+                self.diags.append(&mut d);
+                return Some("hs::Val::nil()".to_string());
+            }
+        };
+        let m = self.model_ref(&plan.model);
+        let arg0 = args.first().map(|a| self.expr(a)).unwrap_or_else(|| "hs::Val::object({})".to_string());
+        Some(match plan.op {
+            crate::orm::WriteOp::Create(_) => format!("hs::orm_create({m}, hs::db_need(), {arg0})"),
+            crate::orm::WriteOp::Upsert(_) => format!("hs::orm_upsert({m}, hs::db_need(), {arg0})"),
+            crate::orm::WriteOp::DeleteKey => format!("hs::orm_delete_key({m}, hs::db_need(), {arg0})"),
+            _ => format!("hs::orm_find_or_create({m}, hs::db_need(), {arg0})"),
+        })
+    }
+
+    /// The static model object generated for a model.
+    fn model_ref(&self, model: &str) -> String {
+        format!("&__hs_orm_{}", safe_id(model))
+    }
+
     /// The compiler checks every column name here, against the schema, and
     /// emits the steps as a call chain. No SQL text is generated: the runtime
     /// assembles it, and the only strings that reach a statement are column
@@ -558,6 +690,8 @@ impl Codegen {
     }
 
     fn emit_route(&mut self, r: &RouteDef, idx: usize) {
+        // Locals do not outlive their body, so the record types start empty.
+        self.record_types.clear();
         let line = format!("static hs::Response route_{idx}(const hs::Request& req) {{");
         self.wln(&line);
         self.ind += 1;
@@ -626,6 +760,7 @@ impl Codegen {
 
     fn emit_middleware(&mut self, name: &str, body: &[Stmt], idx: usize) {
         let _ = name;
+        self.record_types.clear();
         let line = format!(
             "static hs::Response mw_{idx}(const hs::Request& req, const std::function<hs::Response()>& next) {{"
         );
@@ -774,15 +909,15 @@ impl Codegen {
             Stmt::Protect(..) => {}
             Stmt::Func(_) | Stmt::Route(_) | Stmt::Middleware { .. } | Stmt::Socket(_)
             | Stmt::Test(_) => {}
-            Stmt::Var(v) => {
+            Stmt::Var(v) | Stmt::Const(v) => {
                 let val = self.expr(&v.value);
                 let line = format!("hs::Val {} = {val};", safe_id(&v.name));
                 self.wln(&line);
-            }
-            Stmt::Const(v) => {
-                let val = self.expr(&v.value);
-                let line = format!("hs::Val {} = {val};", safe_id(&v.name));
-                self.wln(&line);
+                // A local bound from a query holds that model's records, which
+                // is what lets `user.save()` know its table.
+                if let Some(m) = self.expr_record_type(&v.value) {
+                    self.record_types.insert(v.name.clone(), m);
+                }
             }
             Stmt::If { cond, then_body, else_body, .. } => {
                 let c = self.expr(cond);
@@ -1033,6 +1168,12 @@ impl Codegen {
             let is_query = crate::orm::chain_root(&whole)
                 .map(|root| self.model_names.contains(&root))
                 .unwrap_or(false);
+            // A write is tried first: `create` and friends are the same
+            // shape as a query, and the query path would report them as
+            // unknown methods.
+            if let Some(r) = self.orm_write(&whole) {
+                return r;
+            }
             if is_query {
                 if let Some(r) = self.orm_query(&whole) {
                     return r;

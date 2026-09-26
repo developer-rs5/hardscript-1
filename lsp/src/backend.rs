@@ -295,9 +295,13 @@ impl Backend {
         }) {
             return None;
         }
+        // `models` is left empty like the build path's merge: it is a cache of
+        // what the model statements already say, and `model_defs()` recovers it
+        // from the merged statements.
         let mut merged = Program {
             stmts: Vec::new(),
             path: uri.to_string(),
+            models: Vec::new(),
         };
         let mut files = Vec::new();
         let mut span_locations = HashMap::new();
