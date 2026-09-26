@@ -1,0 +1,18 @@
+email.template("welcome", "Hi {{name}}, welcome aboard.")
+
+email.template("receipt", "Thanks {{who}}: {{amount}} is paid.")
+
+GET "/mail" :: {
+    sent <- email.send(to = "ada@example.com", subject = "Welcome", body = "Hello there")
+    <- sent
+}
+
+GET "/mail-async" :: {
+    id <- email.send(to = "ada@example.com", subject = "Welcome", template = "welcome", data = { name: "Ada" }, async = true)
+    <- id
+}
+
+GET "/mail-from" :: {
+    sent <- email.send(to = "ada@example.com", from = "noreply@brand.example", subject = "Hi", body = "there")
+    <- sent
+}

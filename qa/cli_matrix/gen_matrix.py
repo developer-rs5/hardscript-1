@@ -97,6 +97,7 @@ MAIN_QUEUE = F("main_queue.hard")
 MAIN_SCHED = F("main_sched.hard")
 MAIN_SESSION = F("main_session.hard")
 MAIN_LIMIT = F("main_limit.hard")
+MAIN_EMAIL = F("main_email.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -143,13 +144,19 @@ def setup_limit(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_email(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_EMAIL)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
-    "session": setup_session, "limit": setup_limit,
+    "session": setup_session, "limit": setup_limit, "email": setup_email,
 }
 
 # id, argv, expected_rc, setup, note
@@ -240,6 +247,10 @@ CASES = [
     # rate limiter ===========================================================
     ("rl001", ["build", "main.hard"], 0, "limit", "build a limit program"),
     ("rl002", ["fmt", "main.hard"], 0, "limit", "format limit declarations"),
+    # email ====================================================================
+    ("em001", ["build", "main.hard"], 0, "email", "build an email program"),
+    ("em002", ["fmt", "main.hard"], 0, "email", "format email.send options"),
+    ("em003", ["docs", "main.hard"], 0, "email", "document an email program"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

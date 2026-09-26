@@ -5,6 +5,27 @@ use crate::ast::*;
 
 pub fn format(prog: &Program) -> String {
     let mut f = Fmt::default();
+    // Job names are needed to decide whether a desugared `queue.enqueue` can be
+    // printed back as `queue Name(..)`, so collect them before printing.
+    f.jobs = prog
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Job(j) => Some(j.name.clone()),
+            _ => None,
+        })
+        .collect();
+    // `every 1h { .. }` and `worker X { .. }` keep their bodies in paired
+    // functions; the formatter prints the body at the declaration and drops the
+    // pair, so the bodies are indexed here rather than printed on their own.
+    f.funcs = prog
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Func(fd) => Some((fd.name.clone(), fd.body.clone())),
+            _ => None,
+        })
+        .collect();
     for st in &prog.stmts {
         f.stmt(st, 0);
         f.out.push('\n');
@@ -28,6 +49,16 @@ fn field_attr_at(a: &FieldAttr) -> String {
     }
 }
 
+/// A schedule's wall time, quoted because `at` takes a string, with the seconds
+/// left off when they are zero: `at "03:00"` is what people write.
+fn fmt_time(h: u8, m: u8, s: u8) -> String {
+    if s == 0 {
+        format!("\"{h:02}:{m:02}\"")
+    } else {
+        format!("\"{h:02}:{m:02}:{s:02}\"")
+    }
+}
+
 /// Canonical rendering of a schedule's timezone: omitted for the default.
 fn fmt_tz(tz: &Option<String>) -> String {
     match tz {
@@ -39,6 +70,37 @@ fn fmt_tz(tz: &Option<String>) -> String {
 /// Weekday names for schedule rendering, Monday-first like the parser.
 const WEEKDAYS: [&str; 7] =
     ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+/// The units `format` picks for a duration, largest first: `10m` rather than
+/// `600s`, matching how the declaration reads best.
+const DURATION_UNITS: [(&str, i64); 4] = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)];
+
+/// Canonical rendering of a duration in seconds as a single `Nunit` token.
+/// Returns None for a value no unit divides, so a hand-written
+/// `cache.declare("x", 7)` stays a call instead of becoming a lie.
+fn fmt_duration(secs: i64) -> Option<String> {
+    if secs <= 0 {
+        return None;
+    }
+    for (unit, size) in DURATION_UNITS {
+        if secs % size == 0 {
+            return Some(format!("{}{}", secs / size, unit));
+        }
+    }
+    None
+}
+
+/// The window name a rate limit's millisecond window prints as, or None when
+/// it is not a whole second (only then is `limit` unrepresentable).
+fn fmt_window(ms: i64) -> Option<&'static str> {
+    if ms <= 0 {
+        return None;
+    }
+    [("day", 86_400_000), ("hour", 3_600_000), ("minute", 60_000), ("second", 1000)]
+        .into_iter()
+        .find(|(_, size)| ms % size == 0)
+        .map(|(name, _)| name)
+}
 
 /// Canonical rendering of one framework field: `Type`, `Type(args)` and the
 /// trailing `@attr` / `@attr(arg)` list.
@@ -80,6 +142,30 @@ fn field_decl(f: &FieldDef) -> String {
 #[derive(Default)]
 struct Fmt {
     out: String,
+    jobs: Vec<String>,
+    funcs: std::collections::HashMap<String, Vec<Stmt>>,
+}
+
+/// Function names the parser invents for a paired body. They are never printed
+/// as functions: the declaration owns them.
+fn is_paired_body(name: &str) -> bool {
+    name.starts_with("__sched_") || name.starts_with("__worker_")
+}
+
+/// A worker's body without the `x <- __payload.x` prelude the parser prepends:
+/// those bindings come back from the `job` declaration, and printing them would
+/// shadow the parameter names with themselves.
+fn worker_body(body: &[Stmt]) -> Vec<&Stmt> {
+    let mut rest = body;
+    while let Some(Stmt::Var(v)) = rest.first() {
+        let from_payload = matches!(&v.value, Expr::Member(b, _, _)
+            if matches!(b.as_ref(), Expr::Ident(n, _) if n == "__payload"));
+        if !from_payload {
+            break;
+        }
+        rest = &rest[1..];
+    }
+    rest.iter().collect()
 }
 
 impl Fmt {
@@ -175,6 +261,21 @@ impl Fmt {
                 self.line(d, "}");
             }
             Stmt::Func(f) => {
+                if let Some(job) = f.name.strip_prefix("__worker_") {
+                    // `worker Name { .. }`: the job declaration already carries
+                    // the parameter names, so the payload bindings the parser
+                    // prepended are dropped rather than printed as shadowing
+                    // locals.
+                    self.line(d, &format!("worker {job} {{"));
+                    for s in worker_body(&f.body) {
+                        self.stmt(s, d + 1);
+                    }
+                    self.line(d, "}");
+                    return;
+                }
+                if is_paired_body(&f.name) {
+                    return; // printed with its `every ..` declaration
+                }
                 let params: Vec<String> = f
                     .params
                     .iter()
@@ -207,26 +308,37 @@ impl Fmt {
                 self.line(d, &format!("job {}({})", j.name, params.join(", ")));
             }
             Stmt::Schedule(s) => {
-                // The body lives in the paired `__sched_N` function; this
-                // line is the firing spec alone.
+                // The body lives in the paired `__sched_N` function; print it
+                // here, where the user wrote it, instead of as a stray `calc`.
                 let head = match &s.kind {
-                    SchedKind::Interval { secs } => format!("every {secs}s"),
+                    SchedKind::Interval { secs } => {
+                        format!("every {}", fmt_duration(*secs).unwrap_or_else(|| format!("{secs}s")))
+                    }
                     SchedKind::Daily { h, m, s: sec, tz } => {
-                        format!("every day at {:02}:{:02}:{:02}{}", h, m, sec, fmt_tz(tz))
+                        format!("every day at {}{}", fmt_time(*h, *m, *sec), fmt_tz(tz))
                     }
                     SchedKind::Weekly { weekday, h, m, s: sec, tz } => {
                         format!(
-                            "every {} at {:02}:{:02}:{:02}{}",
+                            "every {} at {}{}",
                             WEEKDAYS[*weekday as usize],
-                            h,
-                            m,
-                            sec,
+                            fmt_time(*h, *m, *sec),
                             fmt_tz(tz)
                         )
                     }
                     SchedKind::Startup => "every startup".to_string(),
                 };
-                self.line(d, &head);
+                match self.funcs.get(&s.name).cloned() {
+                    Some(body) => {
+                        self.line(d, &format!("{head} {{"));
+                        for st in &body {
+                            self.stmt(st, d + 1);
+                        }
+                        self.line(d, "}");
+                    }
+                    // A schedule whose body is gone still prints its spec: half
+                    // a declaration beats none, and the build will say why.
+                    None => self.line(d, &head),
+                }
             }
             Stmt::Protect(p) => {
                 let mut opts = vec![format!("secret = {}", p.secret.render())];
@@ -303,6 +415,81 @@ impl Fmt {
         }
     }
 
+    /// The declarations of M6.1-M6.6 are parsed into ordinary calls, so the
+    /// formatter would print their machinery (`cache.declare("users", 600)`)
+    /// instead of the language the user wrote. Each form is recognised by its
+    /// exact shape and re-printed as its declaration; anything that does not
+    /// match exactly keeps the plain call, so no value is ever lost or invented.
+    fn declaration_form(&self, callee: &Expr, args: &[Expr]) -> Option<String> {
+        let Expr::Member(base, name, _) = callee else { return None };
+        let Expr::Ident(module, _) = base.as_ref() else { return None };
+        match (module.as_str(), name.as_str()) {
+            // `cache users ttl 10m`
+            ("cache", "declare") if args.len() == 2 => {
+                let Expr::Str(entry, _) = &args[0] else { return None };
+                let Expr::Int(secs, _) = &args[1] else { return None };
+                Some(format!("cache {entry} ttl {}", fmt_duration(*secs)?))
+            }
+            // `queue SendEmail(user, delay = 60)`. Only for declared jobs:
+            // the declaration form would not re-parse otherwise.
+            ("queue", "enqueue")
+                if args.len() == 3
+                    && matches!(&args[1], Expr::List(_, _))
+                    && matches!(&args[2], Expr::Obj(_, _)) =>
+            {
+                let Expr::Str(job, _) = &args[0] else { return None };
+                if !self.jobs.iter().any(|j| j == job) {
+                    return None;
+                }
+                let Expr::List(payload, _) = &args[1] else { return None };
+                let Expr::Obj(opts, _) = &args[2] else { return None };
+                if !opts.iter().all(|(k, _)| matches!(k.as_str(), "delay" | "priority" | "max_attempts"))
+                {
+                    return None;
+                }
+                let mut parts: Vec<String> =
+                    payload.iter().map(|a| self.expr(a, 0)).collect();
+                for (k, v) in opts {
+                    parts.push(format!("{k} = {}", self.expr(v, 0)));
+                }
+                Some(format!("queue {job}({})", parts.join(", ")))
+            }
+            // `limit 100 requests / minute [sliding] [key expr]`
+            ("ratelimit", "check") if args.len() == 4 || args.len() == 5 => {
+                let Expr::Str(id, _) = &args[0] else { return None };
+                if !id.starts_with("__limit_") {
+                    return None;
+                }
+                let Expr::Int(algo, _) = &args[1] else { return None };
+                let Expr::Int(rate, _) = &args[2] else { return None };
+                let Expr::Int(per, _) = &args[3] else { return None };
+                let mut out = format!("limit {rate} requests / {}", fmt_window(*per)?);
+                if *algo == 1 {
+                    out.push_str(" sliding");
+                } else if *algo != 0 {
+                    return None;
+                }
+                if let Some(k) = args.get(4) {
+                    out.push_str(&format!(" key {}", self.expr(k, 0)));
+                }
+                Some(out)
+            }
+            // `email.send(to = "a@b.c", subject = "Hi")`
+            ("email", "send") if args.len() == 1 => {
+                let Expr::Obj(opts, _) = &args[0] else { return None };
+                const EMAIL_OPTS: [&str; 7] =
+                    ["to", "from", "subject", "body", "template", "data", "async"];
+                if !opts.iter().all(|(k, _)| EMAIL_OPTS.contains(&k.as_str())) {
+                    return None;
+                }
+                let parts: Vec<String> =
+                    opts.iter().map(|(k, v)| format!("{k} = {}", self.expr(v, 0))).collect();
+                Some(format!("email.send({})", parts.join(", ")))
+            }
+            _ => None,
+        }
+    }
+
     fn expr(&self, e: &Expr, _d: usize) -> String {
         match e {
             Expr::Int(n, _) => n.to_string(),
@@ -323,11 +510,16 @@ impl Fmt {
             Expr::Ident(n, _) => n.clone(),
             Expr::Member(b, n, _) => format!("{}.{}", self.expr(b, 0), n),
             Expr::Index(b, i, _) => format!("{}[{}]", self.expr(b, 0), self.expr(i, 0)),
-            Expr::Call { callee, args, .. } => format!(
-                "{}({})",
-                self.expr(callee, 0),
-                args.iter().map(|a| self.expr(a, 0)).collect::<Vec<_>>().join(", ")
-            ),
+            Expr::Call { callee, args, .. } => {
+                if let Some(decl) = self.declaration_form(callee, args) {
+                    return decl;
+                }
+                format!(
+                    "{}({})",
+                    self.expr(callee, 0),
+                    args.iter().map(|a| self.expr(a, 0)).collect::<Vec<_>>().join(", ")
+                )
+            }
             Expr::Unary(UnOp::Neg, x, _) => format!("-{}", self.expr(x, 0)),
             Expr::Unary(UnOp::Not, x, _) => format!("!{}", self.expr(x, 0)),
             Expr::Binary(op, l, r, _) => {
@@ -429,6 +621,54 @@ mod tests {
         assert!(once.contains("GET \"/\" :: {"), "got:\n{once}");
         let twice = format(&crate::frontend(&once, "test.hard").unwrap());
         assert_eq!(once, twice);
+    }
+
+    /// The M6 declarations are parsed into ordinary calls. Formatting must put
+    /// the language back, not the machinery: this is the shape a user reads.
+    #[test]
+    fn m6_declarations_survive_roundtrip() {
+        let src = "cache users ttl 10m\n\njob Send(Text u)\n\nqueue Send(u, delay = 60)\n\nlimit 100 requests / minute\n\nGET \"/api\" :: {\n    limit 10 requests / second sliding key \"api\"\n    email.send(to = \"a@b.co\", subject = \"Hi\", body = \"there\", async = true)\n    <- \"ok\"\n}\n";
+        let once = format(&crate::frontend(src, "test.hard").unwrap());
+        for want in [
+            "cache users ttl 10m",
+            "queue Send(u, delay = 60)",
+            "limit 100 requests / minute",
+            "limit 10 requests / second sliding key \"api\"",
+            "email.send(to = \"a@b.co\", subject = \"Hi\", body = \"there\", async = true)",
+        ] {
+            assert!(once.contains(want), "expected {want:?} in:\n{once}");
+        }
+        assert!(!once.contains("cache.declare"), "no machinery leaks out:\n{once}");
+        assert!(!once.contains("queue.enqueue"), "no machinery leaks out:\n{once}");
+        assert!(!once.contains("ratelimit.check"), "no machinery leaks out:\n{once}");
+        let twice = format(&crate::frontend(&once, "test.hard").unwrap());
+        assert_eq!(once, twice, "formatting must be idempotent:\n{once}");
+    }
+
+    #[test]
+    fn a_hand_written_call_the_declaration_cannot_express_stays_a_call() {
+        // Each of these would lose meaning if reformatted: a window that is not
+        // whole seconds, an undeclared job, a duration no unit divides.
+        let src = "ratelimit.check(\"manual\", 0, 5, 45000)\n\nqueue.enqueue(\"Ghost\", [1], { delay: 5 })\n\ncache.declare(\"x\", 0)\n";
+        let once = format(&crate::frontend(src, "test.hard").unwrap());
+        assert!(once.contains("ratelimit.check(\"manual\", 0, 5, 45000)"), "got:\n{once}");
+        assert!(once.contains("queue.enqueue(\"Ghost\", [1], { delay: 5 })"), "got:\n{once}");
+        assert!(once.contains("cache.declare(\"x\", 0)"), "got:\n{once}");
+        let twice = format(&crate::frontend(&once, "test.hard").unwrap());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn durations_pick_the_readable_unit() {
+        assert_eq!(fmt_duration(600), Some("10m".to_string()));
+        assert_eq!(fmt_duration(30), Some("30s".to_string()));
+        assert_eq!(fmt_duration(7200), Some("2h".to_string()));
+        assert_eq!(fmt_duration(604800), Some("7d".to_string()));
+        assert_eq!(fmt_duration(0), None, "no unit for zero");
+        assert_eq!(fmt_duration(-5), None, "no unit for a negative");
+        assert_eq!(fmt_window(60000), Some("minute"));
+        assert_eq!(fmt_window(86_400_000), Some("day"));
+        assert_eq!(fmt_window(1500), None, "half a second is not a window");
     }
 
     #[test]

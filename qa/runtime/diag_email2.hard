@@ -1,0 +1,9 @@
+GET "/mail" :: {
+    email.send("ada@example.com", "Welcome", "Hello there")
+    <- "ok"
+}
+
+GET "/cc" :: {
+    email.send(to = "ada@example.com", cc = "x@y.co")
+    <- "ok"
+}

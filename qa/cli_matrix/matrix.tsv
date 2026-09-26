@@ -62,3 +62,6 @@ ss001	build main.hard	0	session	build a session program
 ss002	fmt main.hard	0	session	format session calls
 rl001	build main.hard	0	limit	build a limit program
 rl002	fmt main.hard	0	limit	format limit declarations
+em001	build main.hard	0	email	build an email program
+em002	fmt main.hard	0	email	format email.send options
+em003	docs main.hard	0	email	document an email program

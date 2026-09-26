@@ -124,6 +124,24 @@ fn is_cache_declare(e: &Expr) -> bool {
     }
 }
 
+/// A top-level `email.template("name", "body ...")`, which is a registration
+/// like `cache x ttl T`: it has to run at startup or no send can find it.
+fn is_email_template(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => match callee.as_ref() {
+            Expr::Member(base, name, _) => {
+                matches!(base.as_ref(), Expr::Ident(root, _) if root == "email")
+                    && name == "template"
+                    && args.len() == 2
+                    && matches!(&args[0], Expr::Str(..))
+                    && matches!(&args[1], Expr::Str(..))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// C++ double literal for a rule bound (`18` -> `18.0`).
 fn cdbl(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 9.0e15 {
@@ -310,6 +328,7 @@ impl Codegen {
         // top-level expression statement — except these must execute, so
         // they are collected for `main` instead of dropped with the rest.
         let mut cache_decls: Vec<String> = Vec::new();
+        let mut email_templates: Vec<String> = Vec::new();
         // Top-level `job` declarations, `queue` calls and `__worker_*`
         // functions, likewise collected for `main`: jobs register their
         // types, enqueues seed initial jobs, and workers register handlers.
@@ -367,6 +386,9 @@ impl Codegen {
                 // expressions.
                 Stmt::ExprStmt(e) if is_queue_enqueue_call(e) => {
                     top_enqueues.push(self.expr(e));
+                }
+                Stmt::ExprStmt(e) if is_email_template(e) => {
+                    email_templates.push(self.expr(e));
                 }
                 Stmt::ExprStmt(e) if is_ratelimit_check(e) => {
                     // Rendered for route prologues, where a request exists:
@@ -438,6 +460,7 @@ impl Codegen {
             &top_enqueues,
             &worker_regs,
             &sched_regs,
+            &email_templates,
         );
     }
 
@@ -1088,12 +1111,18 @@ impl Codegen {
 
     fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize,
                  nmodels: usize, cache_decls: &[String], job_decls: &[(String, Vec<String>)],
-                 top_enqueues: &[String], worker_regs: &[String], sched_regs: &[String]) {
+                 top_enqueues: &[String], worker_regs: &[String], sched_regs: &[String],
+                 email_templates: &[String]) {
         self.wln("int main(int argc, char** argv) {");
         self.ind += 1;
         self.wln("hs::set_args(argc, argv);");
         // Declared caches exist before the first request can ask for them.
         for decl in cache_decls {
+            self.wln(&format!("(void)({decl});"));
+        }
+        // Templates register with the caches: before the first request, and
+        // before any job could send one.
+        for decl in email_templates {
             self.wln(&format!("(void)({decl});"));
         }
         // Job types register before anything enqueues; workers register their
@@ -1748,6 +1777,17 @@ impl Codegen {
                 Some(format!(
                     "hs::limit_check_or_abort({id}, (int)({algo}), {rate}, {per}, hs::limit_key_or_ip({key}, req.peer_ip))"
                 ))
+            }
+            (_, _) if module == "email" && name == "send" => {
+                // The parser has already collected the named options into one
+                // object; the runtime validates presence, types and the address
+                // itself, so `email.send({..})` behaves the same when written
+                // by hand.
+                Some(format!("hs::email_send({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "email" && name == "template" => {
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::email_template({a}, {b})"))
             }
             (_, _) if module == "json" && name == "stringify" => {
                 Some(format!("hs::Val::text(hs::to_json({}))", self.arg_at(args, 0)))

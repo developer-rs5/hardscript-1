@@ -1,0 +1,4 @@
+GET "/mail" :: {
+    email.send("ada@example.com", "Welcome", "Hello there")
+    <- "ok"
+}

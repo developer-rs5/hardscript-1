@@ -89,6 +89,42 @@ for f in "$DIR"/*.hard; do
     fi
 done
 
+# ---- formatter round trip --------------------------------------------------
+# The M6 declarations (cache, queue, limit, email.send) are parsed into
+# ordinary calls, so the formatter is the only thing standing between a user
+# and their own source rewritten as machinery. Every fixture must survive
+# `fmt` and still build.
+for f in "$DIR"/*.hard; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in diag_*) continue ;; esac
+    base_name="$(basename "${f%.hard}")"
+    name="runtime-fmt-$base_name"
+    TOTAL=$((TOTAL + 1))
+
+    rt="$TMP/fmt-$base_name"
+    mkdir -p "$rt"
+    cp "$f" "$rt/main.hard"
+    if ! "$HARD" fmt "$rt/main.hard" >"$TMP/fmt.log" 2>&1; then
+        echo "runtime: FAIL $name (fmt: $(grep -m1 -E 'error|HS[0-9]{4}' "$TMP/fmt.log"))"
+        FAILED=$((FAILED + 1))
+        continue
+    fi
+    # Idempotent: a second pass must not change the file.
+    cp "$rt/main.hard" "$TMP/fmt-$base_name.once"
+    "$HARD" fmt "$rt/main.hard" >/dev/null 2>&1
+    if ! cmp -s "$TMP/fmt-$base_name.once" "$rt/main.hard"; then
+        echo "runtime: FAIL $name (fmt is not idempotent)"
+        FAILED=$((FAILED + 1))
+        continue
+    fi
+    if ! "$HARD" build "$rt/main.hard" >"$TMP/fmtbuild.log" 2>&1; then
+        echo "runtime: FAIL $name (formatted source does not build: $(grep -m1 -E 'error|HS[0-9]{4}' "$TMP/fmtbuild.log"))"
+        FAILED=$((FAILED + 1))
+        continue
+    fi
+    echo "runtime: PASS $name (formatted source still builds)"
+done
+
 # ---- diagnostics -----------------------------------------------------------
 for f in "$DIR"/diag_*.hard; do
     [ -e "$f" ] || continue

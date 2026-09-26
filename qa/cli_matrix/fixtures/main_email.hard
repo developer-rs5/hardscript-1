@@ -1,0 +1,6 @@
+email.template("welcome", "Hi {{name}}")
+
+GET "/mail" :: {
+    sent <- email.send(to = "ada@example.com", subject = "Welcome", template = "welcome", data = { name: "Ada" }, async = true)
+    <- sent
+}

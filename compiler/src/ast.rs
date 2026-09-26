@@ -60,6 +60,8 @@ pub enum Module {
     RateLimit,
     /// Cookie session manager (M6.4).
     Session,
+    /// Email delivery: SMTP, templates, queue-backed async sends (M6.6).
+    Email,
 }
 
 impl Module {
@@ -84,6 +86,7 @@ impl Module {
         "schedule",
         "ratelimit",
         "session",
+        "email",
     ];
 
     /// Human-readable module list used in diagnostics.
@@ -113,6 +116,7 @@ impl Module {
             Module::Schedule => "schedule",
             Module::RateLimit => "ratelimit",
             Module::Session => "session",
+            Module::Email => "email",
         }
     }
 
@@ -137,6 +141,7 @@ impl Module {
         Module::Schedule,
         Module::RateLimit,
         Module::Session,
+        Module::Email,
     ];
 
     /// The allowed-module set as strings (lowercased names), for validation
@@ -163,6 +168,7 @@ impl Module {
             "schedule" => Some(Module::Schedule),
             "ratelimit" => Some(Module::RateLimit),
             "session" => Some(Module::Session),
+            "email" => Some(Module::Email),
             _ => {
                 let _ = span;
                 None

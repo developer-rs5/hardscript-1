@@ -642,12 +642,6 @@ impl Parser {
         })
     }
 
-    /// `worker SendEmail { ... }`: handle a job type. Lowers to an ordinary
-    /// function taking the payload, with each declared parameter bound up
-    /// front, so the rest of the pipeline never learns a new statement form.
-    /// The job must be declared above: its parameter names become the body's
-    /// bindings. Codegen registers every `__worker_*` function in `main`.
-    /// Workers live at the top level, like the functions they lower to.
     /// `limit 100 requests / minute [sliding] [key expr]`: cap how often the
     /// enclosing scope runs. Desugars to a `ratelimit.check` call carrying a
     /// position-derived identity (shared by every copy, so top-level limits
@@ -754,20 +748,110 @@ impl Parser {
         Ok(Expr::Call { callee: Box::new(callee), args, span: sp })
     }
 
+    /// The option half of a named-options call: `(to = "a@b.c", async = true)`
+    /// after the opening paren. Every argument must be `name = expr` with a
+    /// name this call accepts, and no name may repeat: both mistakes are far
+    /// cheaper to catch here than as a silent last-wins at runtime. `async` is
+    /// the one keyword allowed as a name, because that is what callers write.
+    fn parse_named_options(
+        &mut self,
+        allowed: &[&str],
+        what: &str,
+        sp: Span,
+    ) -> Result<Vec<(String, Expr)>, Vec<Diag>> {
+        self.expect_sym(Sym::LParen, &format!("to start the {what} options"))?;
+        let mut options: Vec<(String, Expr)> = Vec::new();
+        while !matches!(self.peek(), Tok::Sym(Sym::RParen)) {
+            if *self.peek() == Tok::Eof {
+                break;
+            }
+            let opt = match self.peek().clone() {
+                Tok::Ident(o) => {
+                    if !matches!(self.peek_at(1), Tok::Sym(Sym::Assign)) {
+                        return Err(vec![Diag::new(
+                            ErrorKind::Parse,
+                            format!("{what} takes named options, found a positional value"),
+                            self.span(),
+                            format!("Write them as names: {}.", allowed.join("=, ")),
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)]);
+                    }
+                    self.advance();
+                    self.advance();
+                    o
+                }
+                Tok::Kw(Kw::Async) => {
+                    self.advance();
+                    self.expect_sym(Sym::Assign, "after the `async` option name")?;
+                    "async".to_string()
+                }
+                other => {
+                    return Err(vec![Diag::new(
+                        ErrorKind::Parse,
+                        format!("expected an option name in {what}, found {other}"),
+                        self.span(),
+                        format!("The options are {}.", allowed.join(", ")),
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)])
+                }
+            };
+            if !allowed.contains(&opt.as_str()) {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("unknown {what} option `{opt}`"),
+                    self.span(),
+                    format!("The options are {}.", allowed.join(", ")),
+                )
+                .with_code(cat::EXPECTED_TOKEN)]);
+            }
+            if options.iter().any(|(n, _)| n == &opt) {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("`{opt}` is given twice in one {what} call"),
+                    self.span(),
+                    "Pass each option once; the later value would silently win.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)]);
+            }
+            options.push((opt, self.parse_expr()?));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen, "to close the options")?;
+        if options.is_empty() {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("{what} needs at least one option"),
+                sp,
+                format!("For example `{what}({}=...)`.", allowed[0]),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]);
+        }
+        Ok(options)
+    }
+
+    /// `worker SendEmail { ... }`: handle a job type. Lowers to an ordinary
+    /// function taking the payload, with each declared parameter bound up
+    /// front, so the rest of the pipeline never learns a new statement form.
+    /// The job must be declared above: its parameter names become the body's
+    /// bindings. Codegen registers every `__worker_*` function in `main`.
+    /// Workers live at the top level, like the functions they lower to.
     fn parse_worker(&mut self) -> Result<Stmt, Vec<Diag>> {
         let sp = self.span();
         self.advance(); // `worker`
-        let (job, _) = self.expect_ident("as a job name")?;
-        let Some((_, params)) = self.jobs.iter().find(|(n, _)| n == &job).cloned() else {
+        let (name, _) = self.expect_ident("as a job name")?;
+        let Some((_, params)) = self.jobs.iter().find(|(n, _)| n == &name).cloned() else {
             return Err(vec![Diag::new(
                 ErrorKind::Parse,
-                format!("worker for undeclared job `{job}`"),
+                format!("worker for undeclared job `{name}`"),
                 sp,
-                format!("Declare it first: `job {job}(...)` above the worker."),
+                format!("Declare it first: `job {name}(...)` above the worker."),
             )
             .with_code(cat::EXPECTED_TOKEN)]);
         };
         let body = self.parse_block()?;
+        let job = name;
         let fname = format!("__worker_{job}");
         // Bind each payload field before the body runs: `user` reads naturally
         // instead of through a payload object.
@@ -1882,6 +1966,31 @@ None => Err(vec![Diag::new(
                     k += 1;
                     self.chain_ok(k)?;
                     let sp = self.span();
+                    // `email.send(to=..., subject=...)` takes named options, so
+                    // it desugars here into a single object argument. Same
+                    // trick as `queue Name(..)`, and for the same reason: no new
+                    // argument form reaches the rest of the pipeline.
+                    if let Expr::Member(base, name, _) = &e {
+                        if let Expr::Ident(root, _) = base.as_ref() {
+                            if root == "email" && name == "send" {
+                                let obj = self.parse_named_options(
+                                    &[
+                                        "to",
+                                        "from",
+                                        "subject",
+                                        "body",
+                                        "template",
+                                        "data",
+                                        "async",
+                                    ],
+                                    "email.send",
+                                    sp,
+                                )?;
+                                e = Expr::Call { callee: Box::new(e), args: vec![Expr::Obj(obj, sp)], span: sp };
+                                continue;
+                            }
+                        }
+                    }
                     self.advance();
                     let mut args = Vec::new();
                     while !matches!(self.peek(), Tok::Sym(Sym::RParen)) {
@@ -2687,5 +2796,83 @@ mod tests {
         let toks: Vec<Token> = crate::Lexer::new("limit\n").tokenize().unwrap();
         let prog = crate::Parser::new(toks).parse_program().unwrap();
         assert_eq!(prog.stmts.len(), 1);
+    }
+
+    /// The named options of an `email.send(..)` call, as the object argument
+    /// the desugaring produces.
+    fn send_options(src: &str) -> Vec<(String, String)> {
+        let prog = crate::frontend(src, "t.hard").expect("parses");
+        let (callee, args) = match &prog.stmts[0] {
+            Stmt::ExprStmt(Expr::Call { callee, args, .. }) => (callee.as_ref(), args),
+            other => panic!("expected a desugared call, got {other:?}"),
+        };
+        match callee {
+            Expr::Member(b, m, _) => {
+                assert!(matches!(b.as_ref(), Expr::Ident(n, _) if n == "email"));
+                assert_eq!(m, "send");
+            }
+            other => panic!("expected email.send, got {other:?}"),
+        }
+        assert_eq!(args.len(), 1, "one object argument, no positional form");
+        match &args[0] {
+            Expr::Obj(kvs, _) => kvs
+                .iter()
+                .map(|(k, v)| {
+                    let rendered = match v {
+                        Expr::Str(s, _) => s.clone(),
+                        Expr::Bool(b, _) => b.to_string(),
+                        Expr::Int(n, _) => n.to_string(),
+                        Expr::Ident(n, _) => n.clone(),
+                        Expr::Member(_, m, _) => m.clone(),
+                        other => panic!("unexpected option value {other:?}"),
+                    };
+                    (k.clone(), rendered)
+                })
+                .collect(),
+            other => panic!("expected an object of options, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn email_send_takes_named_options() {
+        let opts = send_options("email.send(to = \"a@b.co\", subject = \"Hi\")\n");
+        assert_eq!(
+            opts,
+            vec![("to".to_string(), "a@b.co".to_string()), ("subject".to_string(), "Hi".to_string())],
+            "options keep their order and values"
+        );
+        // `async` is a keyword, and still the option name users write.
+        let opts = send_options("email.send(to = \"a@b.co\", subject = \"Hi\", async = true)\n");
+        assert_eq!(opts[2], ("async".to_string(), "true".to_string()), "the async keyword as a name");
+        let opts =
+            send_options("email.send(to = u.email, subject = \"Hi\", template = \"t\", data = d)\n");
+        assert_eq!(opts[0], ("to".to_string(), "email".to_string()), "the expression is kept");
+        assert_eq!(opts[2].0, "template", "template option");
+        assert_eq!(opts[3].0, "data", "data option");
+    }
+
+    #[test]
+    fn email_send_rejects_bad_option_shapes() {
+        assert!(!parse_errs("email.send()\n").is_empty(), "no options at all");
+        assert!(!parse_errs("email.send(\"a@b.co\")\n").is_empty(), "positional value");
+        assert!(!parse_errs("email.send(to = \"a@b.co\", cc = \"c@d.co\")\n").is_empty(), "unknown option");
+        assert!(
+            !parse_errs("email.send(to = \"a@b.co\", to = \"e@f.co\")\n").is_empty(),
+            "a repeated option is not a silent last-wins"
+        );
+        assert!(!parse_errs("email.send(to = )\n").is_empty(), "an option without a value");
+    }
+
+    #[test]
+    fn email_template_is_an_ordinary_call() {
+        // Positional, so it needs no special parse: only `send` has options.
+        let prog = crate::frontend("email.template(\"welcome\", \"Hi\")\n", "t.hard").expect("parses");
+        match &prog.stmts[0] {
+            Stmt::ExprStmt(Expr::Call { callee, args, .. }) => {
+                assert_eq!(args.len(), 2, "name and content");
+                assert!(matches!(callee.as_ref(), Expr::Member(_, m, _) if m == "template"));
+            }
+            other => panic!("expected a call, got {other:?}"),
+        }
     }
 }

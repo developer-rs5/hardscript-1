@@ -1,0 +1,5 @@
+hs::email_template(hs::Val::text("welcome"), hs::Val::text("Hi {{name}}, welcome aboard."))
+hs::email_template(hs::Val::text("receipt"), hs::Val::text("Thanks {{who}}: {{amount}} is paid."))
+hs::email_send(hs::Val::object({ {"to", hs::Val::text("ada@example.com")}, {"subject", hs::Val::text("Welcome")}, {"body", hs::Val::text("Hello there")} }))
+hs::email_send(hs::Val::object({ {"to", hs::Val::text("ada@example.com")}, {"subject", hs::Val::text("Welcome")}, {"template", hs::Val::text("welcome")}, {"data", hs::Val::object({ {"name", hs::Val::text("Ada")} })}, {"async", hs::Val::boolean(true)} }))
+hs::email_send(hs::Val::object({ {"to", hs::Val::text("ada@example.com")}, {"from", hs::Val::text("noreply@brand.example")}, {"subject", hs::Val::text("Hi")}, {"body", hs::Val::text("there")} }))
