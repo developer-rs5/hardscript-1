@@ -22,6 +22,44 @@ const CPP_KEYWORDS: [&str; 61] = [
     "static", "static_assert", "static_cast", "struct",
 ];
 
+/// The C++ spelling of a column's storage class, for `hs::OrmKind`.
+fn orm_kind_cpp(t: crate::orm::SqlType) -> &'static str {
+    use crate::orm::SqlType::*;
+    match t {
+        Int | BigInt => "hs::OrmKind::Int",
+        Float => "hs::OrmKind::Float",
+        Bool => "hs::OrmKind::Bool",
+        Uuid => "hs::OrmKind::Uuid",
+        Time => "hs::OrmKind::Time",
+        Json => "hs::OrmKind::Json",
+        Text => "hs::OrmKind::Text",
+    }
+}
+
+/// The C++ expression for a `where` step's bound value.
+fn orm_value_cpp(cg: &mut Codegen, method: &str, args: &[Expr]) -> String {
+    let nil = "hs::Val::nil()".to_string();
+    match method {
+        // `find(id)` — the key itself.
+        "find" => args.first().map(|a| cg.expr(a)).unwrap_or(nil),
+        // `where_like(col, pattern)` and `where_in(col, list)`.
+        "where_like" | "where_in" => args.get(1).map(|a| cg.expr(a)).unwrap_or(nil),
+        "where" => {
+            // `where(col == value)` puts the comparison in a single argument,
+            // so the value is the comparison's right-hand side.
+            if args.len() == 1 {
+                if let Expr::Binary(_, _, r, _) = &args[0] {
+                    return cg.expr(r);
+                }
+                return nil;
+            }
+            // `where(col, value)` and `where(col, value, op)`.
+            args.get(1).map(|a| cg.expr(a)).unwrap_or(nil)
+        }
+        _ => nil,
+    }
+}
+
 fn safe_id(name: &str) -> String {
     if CPP_KEYWORDS.contains(&name) {
         format!("{name}_")
@@ -116,6 +154,10 @@ struct Codegen {
     /// The `protect` declaration, if any: decides which routes get the auth
     /// guard and which stay public (M5.2).
     protect: Option<ProtectDef>,
+    /// The ORM schema, built leniently so a model nobody queries keeps
+    /// compiling exactly as it did before the ORM existed. Strictness is
+    /// applied per model, when a query actually touches it.
+    orm: Option<crate::orm::Schema>,
     /// What is being emitted right now. Request-scoped builtins such as
     /// `http.header` and `auth.require` read the in-flight `Request`, so they
     /// are only meaningful where one exists; without this the mistake would
@@ -131,6 +173,7 @@ pub fn generate(prog: &Program) -> Result<String, Vec<Diag>> {
         path: prog.path.clone(),
         diags: Vec::new(),
         model_names: std::collections::BTreeSet::new(),
+        orm: None,
         protect: None,
         ctx: Ctx::Func,
     };
@@ -224,12 +267,21 @@ impl Codegen {
         // any route is emitted.
         self.model_names = models.iter().map(|m| m.name.clone()).collect();
         self.protect = protect.cloned();
+        if !models.is_empty() {
+            // Lenient on purpose: see the field comment. A schema error must
+            // only ever be reachable from a query that uses the model.
+            let owned: Vec<crate::ast::ModelDef> = models.iter().map(|m| (*m).clone()).collect();
+            self.orm = crate::orm::build(&owned, crate::orm::BuildOpts::lenient()).ok();
+        }
 
         for f in &funcs {
             self.emit_func(f);
         }
         for (i, m) in models.iter().enumerate() {
             self.emit_schema(m, i);
+        }
+        if let Some(schema) = self.orm.clone() {
+            self.emit_orm_models(&schema);
         }
         for (i, r) in routes.iter().enumerate() {
             self.emit_route(r, i);
@@ -257,6 +309,127 @@ impl Codegen {
             tests.len(),
             models.len(),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // ORM (M5.3)
+    // -----------------------------------------------------------------
+
+    /// The C++ identifier a model's metadata object is registered under.
+    fn orm_sym(model: &str) -> String {
+        format!("__hs_orm_{}", safe_id(model))
+    }
+
+    /// Register every model as an `hs::OrmModel`, so a query names its model
+    /// rather than rebuilding the metadata at each call site.
+    ///
+    /// Emitted at namespace scope and initialized from string literals, which
+    /// is constant initialization: it is ready before `main` runs, so a query
+    /// in a global initializer would work too.
+    fn emit_orm_models(&mut self, schema: &crate::orm::Schema) {
+        self.blank();
+        for t in schema.canonical_tables() {
+            let mut cols = Vec::new();
+            let mut kinds = Vec::new();
+            for c in &t.columns {
+                cols.push(format!("{:?}", c.name));
+                kinds.push(orm_kind_cpp(c.sql_type));
+            }
+            let pk = t.primary_key_name().unwrap_or("");
+            self.wln(&format!(
+                "static const hs::OrmModel {}({:?}, {:?}, {:?}, std::vector<std::string>{{ {} }}, std::vector<hs::OrmKind>{{ {} }});",
+                Self::orm_sym(&t.model),
+                t.model,
+                t.table,
+                pk,
+                cols.join(", "),
+                kinds.join(", ")
+            ));
+        }
+    }
+
+    /// Emit a validated query chain.
+    ///
+    /// The compiler checks every column name here, against the schema, and
+    /// emits the steps as a call chain. No SQL text is generated: the runtime
+    /// assembles it, and the only strings that reach a statement are column
+    /// names that came from the schema.
+    fn orm_query(&mut self, call: &Expr) -> Option<String> {
+        let schema = self.orm.clone()?;
+        let plan = match crate::orm::parse_query(call, &schema) {
+            Ok(p) => p,
+            Err(mut d) => {
+                self.diags.append(&mut d);
+                return Some("hs::Val::nil()".to_string());
+            }
+        };
+        let table = schema.table(&plan.model)?;
+
+        // A model the ORM cannot map is reported here rather than as a
+        // confusing failure at request time.
+        if let Some(bad) = table.columns.iter().find(|c| c.unsupported_type.is_some()) {
+            self.diags.push(crate::error::Diag::new(
+                crate::error::ErrorKind::Type,
+                format!(
+                    "`{}` has no column type for the field `{} : {}`.",
+                    plan.model, bad.name, bad.unsupported_type.as_deref().unwrap_or("")
+                ),
+                bad.span,
+                "Use Int, Float, Bool, String, Time, UUID, or JSON for a column field.",
+            )
+            .with_code(crate::catalog::ORM_UNKNOWN_TYPE));
+            return Some("hs::Val::nil()".to_string());
+        }
+
+        // Walk the raw chain a second time, in the same order `parse_query`
+        // did, and generate the C++ for each step's value. One step is pushed
+        // per builder method, so the two sequences line up exactly.
+        let (_, chain, _) = crate::orm::orm_chain(call)?;
+        let mut builder = chain.iter().filter(|(name, _, _)| !crate::orm::is_orm_terminal(name));
+        let mut emitted: Vec<String> = Vec::new();
+        for step in &plan.steps {
+            let Some((name, args, _)) = builder.next() else { break };
+            match step {
+                crate::orm::QueryStep::Where { column, op, kind, .. } => {
+                    let col = format!("{:?}", column);
+                    let value = orm_value_cpp(self, name, args);
+                    let (method, arg) = match kind {
+                        crate::orm::WhereKind::Like => ("where_like", value),
+                        crate::orm::WhereKind::In => ("where_in", value),
+                        crate::orm::WhereKind::Compare => (
+                            match op {
+                                crate::orm::CompareOp::Eq => "where_eq",
+                                crate::orm::CompareOp::Ne => "where_ne",
+                                crate::orm::CompareOp::Lt => "where_lt",
+                                crate::orm::CompareOp::Le => "where_le",
+                                crate::orm::CompareOp::Gt => "where_gt",
+                                crate::orm::CompareOp::Ge => "where_ge",
+                            },
+                            value,
+                        ),
+                    };
+                    emitted.push(format!(".{method}({col}, {arg})"));
+                }
+                crate::orm::QueryStep::Limit(n) => emitted.push(format!(".limit({n})")),
+                crate::orm::QueryStep::Offset(n) => emitted.push(format!(".offset({n})")),
+                crate::orm::QueryStep::OrderBy { column, desc } => {
+                    emitted.push(format!(".order_by({:?}, {desc})", column))
+                }
+            }
+        }
+
+        let terminal = match plan.terminal {
+            crate::orm::Terminal::All => "all",
+            crate::orm::Terminal::First => "first",
+            crate::orm::Terminal::Count => "count",
+            crate::orm::Terminal::Exists => "exists",
+        };
+        Some(format!(
+            "hs::OrmQuery(&{}){}.{}(hs::db_need())",
+            Self::orm_sym(&plan.model),
+            emitted.join(""),
+            terminal
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -844,6 +1017,28 @@ impl Codegen {
     }
 
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> String {
+        // An ORM query is a chain rooted at a model, so it is recognized from
+        // the call expression as a whole rather than from its callee. Both a
+        // direct `User.all()` and a chained `User.where(..).limit(..)` arrive
+        // here, so the hook sits above the module dispatch.
+        if self.orm.is_some() {
+            let whole = Expr::Call {
+                callee: Box::new(callee.clone()),
+                args: args.to_vec(),
+                span,
+            };
+            // Gate on the root being a declared model, not on the chain's
+            // shape: `json.parse(..)` has the same shape as `User.all()` and
+            // must not be reported as a query against a missing model.
+            let is_query = crate::orm::chain_root(&whole)
+                .map(|root| self.model_names.contains(&root))
+                .unwrap_or(false);
+            if is_query {
+                if let Some(r) = self.orm_query(&whole) {
+                    return r;
+                }
+            }
+        }
         match callee {
             Expr::Member(base, name, msp) => {
                 if let Expr::Ident(module, _) = base.as_ref() {

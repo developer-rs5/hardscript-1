@@ -223,7 +223,10 @@ impl ColumnDef {
         self.default.is_some() || self.auto_increment || self.created_at || self.updated_at
     }
 
-    fn required_clause(&self) -> bool {
+    /// Whether an insert has to supply this column. The ORM's create path
+    /// checks this so a missing value is a compile error rather than a
+    /// constraint violation at runtime.
+    pub fn required_clause(&self) -> bool {
         !self.nullable && !self.has_db_default()
     }
 }
@@ -333,26 +336,37 @@ impl TableDef {
     }
 
     /// `CREATE INDEX` statements, one per indexed or unique non-key column.
+    /// The columns that need an index statement of their own.
+    ///
+    /// Both the create and the drop side read this list, so a drop can never
+    /// name an index the create did not make, or miss one it did.
+    fn standalone_index_columns(&self) -> Vec<&ColumnDef> {
+        self.columns
+            .iter()
+            .filter(|c| {
+                if c.primary || !(c.index || c.unique) {
+                    return false;
+                }
+                // A unique column already carries a unique index from its
+                // constraint, so only an explicit `@index` adds another.
+                c.index
+            })
+            .collect()
+    }
+
     pub fn create_index_sql(&self, d: Dialect) -> Vec<String> {
-        let mut out = Vec::new();
-        for c in &self.columns {
-            if c.primary || !(c.index || c.unique) {
-                continue;
-            }
-            // A unique column already carries a unique index from its
-            // constraint; only plain `@index` needs its own statement.
-            if c.unique && !c.index {
-                continue;
-            }
-            out.push(format!(
-                "CREATE {}INDEX {} ON {} ({})",
-                if c.unique { "UNIQUE " } else { "" },
-                quote_ident(d, &index_name(&self.table, &c.name)),
-                quote_ident(d, &self.table),
-                quote_ident(d, &c.name)
-            ));
-        }
-        out
+        self.standalone_index_columns()
+            .into_iter()
+            .map(|c| {
+                format!(
+                    "CREATE {}INDEX {} ON {} ({})",
+                    if c.unique { "UNIQUE " } else { "" },
+                    quote_ident(d, &index_name(&self.table, &c.name)),
+                    quote_ident(d, &self.table),
+                    quote_ident(d, &c.name)
+                )
+            })
+            .collect()
     }
 
     /// The complete set of statements that create this table, in the order
@@ -364,11 +378,21 @@ impl TableDef {
     }
 
     /// The statements that drop it, in reverse dependency-safe order.
+    /// A copy of the table with its columns sorted by name.
+    pub fn canonical(&self) -> TableDef {
+        let mut t = self.clone();
+        t.columns.sort_by(|a, b| a.name.cmp(&b.name));
+        t
+    }
+
     pub fn drop_sql(&self, d: Dialect) -> Vec<String> {
+        // Generated from the columns rather than by rewriting the create
+        // statements: `DROP INDEX` takes no `ON` clause, and a unique index
+        // has to keep its `UNIQUE` word out of the drop entirely.
         let mut out: Vec<String> = self
-            .create_index_sql(d)
+            .standalone_index_columns()
             .into_iter()
-            .map(|s| s.replace("CREATE ", "DROP ").replace("CREATE UNIQUE ", "DROP INDEX IF EXISTS ").replace("CREATE INDEX ", "DROP INDEX IF EXISTS "))
+            .map(|c| format!("DROP INDEX IF EXISTS {}", quote_ident(d, &index_name(&self.table, &c.name))))
             .collect();
         out.push(format!("DROP TABLE IF EXISTS {}", quote_ident(d, &self.table)));
         out
@@ -486,6 +510,10 @@ impl Schema {
     pub fn fingerprint(&self, d: Dialect) -> String {
         let mut s = String::new();
         for t in self.canonical_tables() {
+            // Fields are sorted here so that reordering them in the model is
+            // not mistaken for a schema change. A fresh `create_all` still
+            // emits columns in the order they were written.
+            let t = t.canonical();
             let _ = writeln!(s, "-- table {}", t.table);
             for line in t.column_ddl(d) {
                 let _ = writeln!(s, "{line}");
@@ -1097,12 +1125,593 @@ pub fn build(models: &[ModelDef], opts: BuildOpts) -> Result<Schema, Vec<Diag>> 
     Ok(schema)
 }
 
+/// A comparison usable in a `where` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CompareOp {
+    pub fn sql(self) -> &'static str {
+        match self {
+            CompareOp::Eq => "=",
+            CompareOp::Ne => "<>",
+            CompareOp::Lt => "<",
+            CompareOp::Le => "<=",
+            CompareOp::Gt => ">",
+            CompareOp::Ge => ">=",
+        }
+    }
+
+    pub fn from_binop(op: crate::ast::BinOp) -> Option<CompareOp> {
+        use crate::ast::BinOp::*;
+        Some(match op {
+            Eq => CompareOp::Eq,
+            Ne => CompareOp::Ne,
+            Lt => CompareOp::Lt,
+            Le => CompareOp::Le,
+            Gt => CompareOp::Gt,
+            Ge => CompareOp::Ge,
+            _ => return None,
+        })
+    }
+}
+
+/// One builder call, in source order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryStep {
+    /// `where(col = value)`, `where(col, value)`, `where_like(col, pat)`,
+    /// `where_in(col, [..])`. `value` is an index into the call's argument
+    /// list, so the plan stays independent of how a value is generated.
+    Where { column: String, op: CompareOp, arg: usize, kind: WhereKind },
+    Limit(i64),
+    Offset(i64),
+    OrderBy { column: String, desc: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhereKind {
+    Compare,
+    Like,
+    In,
+}
+
+/// What a query returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terminal {
+    All,
+    First,
+    Count,
+    Exists,
+}
+
+impl Terminal {
+    pub fn name(self) -> &'static str {
+        match self {
+            Terminal::All => "all",
+            Terminal::First => "first",
+            Terminal::Count => "count",
+            Terminal::Exists => "exists",
+        }
+    }
+}
+
+/// A validated ORM query: the model it runs against and the builder calls
+/// that shape it, with every column name checked against the schema.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryPlan {
+    pub model: String,
+    pub table: String,
+    pub steps: Vec<QueryStep>,
+    pub terminal: Terminal,
+}
+
+impl QueryPlan {
+    /// Columns referenced by the query, in canonical order — the smallest set
+    /// a `SELECT` needs. `None` means every column.
+    pub fn projected_columns(&self, schema: &Schema) -> Option<Vec<String>> {
+        let t = schema.table(&self.model)?;
+        let mut v: Vec<String> = Vec::new();
+        for s in &self.steps {
+            let c = match s {
+                QueryStep::Where { column, .. } | QueryStep::OrderBy { column, .. } => column,
+                _ => continue,
+            };
+            if t.column(c).is_none() {
+                return None;
+            }
+            v.push(c.clone());
+        }
+        if v.is_empty() {
+            return None;
+        }
+        v.sort();
+        v.dedup();
+        Some(v)
+    }
+}
+
+/// Methods that finish a query. Anything after one of these is a mistake,
+/// because the result is rows, not a builder.
+fn terminal_of(name: &str) -> Option<Terminal> {
+    Some(match name {
+        "all" => Terminal::All,
+        "first" => Terminal::First,
+        "count" => Terminal::Count,
+        "exists" => Terminal::Exists,
+        _ => return None,
+    })
+}
+
+/// Whether a method finishes a query rather than shaping one.
+pub fn is_orm_terminal(name: &str) -> bool {
+    terminal_of(name).is_some()
+}
+
+/// Builder methods, whether or not they appear in a chain.
+pub fn is_orm_method(name: &str) -> bool {
+    terminal_of(name).is_some()
+        || matches!(
+            name,
+            "where" | "where_like" | "where_in" | "limit" | "offset" | "order_by" | "find"
+        )
+}
+
+/// The bare identifier a call chain is rooted at, if it is a chain at all.
+///
+/// Callers use this to decide *whether* a chain is a query, because
+/// `orm_chain` deliberately only describes shape: `json.parse(..)` has the same
+/// shape as `User.all()`, and treating it as a query would report a missing
+/// model for a perfectly good module call.
+pub fn chain_root(call: &Expr) -> Option<String> {
+    orm_chain(call).map(|(m, _, _)| m)
+}
+
+/// The outermost call of a chain: `(Model, [(method, args, span)], span)`.
+///
+/// Walks `Model.a(1).b(2)` down to the `Model` and returns the calls in
+/// source order. Returns `None` for anything that is not a chain rooted at a
+/// bare identifier, so a non-ORM call is left alone.
+pub fn orm_chain(call: &Expr) -> Option<(String, Vec<(String, Vec<Expr>, Span)>, Span)> {
+    let Expr::Call { callee, args, span } = call else { return None };
+    let mut steps: Vec<(String, Vec<Expr>, Span)> = Vec::new();
+    let mut cur = Expr::Call {
+        callee: callee.clone(),
+        args: args.clone(),
+        span: *span,
+    };
+    let outer_span = *span;
+    let model = loop {
+        match cur {
+            Expr::Call { callee, args, span } => {
+                let Expr::Member(base, name, _) = *callee else { return None };
+                steps.push((name, args, span));
+                match *base {
+                    Expr::Ident(m, _) => break m,
+                    inner @ Expr::Call { .. } => cur = inner,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    };
+    steps.reverse();
+    Some((model, steps, outer_span))
+}
+
+/// Parse and validate an ORM chain against the schema.
+///
+/// This is where the query builder is *typed*: every column a chain names is
+/// checked against the model here, so `User.where(emial = x)` is a compile
+/// error naming the typo, rather than a SQL error naming a missing column
+/// discovered at request time.
+pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>> {
+    let (model, raw_steps, span) = orm_chain(call).ok_or_else(|| {
+        vec![err(
+            call.span(),
+            cat::ORM_BAD_QUERY,
+            "this is not a query on a model.",
+            "Start from a model, e.g. `User.all()`.",
+        )]
+    })?;
+    let table = schema.table(&model).ok_or_else(|| {
+        vec![err(
+            span,
+            cat::ORM_UNKNOWN_MODEL,
+            format!("no model named `{model}` is declared."),
+            "Check the spelling against the `model` declarations in this file.",
+        )]
+    })?;
+
+    let mut diags: Vec<Diag> = Vec::new();
+    let mut steps: Vec<QueryStep> = Vec::new();
+    let mut terminal: Option<Terminal> = None;
+    // `find` implies a terminal without being spelled like one, so a later
+    // explicit terminal is a conflict rather than an override.
+    let mut terminal_is_fixed = false;
+    let mut seen_terminal_at: Option<usize> = None;
+
+    for (i, (name, args, sp)) in raw_steps.iter().enumerate() {
+        if let Some(t) = terminal_of(name) {
+            if i + 1 != raw_steps.len() {
+                diags.push(err(
+                    *sp,
+                    cat::ORM_BAD_QUERY,
+                    format!("`{name}` runs the query, so nothing can be chained after it."),
+                    format!("Move the `{}` call last, or start a new query.", name),
+                ));
+            }
+            if terminal_is_fixed && terminal != Some(t) {
+                diags.push(err(
+                    *sp,
+                    cat::ORM_BAD_QUERY,
+                    format!("`find` already fixes the result to a single `{model}`, so `{name}` cannot follow it."),
+                    format!("Use `{name}` without `find`, or keep the `find` lookup."),
+                ));
+            }
+            terminal = Some(t);
+            seen_terminal_at = Some(i);
+            continue;
+        }
+        if let Some(at) = seen_terminal_at {
+            let _ = at;
+            continue;
+        }
+        match name.as_str() {
+            "find" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(*sp, "find", 1, args.len()));
+                    continue;
+                }
+                // `find` is a lookup by primary key, so it is sugar for a
+                // comparison against the key column.
+                let Some(pk) = table.primary_key_name() else {
+                    diags.push(err(
+                        *sp,
+                        cat::ORM_MISSING_PRIMARY_KEY,
+                        format!("`{model}` has no primary key to find by."),
+                        "Give the model a primary key, or use `where` with an explicit column.",
+                    ));
+                    continue;
+                };
+                // `find` is a single-row lookup, so it also fixes the
+                // terminal: `User.find(1).limit(5)` would be a query for a
+                // set the caller has already said cannot exist.
+                terminal = Some(Terminal::First);
+                terminal_is_fixed = true;
+                steps.push(QueryStep::Where {
+                    column: pk.to_string(),
+                    op: CompareOp::Eq,
+                    arg: 0,
+                    kind: WhereKind::Compare,
+                });
+            }
+            "where" | "where_like" | "where_in" => {
+                let kind = match name.as_str() {
+                    "where_like" => WhereKind::Like,
+                    "where_in" => WhereKind::In,
+                    _ => WhereKind::Compare,
+                };
+                if let Some(s) = parse_where(name, args, *sp, table, kind, &mut diags) {
+                    steps.push(s);
+                }
+            }
+            "limit" | "offset" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(*sp, name, 1, args.len()));
+                    continue;
+                }
+                match &args[0] {
+                    Expr::Int(n, _) => {
+                        let v = *n;
+                        if v < 0 {
+                            diags.push(err(
+                                *sp,
+                                cat::ORM_BAD_QUERY,
+                                format!("`{name}` cannot be {v}."),
+                                format!("Pass a count of 0 or more to `{name}`."),
+                            ));
+                            continue;
+                        }
+                        steps.push(if name == "limit" {
+                            QueryStep::Limit(v)
+                        } else {
+                            QueryStep::Offset(v)
+                        });
+                    }
+                    other => {
+                        // A runtime count is expressible, but only a literal can
+                        // be checked here and a silently-unchecked limit is how
+                        // `LIMIT ?` with a negative value reaches a database.
+                        diags.push(err(
+                            other.span(),
+                            cat::ORM_BAD_QUERY,
+                            format!("`{name}` needs a literal count."),
+                            "Pass the number directly, e.g. `.limit(10)`.",
+                        ));
+                    }
+                }
+            }
+            "order_by" => {
+                if args.len() != 2 {
+                    diags.push(arity_err(*sp, "order_by", 2, args.len()));
+                    continue;
+                }
+                let col = match &args[0] {
+                    Expr::Ident(c, _) => c.clone(),
+                    Expr::Str(c, _) => c.clone(),
+                    other => {
+                        diags.push(err(
+                            other.span(),
+                            cat::ORM_BAD_ORDER,
+                            "`order_by` needs a field name.",
+                            "Name the field, e.g. `.order_by(created, desc)`.",
+                        ));
+                        continue;
+                    }
+                };
+                if table.column(&col).is_none() {
+                    diags.push(unknown_col_err(*sp, &model, &col, table, cat::ORM_BAD_ORDER));
+                    continue;
+                }
+                let desc = match &args[1] {
+                    Expr::Ident(d, _) if d == "desc" => true,
+                    Expr::Ident(d, _) if d == "asc" => false,
+                    Expr::Str(d, _) if d == "desc" => true,
+                    Expr::Str(d, _) if d == "asc" => false,
+                    other => {
+                        diags.push(err(
+                            other.span(),
+                            cat::ORM_BAD_ORDER,
+                            "`order_by` takes `asc` or `desc` as the direction.",
+                            "Write `.order_by(created, desc)` or `.order_by(created, asc)`.",
+                        ));
+                        let _ = other;
+                        continue;
+                    }
+                };
+                steps.push(QueryStep::OrderBy { column: col, desc });
+            }
+            other => {
+                diags.push(err(
+                    *sp,
+                    cat::ORM_BAD_QUERY,
+                    format!("`{other}` is not a query method."),
+                    "Use all, first, count, exists, where, where_like, where_in, limit, offset, or order_by.",
+                ));
+            }
+        }
+    }
+
+    if !diags.is_empty() {
+        return Err(diags);
+    }
+    Ok(QueryPlan {
+        model,
+        table: table.table.clone(),
+        steps,
+        terminal: terminal.unwrap_or(Terminal::All),
+    })
+}
+
+fn arity_err(span: Span, name: &str, want: usize, got: usize) -> Diag {
+    err(
+        span,
+        cat::ORM_BAD_QUERY,
+        format!("`{name}` takes {want} argument{}, but {got} were given.", if want == 1 { "" } else { "s" }),
+        format!("Call `{name}` with {want} argument{}.", if want == 1 { "" } else { "s" }),
+    )
+}
+
+fn unknown_col_err(span: Span, model: &str, col: &str, table: &TableDef, code: u16) -> Diag {
+    let mut declared: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    declared.sort();
+    let names: Vec<String> = declared.iter().map(|s| s.to_string()).collect();
+    let hint = crate::suggest::closest(col, &names);
+    err(
+        span,
+        code,
+        format!("`{model}` has no field `{col}`."),
+        match hint {
+            Some(h) => format!("Did you mean `{h}`?"),
+            None => format!("`{model}` declares: {}.", declared.join(", ")),
+        },
+    )
+}
+
+/// Parse the argument forms of `where`.
+fn parse_where(
+    name: &str,
+    args: &[Expr],
+    sp: Span,
+    table: &TableDef,
+    kind: WhereKind,
+    diags: &mut Vec<Diag>,
+) -> Option<QueryStep> {
+    let model = &table.model;
+    match kind {
+        WhereKind::Compare => {
+            // `where(col = value)` — the documented spelling.
+            if args.len() == 1 {
+                let Expr::Binary(op, _l, _r, bsp) = &args[0] else {
+                    diags.push(err(
+                        args[0].span(),
+                        cat::ORM_BAD_QUERY,
+                        format!("`{name}` needs a comparison, e.g. `where({model}.field = value)`."),
+                        "Write `where(column = value)` or `where(column, value)`.",
+                    ));
+                    return None;
+                };
+                let Some(cmp) = CompareOp::from_binop(*op) else {
+                    diags.push(err(
+                        *bsp,
+                        cat::ORM_BAD_QUERY,
+                        "a `where` clause cannot use that operator.",
+                        "Compare with =, !=, <, <=, > or >=.",
+                    ));
+                    return None;
+                };
+                let col = column_name(_l, model, table, diags)?;
+                return Some(QueryStep::Where { column: col, op: cmp, arg: 0, kind });
+            }
+            // `where(col, value)` or `where(col, value, op)`.
+            if args.len() == 2 || args.len() == 3 {
+                let col = column_name(&args[0], model, table, diags)?;
+                let op = if args.len() == 3 {
+                    let Some(c) = compare_from(&args[2]) else {
+                        diags.push(err(
+                            args[2].span(),
+                            cat::ORM_BAD_QUERY,
+                            "the third argument of `where` must be a comparison operator.",
+                            "Use one of =, !=, <, <=, >, >= as a string, e.g. `where(age, 20, \">\")`.",
+                        ));
+                        return None;
+                    };
+                    c
+                } else {
+                    CompareOp::Eq
+                };
+                return Some(QueryStep::Where { column: col, op, arg: 1, kind });
+            }
+            diags.push(arity_err(sp, name, 1, args.len()));
+            None
+        }
+        WhereKind::Like => {
+            if args.len() != 2 {
+                diags.push(arity_err(sp, name, 2, args.len()));
+                return None;
+            }
+            let col = column_name(&args[0], model, table, diags)?;
+            Some(QueryStep::Where { column: col, op: CompareOp::Eq, arg: 1, kind })
+        }
+        WhereKind::In => {
+            if args.len() != 2 {
+                diags.push(arity_err(sp, name, 2, args.len()));
+                return None;
+            }
+            let col = column_name(&args[0], model, table, diags)?;
+            if !matches!(args[1], Expr::List(..)) {
+                diags.push(err(
+                    args[1].span(),
+                    cat::ORM_BAD_QUERY,
+                    "`where_in` needs a list of values.",
+                    "Write `where_in(id, [1, 2, 3])`.",
+                ));
+                return None;
+            }
+            Some(QueryStep::Where { column: col, op: CompareOp::Eq, arg: 1, kind })
+        }
+    }
+}
+
+fn compare_from(e: &Expr) -> Option<CompareOp> {
+    let s = match e {
+        Expr::Str(s, _) => s.as_str(),
+        Expr::Ident(s, _) => s.as_str(),
+        _ => return None,
+    };
+    Some(match s {
+        "=" | "==" => CompareOp::Eq,
+        "!=" | "<>" => CompareOp::Ne,
+        "<" => CompareOp::Lt,
+        "<=" => CompareOp::Le,
+        ">" => CompareOp::Gt,
+        ">=" => CompareOp::Ge,
+        _ => return None,
+    })
+}
+
+/// Read a column reference, which must be a literal field name. A variable
+/// would make the query stringly-typed, and the point of this builder is that
+/// it is not.
+fn column_name(e: &Expr, model: &str, table: &TableDef, diags: &mut Vec<Diag>) -> Option<String> {
+    let col = match e {
+        Expr::Ident(c, _) => c.clone(),
+        Expr::Str(c, _) => c.clone(),
+        Expr::Member(_, c, _) => c.clone(),
+        other => {
+            diags.push(err(
+                other.span(),
+                cat::ORM_BAD_QUERY,
+                format!("`{model}` query needs a field name."),
+                "Name the field directly, e.g. `where(email, value)`.",
+            ));
+            return None;
+        }
+    };
+    if table.column(&col).is_none() {
+        diags.push(unknown_col_err(e.span(), model, &col, table, cat::ORM_UNKNOWN_COLUMN));
+        return None;
+    }
+    Some(col)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse_models(src: &str) -> Vec<ModelDef> {
-        crate::frontend(src, "test.hard").expect("parse").models
+        crate::frontend(src, "test.hard").expect("parse").model_defs()
+    }
+
+    /// A program as the merge and cache paths build it: models in `stmts`,
+    /// with the lifted field left empty.
+    fn as_merged(src: &str) -> crate::ast::Program {
+        let mut prog = crate::frontend(src, "test.hard").expect("parse");
+        prog.models = Vec::new();
+        prog
+    }
+
+    #[test]
+    fn a_fingerprint_ignores_the_order_fields_were_written_in() {
+        // A fingerprint drives the "is the database behind the models?"
+        // check, so reordering fields must not read as a pending change.
+        let a = schema_of(
+            "model User { id : Int @primary, name : String, city : String @index, age : Int @default(1) }",
+        )
+        .expect("schema");
+        let b = schema_of(
+            "model User { age : Int @default(1), city : String @index, id : Int @primary, name : String }",
+        )
+        .expect("schema");
+        assert_eq!(a.fingerprint(Dialect::Sqlite), b.fingerprint(Dialect::Sqlite));
+        assert_eq!(a.fingerprint(Dialect::Postgres), b.fingerprint(Dialect::Postgres));
+    }
+
+    #[test]
+    fn a_fingerprint_still_notices_a_real_change() {
+        let a = schema_of("model User { id : Int @primary, name : String }").expect("schema");
+        let b = schema_of("model User { id : Int @primary, name : String @unique }").expect("schema");
+        assert_ne!(a.fingerprint(Dialect::Sqlite), b.fingerprint(Dialect::Sqlite));
+    }
+
+    #[test]
+    fn models_survive_a_program_rebuilt_from_statements() {
+        // The merge path and the AST cache both hand the schema engine a
+        // program whose lifted model list is empty, so `model_defs` has to
+        // recover the declarations from the statements.
+        let prog = as_merged("model Post { id : Int @primary @auto_increment\n            title : String }");
+        let defs = prog.model_defs();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "Post");
+        let schema = build(&defs, BuildOpts::strict()).expect("schema");
+        assert!(schema.table("post").is_some());
+    }
+
+    #[test]
+    fn models_survive_an_ast_cache_round_trip() {
+        let prog = as_merged("model Post { id : Int @primary @auto_increment\n            title : String }");
+        let bytes = crate::astser::serialize_stmts(&prog.stmts).expect("serialize");
+        let stmts = crate::astser::deserialize_stmts(&bytes).expect("deserialize");
+        let cached = crate::ast::Program { stmts, path: String::new(), models: Vec::new() };
+        let schema = build(&cached.model_defs(), BuildOpts::strict()).expect("schema");
+        assert_eq!(schema.tables.len(), 1);
+        assert!(schema.table("post").is_some());
     }
 
     fn schema_of(src: &str) -> Result<Schema, Vec<Diag>> {
@@ -1421,8 +2030,32 @@ mod tests {
         let t = s.table("User").unwrap();
         let drops = t.drop_sql(Dialect::Sqlite);
         assert_eq!(drops.len(), 2);
-        assert!(drops[0].starts_with("DROP INDEX"), "{:?}", drops[0]);
+        // Exact text, not a prefix: a rewrite of the create statement used to
+        // leave the `ON table (col)` tail on a `DROP INDEX`, which no database
+        // will run.
+        assert_eq!(drops[0], "DROP INDEX IF EXISTS \"idx_user_city\"");
         assert_eq!(drops[1], "DROP TABLE IF EXISTS \"user\"");
+    }
+
+    #[test]
+    fn a_unique_index_is_dropped_without_its_unique_keyword() {
+        let s = schema_of("model User { id : Int @primary, city : String @unique @index }").expect("schema");
+        let t = s.table("User").unwrap();
+        assert_eq!(
+            t.create_index_sql(Dialect::Sqlite),
+            vec!["CREATE UNIQUE INDEX \"idx_user_city\" ON \"user\" (\"city\")"]
+        );
+        assert_eq!(t.drop_sql(Dialect::Sqlite)[0], "DROP INDEX IF EXISTS \"idx_user_city\"");
+    }
+
+    #[test]
+    fn a_unique_constraint_needs_no_index_statement() {
+        // A plain `@unique` is a column constraint, so there is no index
+        // statement to create and none to drop.
+        let s = schema_of("model User { id : Int @primary, email : Email @unique }").expect("schema");
+        let t = s.table("User").unwrap();
+        assert!(t.create_index_sql(Dialect::Postgres).is_empty());
+        assert_eq!(t.drop_sql(Dialect::Postgres), vec!["DROP TABLE IF EXISTS \"user\""]);
     }
 
     #[test]
@@ -1453,6 +2086,364 @@ mod tests {
         assert_eq!(Dialect::parse("mysql"), None);
         assert_eq!(Dialect::Sqlite.placeholder(), "?");
         assert_eq!(Dialect::Postgres.placeholder(), "$1");
+    }
+
+    // ---------------- query builder (M5.3.2) ----------------
+
+    fn q(src: &str) -> Result<QueryPlan, Vec<u16>> {
+        let models = parse_models(SCHEMA_SRC);
+        let schema = build(&models, BuildOpts::strict()).expect("schema");
+        let prog = crate::frontend(src, "q.hard").expect("parse");
+        let expr = first_call(&prog).expect("a call in the source");
+        match parse_query(&expr, &schema) {
+            Ok(p) => Ok(p),
+            Err(d) => Err(d.iter().map(|x| x.code).collect()),
+        }
+    }
+
+    const SCHEMA_SRC: &str = r#"
+        model User {
+            id : Int @primary @auto_increment
+            email : Email @unique
+            name : String
+            age : Int @default(18)
+            created : Time @default(now())
+        }
+    "#;
+
+    /// The first call expression in a program, which for these tests is the
+    /// query itself.
+    fn first_call(prog: &crate::ast::Program) -> Option<Expr> {
+        fn in_expr(e: &Expr) -> Option<Expr> {
+            if matches!(e, Expr::Call { .. }) && orm_chain(e).is_some() {
+                return Some(e.clone());
+            }
+            match e {
+                Expr::Call { callee, args, .. } => in_expr(callee).or_else(|| args.iter().find_map(in_expr)),
+                Expr::Member(b, _, _) | Expr::Index(b, _, _) => in_expr(b),
+                Expr::Binary(_, l, r, _) => in_expr(l).or_else(|| in_expr(r)),
+                Expr::Unary(_, x, _) => in_expr(x),
+                _ => None,
+            }
+        }
+        fn in_stmts(sts: &[crate::ast::Stmt]) -> Option<Expr> {
+            for s in sts {
+                match s {
+                    crate::ast::Stmt::Return(e, _) => {
+                        if let Some(f) = in_expr(e) {
+                            return Some(f);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        for st in &prog.stmts {
+            if let crate::ast::Stmt::Route(r) = st {
+                if let Some(f) = in_stmts(&r.body) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn all_is_the_default_terminal() {
+        let p = q("GET \"/\" :: { <- User.all() }").expect("plan");
+        assert_eq!(p.model, "User");
+        assert_eq!(p.terminal, Terminal::All);
+        assert!(p.steps.is_empty());
+    }
+
+    #[test]
+    fn count_and_exists_are_terminals() {
+        assert_eq!(q("GET \"/\" :: { <- User.count() }").unwrap().terminal, Terminal::Count);
+        assert_eq!(q("GET \"/\" :: { <- User.exists() }").unwrap().terminal, Terminal::Exists);
+        // They chain with the builder methods too.
+        let p = q("GET \"/\" :: { <- User.where(age > 20).count() }").unwrap();
+        assert_eq!(p.terminal, Terminal::Count);
+        assert_eq!(p.steps.len(), 1);
+    }
+
+    #[test]
+    fn first_is_a_terminal() {
+        let p = q("GET \"/\" :: { <- User.first() }").unwrap();
+        assert_eq!(p.terminal, Terminal::First);
+    }
+
+    #[test]
+    fn find_becomes_a_primary_key_comparison() {
+        let p = q("GET \"/\" :: { <- User.find(7) }").expect("plan");
+        assert_eq!(
+            p.steps,
+            vec![QueryStep::Where {
+                column: "id".to_string(),
+                op: CompareOp::Eq,
+                arg: 0,
+                kind: WhereKind::Compare
+            }]
+        );
+        // `find` is a single-row lookup.
+        assert_eq!(p.terminal, Terminal::First);
+    }
+
+    #[test]
+    fn where_accepts_a_comparison_expression() {
+        let p = q("GET \"/\" :: { <- User.where(age > 20) }").expect("plan");
+        assert_eq!(
+            p.steps,
+            vec![QueryStep::Where {
+                column: "age".to_string(),
+                op: CompareOp::Gt,
+                arg: 0,
+                kind: WhereKind::Compare
+            }]
+        );
+    }
+
+    #[test]
+    fn where_accepts_every_comparison_operator() {
+        for (src, want) in [
+            ("age == 1", CompareOp::Eq),
+            ("age != 1", CompareOp::Ne),
+            ("age < 1", CompareOp::Lt),
+            ("age <= 1", CompareOp::Le),
+            ("age > 1", CompareOp::Gt),
+            ("age >= 1", CompareOp::Ge),
+        ] {
+            let p = q(&format!("GET \"/\" :: {{ <- User.where({src}) }}")).expect(src);
+            match &p.steps[0] {
+                QueryStep::Where { op, column, .. } => {
+                    assert_eq!(*op, want, "{src}");
+                    assert_eq!(column, "age", "{src}");
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn where_takes_a_column_and_a_value_pair() {
+        let p = q("GET \"/\" :: { <- User.where(email, \"a@b.c\") }").expect("plan");
+        assert_eq!(
+            p.steps,
+            vec![QueryStep::Where {
+                column: "email".to_string(),
+                op: CompareOp::Eq,
+                arg: 1,
+                kind: WhereKind::Compare
+            }]
+        );
+    }
+
+    #[test]
+    fn where_can_take_an_explicit_operator_string() {
+        let p = q("GET \"/\" :: { <- User.where(age, 20, \">=\") }").expect("plan");
+        match &p.steps[0] {
+            QueryStep::Where { op, .. } => assert_eq!(*op, CompareOp::Ge),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn like_and_in_need_their_own_methods() {
+        let p = q("GET \"/\" :: { <- User.where_like(name, \"%a%\") }").expect("plan");
+        assert_eq!(p.steps[0], QueryStep::Where { column: "name".into(), op: CompareOp::Eq, arg: 1, kind: WhereKind::Like });
+        let p = q("GET \"/\" :: { <- User.where_in(id, [1, 2, 3]) }").expect("plan");
+        assert_eq!(p.steps[0], QueryStep::Where { column: "id".into(), op: CompareOp::Eq, arg: 1, kind: WhereKind::In });
+    }
+
+    #[test]
+    fn a_full_chain_keeps_source_order() {
+        let p = q(
+            "GET \"/\" :: { <- User.where(age > 20).where_like(name, \"%a%\").order_by(created, desc).limit(10).offset(20).all() }",
+        )
+        .expect("plan");
+        assert_eq!(p.terminal, Terminal::All);
+        assert_eq!(
+            p.steps,
+            vec![
+                QueryStep::Where { column: "age".into(), op: CompareOp::Gt, arg: 0, kind: WhereKind::Compare },
+                QueryStep::Where { column: "name".into(), op: CompareOp::Eq, arg: 1, kind: WhereKind::Like },
+                QueryStep::OrderBy { column: "created".into(), desc: true },
+                QueryStep::Limit(10),
+                QueryStep::Offset(20),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_by_takes_a_direction() {
+        let p = q("GET \"/\" :: { <- User.order_by(created, desc) }").expect("plan");
+        assert_eq!(p.steps[0], QueryStep::OrderBy { column: "created".into(), desc: true });
+        let p = q("GET \"/\" :: { <- User.order_by(created, asc) }").expect("plan");
+        assert_eq!(p.steps[0], QueryStep::OrderBy { column: "created".into(), desc: false });
+    }
+
+    #[test]
+    fn limit_and_offset_take_literal_counts() {
+        let p = q("GET \"/\" :: { <- User.limit(10).offset(20) }").expect("plan");
+        assert_eq!(p.steps, vec![QueryStep::Limit(10), QueryStep::Offset(20)]);
+        // Zero is a legal count, unlike a negative one.
+        assert!(q("GET \"/\" :: { <- User.limit(0) }").is_ok());
+    }
+
+    #[test]
+    fn a_non_literal_limit_is_rejected() {
+        // A runtime count would compile, but it cannot be checked here, and a
+        // silently unchecked limit is how `LIMIT -1` reaches a database.
+        let c = q("n ::= 10\nGET \"/\" :: { <- User.limit(n) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn a_negative_limit_is_rejected() {
+        let c = q("GET \"/\" :: { <- User.limit(-1) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn an_unknown_column_is_a_compile_error() {
+        let c = q("GET \"/\" :: { <- User.where(emial == \"x\") }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_COLUMN]);
+        let c = q("GET \"/\" :: { <- User.order_by(nope, asc) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_ORDER]);
+    }
+
+    #[test]
+    fn a_relationship_field_is_not_a_column() {
+        // `posts` would be a relation on a model that has one; here `User` has
+        // no such field, so the query must not compile.
+        let c = q("GET \"/\" :: { <- User.where(posts, 1) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_COLUMN]);
+    }
+
+    #[test]
+    fn an_unknown_model_is_reported() {
+        let c = q("GET \"/\" :: { <- Nope.all() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_MODEL]);
+    }
+
+    #[test]
+    fn find_cannot_be_turned_back_into_a_collection() {
+        // `find` has already committed to one row, so a later terminal is
+        // meaningless rather than a way to fetch a set.
+        let c = q("GET \"/\" :: { <- User.find(1).all() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+        let p = q("GET \"/\" :: { <- User.find(1).first() }").expect("plan");
+        assert_eq!(p.terminal, Terminal::First);
+    }
+
+    #[test]
+    fn a_terminal_must_come_last() {
+        let c = q("GET \"/\" :: { <- User.all().limit(10) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+        let c = q("GET \"/\" :: { <- User.count().order_by(created, asc) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn an_unknown_method_is_reported() {
+        let c = q("GET \"/\" :: { <- User.fetch_all() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn bad_arity_is_reported_per_method() {
+        assert_eq!(q("GET \"/\" :: { <- User.where() }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(q("GET \"/\" :: { <- User.find(1, 2) }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(q("GET \"/\" :: { <- User.order_by(created) }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(q("GET \"/\" :: { <- User.where_like(name) }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn a_bad_order_direction_is_reported() {
+        let c = q("GET \"/\" :: { <- User.order_by(created, sideways) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_ORDER]);
+    }
+
+    #[test]
+    fn a_dynamic_column_name_is_refused() {
+        // Letting a runtime name through would make the builder stringly-typed,
+        // which is the thing it exists to avoid.
+        let c = q("col ::= \"age\"\nGET \"/\" :: { <- User.where(col, 20) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_COLUMN]);
+    }
+
+    #[test]
+    fn where_in_needs_a_list() {
+        let c = q("GET \"/\" :: { <- User.where_in(id, 5) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn a_non_comparison_operator_is_not_a_comparison() {
+        let c = q("GET \"/\" :: { <- User.where(age + 1) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn projected_columns_are_the_referenced_ones() {
+        let models = parse_models(SCHEMA_SRC);
+        let schema = build(&models, BuildOpts::strict()).unwrap();
+        let prog = crate::frontend("GET \"/\" :: { <- User.where(age > 1).order_by(name, asc) }", "p.hard").unwrap();
+        let expr = first_call(&prog).unwrap();
+        let p = parse_query(&expr, &schema).unwrap();
+        assert_eq!(p.projected_columns(&schema), Some(vec!["age".to_string(), "name".to_string()]));
+        // No reference means every column.
+        let prog = crate::frontend("GET \"/\" :: { <- User.all() }", "p.hard").unwrap();
+        let p = parse_query(&first_call(&prog).unwrap(), &schema).unwrap();
+        assert_eq!(p.projected_columns(&schema), None);
+    }
+
+    #[test]
+    fn is_orm_method_covers_every_builder_method() {
+        for m in ["all", "first", "count", "exists", "where", "where_like", "where_in", "limit",
+                  "offset", "order_by", "find"] {
+            assert!(is_orm_method(m), "{m}");
+        }
+        for m in ["fetch", "save", "delete", "nope"] {
+            assert!(!is_orm_method(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn a_module_call_has_a_chain_shape_but_is_not_a_query() {
+        // `json.parse(..)` and `User.all()` are structurally identical, which
+        // is why callers must gate on the root being a declared model rather
+        // than on the shape alone.
+        let prog = crate::frontend("GET \"/\" :: { <- json.parse(\"{}\") }", "x.hard").unwrap();
+        let expr = first_call(&prog).expect("a call");
+        assert_eq!(chain_root(&expr).as_deref(), Some("json"));
+        let models = parse_models(SCHEMA_SRC);
+        let schema = build(&models, BuildOpts::strict()).unwrap();
+        let codes: Vec<u16> = parse_query(&expr, &schema).err().unwrap().iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec![cat::ORM_UNKNOWN_MODEL]);
+
+        // A non-call expression is not a chain at all.
+        let prog = crate::frontend("GET \"/\" :: { <- 1 + 2 }", "x.hard").unwrap();
+        if let crate::ast::Stmt::Route(r) = &prog.stmts[0] {
+            if let crate::ast::Stmt::Return(e, _) = &r.body[0] {
+                assert!(chain_root(e).is_none());
+            }
+        }
+        // Calling a local function is not a query either.
+        let prog = crate::frontend(
+            "calc one() => Int { return 1 }\nGET \"/\" :: { <- one() }",
+            "x.hard",
+        )
+        .unwrap();
+        let mut found = false;
+        for st in &prog.stmts {
+            if let crate::ast::Stmt::Route(r) = st {
+                if let crate::ast::Stmt::Return(Expr::Call { .. }, _) = &r.body[0] {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "expected a plain call in the route");
     }
 
     #[test]

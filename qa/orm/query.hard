@@ -1,0 +1,21 @@
+bring http
+app @3131
+
+model User {
+    id    : Int @primary @auto_increment
+    email : Email @unique
+    name  : String
+    age   : Int @default(18)
+}
+
+GET "/u" :: {
+    <- User.where(age > 20).order_by(name, asc).limit(10).all()
+}
+
+GET "/one" :: {
+    <- User.find(1)
+}
+
+GET "/n" :: {
+    <- User.count()
+}

@@ -71,6 +71,8 @@ struct Checker {
     globals: HashMap<String, Span>,
     files: Vec<Option<String>>,
     models: BTreeMap<String, ModelDef>,
+    /// The model's own declarations, kept because the ORM schema is built from
+    /// them (a name reference is not enough to build a table).
     model_files: BTreeMap<String, Option<String>>,
 }
 
@@ -229,6 +231,72 @@ impl Checker {
         }
     }
 
+    /// The validated query plan for `e`, if it is an ORM chain rooted at a
+    /// declared model.
+    /// The steps of a query chain, if `e` is one.
+    ///
+    /// The test is the chain's root, not whether the chain is well formed: a
+    /// query naming a column that does not exist still has to reach codegen so
+    /// the programmer gets `HS0219` for the column instead of `HS0104` for an
+    /// undefined variable.
+    fn orm_chain_steps(&self, e: &Expr) -> Option<Vec<(String, Vec<Expr>)>> {
+        let (model, chain, _) = crate::orm::orm_chain(e)?;
+        if !self.models.contains_key(&model) {
+            return None;
+        }
+        Some(chain.into_iter().map(|(name, args, _)| (name, args)).collect())
+    }
+
+    /// Type-check the value-carrying positions of a query chain.
+    ///
+    /// Column names, model names and direction keywords are the schema's
+    /// business, so they are left for codegen; everything else is ordinary
+    /// code and gets checked here. The positions are read off the chain's
+    /// shape rather than off a parsed plan, so an invalid chain still gets its
+    /// value expressions checked.
+    fn scan_orm_chain(&mut self, chain: &[(String, Vec<Expr>)], scope: &HashMap<String, Span>) {
+        for (name, args) in chain {
+            match name.as_str() {
+                // `where(col == value)`, `where(col, value)` and
+                // `where(col, value, op)`.
+                "where" => {
+                    if args.len() == 1 {
+                        match &args[0] {
+                            // A column on the left, a value on the right.
+                            Expr::Binary(_, l, r, _) if matches!(l.as_ref(), Expr::Ident(..)) => self.expr(r, scope),
+                            // Not a column comparison, so every operand is
+                            // ordinary code; codegen reports the bad operator.
+                            other => self.expr(other, scope),
+                        }
+                    }
+                    for a in args.iter().skip(1) {
+                        self.expr(a, scope);
+                    }
+                }
+                // `where_like(col, pattern)`, `where_in(col, list)`.
+                "where_like" | "where_in" => {
+                    for a in args.iter().skip(1) {
+                        self.expr(a, scope);
+                    }
+                }
+                // `find(key)`.
+                "find" => {
+                    for a in args {
+                        self.expr(a, scope);
+                    }
+                }
+                // `limit(n)`, `offset(n)`.
+                "limit" | "offset" => {
+                    for a in args {
+                        self.expr(a, scope);
+                    }
+                }
+                // `order_by(col, dir)` and the terminals carry no values.
+                _ => {}
+            }
+        }
+    }
+
     fn expr(&mut self, e: &Expr, scope: &HashMap<String, Span>) {
         match e {
             Expr::Ident(name, sp) => {
@@ -278,6 +346,15 @@ impl Checker {
                 self.expr(idx, scope);
             }
             Expr::Call { callee, args, span } => {
+                // An ORM chain is rooted at a model, and its column names are
+                // field references rather than variables. Type-checking it as
+                // ordinary code would report `User` and `age` as undefined, so
+                // the chain is walked for its *value* positions only — the
+                // column side is the schema's business, and codegen checks it.
+                if let Some(chain) = self.orm_chain_steps(e) {
+                    self.scan_orm_chain(&chain, scope);
+                    return;
+                }
                 if let Expr::Ident(name, csp) = callee.as_ref() {
                     let known = self.funcs.contains_key(&name.clone()) || scope.contains_key(name);
                     let is_boot = name == "_" || name == "expect";

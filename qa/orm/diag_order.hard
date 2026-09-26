@@ -1,0 +1,11 @@
+bring http
+app @3131
+
+model User {
+    id      : Int @primary @auto_increment
+    created : Time @default(now())
+}
+
+GET "/" :: {
+    <- User.order_by(created, sideways)
+}

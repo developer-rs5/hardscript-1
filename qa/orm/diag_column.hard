@@ -1,0 +1,12 @@
+bring http
+app @3131
+
+model User {
+    id    : Int @primary @auto_increment
+    email : Email
+    age   : Int
+}
+
+GET "/" :: {
+    <- User.where(emial == "a@b.c").all()
+}

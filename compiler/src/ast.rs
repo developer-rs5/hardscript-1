@@ -8,7 +8,27 @@ pub struct Program {
     /// schema engine, the migration commands and codegen all need the model
     /// *metadata* rather than the statements, and a model is not a runtime
     /// statement, so it travels beside the program instead of inside it.
+    ///
+    /// A program built any other way -- merged from modules, or decoded from
+    /// the AST cache -- may leave this empty even though `stmts` carries the
+    /// declarations. Prefer [`Program::model_defs`], which covers both.
     pub models: Vec<ModelDef>,
+}
+
+impl Program {
+    /// Every model declared in the program, in source order.
+    pub fn model_defs(&self) -> Vec<ModelDef> {
+        if !self.models.is_empty() {
+            return self.models.clone();
+        }
+        self.stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Model(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

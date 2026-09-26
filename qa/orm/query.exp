@@ -1,0 +1,4 @@
+static const hs::OrmModel __hs_orm_User("User", "user", "id", std::vector<std::string>{ "id", "email", "name", "age" }, std::vector<hs::OrmKind>{ hs::OrmKind::Int, hs::OrmKind::Text, hs::OrmKind::Text, hs::OrmKind::Int });
+hs::OrmQuery(&__hs_orm_User).where_gt("age", hs::Val::int_(20)).order_by("name", false).limit(10).all(hs::db_need())
+hs::OrmQuery(&__hs_orm_User).where_eq("id", hs::Val::int_(1)).first(hs::db_need())
+hs::OrmQuery(&__hs_orm_User).count(hs::db_need())
