@@ -1,0 +1,60 @@
+email.template("welcome", "Hi {{name}}, your code is {{code}}.")
+
+cache users ttl 10m
+
+limit 100 requests / minute
+
+job SendWelcome(Text to)
+
+worker SendWelcome {
+    email.send(to = to, subject = "Welcome", body = "Glad you are here.")
+}
+
+every 1h { cleanup() }
+every day at "03:00" { report() }
+every monday at "09:00" timezone "Europe/Berlin" { digest() }
+every startup { warm() }
+
+calc cleanup() { <- 1 }
+calc report() { <- 1 }
+calc digest() { <- 1 }
+calc warm() { <- 1 }
+
+GET "/signup" :: {
+    id <- queue SendWelcome("ada@example.com", delay = 60, priority = 5)
+    <- { queued: id }
+}
+
+GET "/login" :: {
+    session.start({ id: 1, email: "ada@example.com" })
+    <- "welcome"
+}
+
+GET "/api" :: {
+    limit 10 requests / second sliding key "api"
+    <- "ok"
+}
+
+GET "/pay" :: {
+    got <- lock.acquire("invoice:1", 30)
+    first <- idem.claim("pay:1", 3600)
+    metrics.incr("orders_total")
+    metrics.observe("order_value", 42)
+    health.set("redis", true, "ping ok")
+    who <- cluster.owner("user:42")
+    mine <- cluster.is_owner("user:42")
+    node <- cluster.node()
+    peers <- cluster.peers()
+    answer <- idem.lookup("pay:1")
+    held <- lock.held("invoice:1")
+    <- { locked: got, first: first, who: who, mine: mine, node: node,
+         peers: peers, answer: answer, held: held }
+}
+
+GET "/resend" :: {
+    sent <- email.send(to = "ada@example.com", subject = "Your code",
+                       template = "welcome",
+                       data = { name: "Ada", code: 4821 },
+                       async = true)
+    <- { queued: sent }
+}

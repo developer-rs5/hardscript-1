@@ -175,7 +175,9 @@ class MockPg {
         out += type;
         put_i32(out, (int32_t)body.size() + 4);
         out += body;
-        if (::send(fd, out.data(), out.size(), 0) != (ssize_t)out.size())
+        // No SIGPIPE: these tests drop a client mid-conversation on purpose,
+        // and a signal out of a mock server is a flaky fixture, not a finding.
+        if (::send(fd, out.data(), out.size(), MSG_NOSIGNAL) != (ssize_t)out.size())
             throw std::runtime_error("mock pg: short write");
     }
 

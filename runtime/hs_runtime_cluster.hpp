@@ -582,7 +582,7 @@ class HttpClusterTransport : public ClusterTransport {
         req += body;
         size_t sent = 0;
         while (sent < req.size()) {
-            ssize_t n = ::send(fd, req.data() + sent, req.size() - sent, 0);
+            ssize_t n = ::send(fd, req.data() + sent, req.size() - sent, hs_send_flags());
             if (n <= 0) {
                 ::close(fd);
                 throw std::runtime_error("connection lost writing the request");

@@ -187,7 +187,7 @@ class SmtpConn {
         std::string out = line + "\r\n";
         size_t sent = 0;
         while (sent < out.size()) {
-            ssize_t n = ::send(fd_, out.data() + sent, out.size() - sent, 0);
+            ssize_t n = ::send(fd_, out.data() + sent, out.size() - sent, hs_send_flags());
             if (n <= 0) throw std::runtime_error("email: connection lost writing `" + line + "`");
             sent += (size_t)n;
         }
@@ -219,7 +219,7 @@ class SmtpConn {
         out += ".\r\n";
         size_t sent = 0;
         while (sent < out.size()) {
-            ssize_t n = ::send(fd_, out.data() + sent, out.size() - sent, 0);
+            ssize_t n = ::send(fd_, out.data() + sent, out.size() - sent, hs_send_flags());
             if (n <= 0) throw std::runtime_error("email: connection lost sending the message");
             sent += (size_t)n;
         }

@@ -10,6 +10,18 @@ inline std::string env_get(const std::string& k) {
     const char* v = std::getenv(k.c_str());
     return v ? std::string(v) : "";
 }
+/// `MSG_NOSIGNAL` where it exists, zero elsewhere. A server that hangs up
+/// mid-message must fail the send, not the process: without this a client of
+/// ours dies of SIGPIPE when a peer disconnects early, which is exactly what
+/// a restarting peer does.
+inline int hs_send_flags() {
+#ifdef MSG_NOSIGNAL
+    return MSG_NOSIGNAL;
+#else
+    return 0;
+#endif
+}
+
 inline int64_t unix_ms() {
     return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
