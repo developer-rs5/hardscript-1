@@ -72,6 +72,23 @@ fn cstring(s: &str) -> String {
     format!("{:?}", s)
 }
 
+/// A desugared `queue.enqueue(..)` call (or one written by hand): the shape
+/// the parser produces for `queue Name(..)`, collected for `main` when it
+/// appears at the top level.
+fn is_queue_enqueue_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => match callee.as_ref() {
+            Expr::Member(base, name, _) => {
+                matches!(base.as_ref(), Expr::Ident(root, _) if root == "queue")
+                    && name == "enqueue"
+                    && args.len() == 3
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// A top-level `cache x ttl T` declaration, desugared to
 /// `cache.declare("x", N)`. Only declarations execute at startup; any other
 /// top-level expression statement keeps its old meaning (dropped).
@@ -277,6 +294,12 @@ impl Codegen {
         // top-level expression statement — except these must execute, so
         // they are collected for `main` instead of dropped with the rest.
         let mut cache_decls: Vec<String> = Vec::new();
+        // Top-level `job` declarations, `queue` calls and `__worker_*`
+        // functions, likewise collected for `main`: jobs register their
+        // types, enqueues seed initial jobs, and workers register handlers.
+        let mut job_decls: Vec<(String, Vec<String>)> = Vec::new();
+        let mut top_enqueues: Vec<String> = Vec::new();
+        let mut worker_regs: Vec<String> = Vec::new();
 
         for st in &prog.stmts {
             match st {
@@ -310,6 +333,16 @@ impl Codegen {
                 Stmt::ExprStmt(e) if is_cache_declare(e) => {
                     cache_decls.push(self.expr(e));
                 }
+                Stmt::Job(j) => {
+                    job_decls.push((j.name.clone(), j.params.iter().map(|p| p.name.clone()).collect()));
+                }
+                // A desugared top-level `queue Name(..)` seeds an initial
+                // job: run it from `main` like the declarations above,
+                // instead of dropping it with the other top-level
+                // expressions.
+                Stmt::ExprStmt(e) if is_queue_enqueue_call(e) => {
+                    top_enqueues.push(self.expr(e));
+                }
                 _ => {}
             }
         }
@@ -328,6 +361,11 @@ impl Codegen {
 
         for f in &funcs {
             self.emit_func(f);
+            // A lowered `worker Name { }` block registers its handler here,
+            // by function name: the definition above makes the pointer valid.
+            if let Some(job) = f.name.strip_prefix("__worker_") {
+                worker_regs.push(job.to_string());
+            }
         }
         for (i, m) in models.iter().enumerate() {
             self.emit_schema(m, i);
@@ -361,7 +399,21 @@ impl Codegen {
             tests.len(),
             models.len(),
             &cache_decls,
+            &job_decls,
+            &top_enqueues,
+            &worker_regs,
         );
+    }
+
+    /// `job Name(..)`: declare the type, its payload parameter names, and the
+    /// default attempt budget. Used for top-level declarations collected into
+    /// `main` and for declarations inside bodies.
+    fn declare_job_call(&self, name: &str, params: &[String]) -> String {
+        let list: Vec<String> = params.iter().map(|p| format!("hs::Val::text({p:?})")).collect();
+        format!(
+            "hs::queue_declare_job(hs::Val::text({name:?}), hs::Val::list({{{}}}), hs::Val::nil())",
+            list.join(", ")
+        )
     }
 
     // -----------------------------------------------------------------
@@ -971,13 +1023,31 @@ impl Codegen {
     }
 
     fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize,
-                 nmodels: usize, cache_decls: &[String]) {
+                 nmodels: usize, cache_decls: &[String], job_decls: &[(String, Vec<String>)],
+                 top_enqueues: &[String], worker_regs: &[String]) {
         self.wln("int main(int argc, char** argv) {");
         self.ind += 1;
         self.wln("hs::set_args(argc, argv);");
         // Declared caches exist before the first request can ask for them.
         for decl in cache_decls {
             self.wln(&format!("(void)({decl});"));
+        }
+        // Job types register before anything enqueues; workers register their
+        // handlers; top-level enqueues seed initial jobs. Registration is
+        // idempotent, so `hard test` running the same binary is safe.
+        for (name, params) in job_decls {
+            let decl = self.declare_job_call(name, params);
+            self.wln(&format!("(void)({decl});"));
+        }
+        for job in worker_regs {
+            let f = format!("__worker_{job}");
+            self.wln(&format!(
+                "hs::queue_register_worker(hs::Val::text({job:?}), hs::Val::int_(4), fn_{});",
+                safe_id(&f)
+            ));
+        }
+        for enq in top_enqueues {
+            self.wln(&format!("(void)({enq});"));
         }
         self.wln("hs::Server app;");
         self.wln("hs::hs_set_server(&app);");
@@ -1172,6 +1242,11 @@ impl Codegen {
                     let line = format!("(void)({cpp});");
                     self.wln(&line);
                 }
+            }
+            Stmt::Job(j) => {
+                let params: Vec<String> = j.params.iter().map(|p| p.name.clone()).collect();
+                let decl = self.declare_job_call(&j.name, &params);
+                self.wln(&format!("(void)({decl});"));
             }
         }
     }
@@ -1577,6 +1652,12 @@ impl Codegen {
                 let a = self.arg_at(args, 0);
                 let b = self.arg_at(args, 1);
                 Some(format!("hs::cache_expire({a}, {b})"))
+            }
+            // queue (M6.2): `queue Name(..)` desugars to this form, which
+            // users may also write directly.
+            (_, _) if module == "queue" && name == "enqueue" => {
+                let (a, b, c) = (self.arg_at(args, 0), self.arg_at(args, 1), self.arg_at(args, 2));
+                Some(format!("hs::queue_enqueue({a}, {b}, {c})"))
             }
             (_, _) if module == "json" && name == "stringify" => {
                 Some(format!("hs::Val::text(hs::to_json({}))", self.arg_at(args, 0)))

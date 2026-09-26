@@ -1,0 +1,6 @@
+bring queue
+
+GET "/go" :: {
+    id <- queue Nope(1)
+    <- id
+}

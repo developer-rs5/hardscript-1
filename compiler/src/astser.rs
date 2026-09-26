@@ -255,6 +255,17 @@ fn write_stmt(enc: &mut Enc, st: &Stmt, depth: u64) -> Result<(), String> {
             }
             enc.span(d.span);
         }
+        Stmt::Job(j) => {
+            enc.u8(18);
+            enc.str(&j.name);
+            enc.uv(j.params.len() as i64);
+            for p in &j.params {
+                enc.str(&p.ty);
+                enc.str(&p.name);
+                enc.span(p.span);
+            }
+            enc.span(j.span);
+        }
         Stmt::Test(t) => {
             enc.u8(8);
             write_test(enc, t)?;
@@ -756,6 +767,19 @@ fn read_stmt(dec: &mut Dec, depth: u64) -> Result<Stmt, String> {
             }
             let span = dec.span()?;
             Stmt::Protect(ProtectDef { scheme, secret, except, span })
+        }
+        18 => {
+            let name = dec.str()?;
+            let n = decode_count(dec)?;
+            let mut params = Vec::with_capacity(n);
+            for _ in 0..n {
+                let ty = dec.str()?;
+                let pname = dec.str()?;
+                let pspan = dec.span()?;
+                params.push(JobParam { ty, name: pname, span: pspan });
+            }
+            let span = dec.span()?;
+            Stmt::Job(JobDef { name, params, span })
         }
         other => return Err(format!("unknown stmt tag {other}")),
     })

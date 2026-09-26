@@ -74,6 +74,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_cache.hpp"),
     ),
     (
+        "hs_runtime_queue.hpp",
+        include_str!("../../runtime/hs_runtime_queue.hpp"),
+    ),
+    (
         "hs_runtime_util.hpp",
         include_str!("../../runtime/hs_runtime_util.hpp"),
     ),

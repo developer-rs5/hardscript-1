@@ -211,6 +211,7 @@ fn scan_stmt(s: &Stmt, sc: &mut Scope) {
             scan_expr(rhs, false, sc);
         }
         Stmt::ExprStmt(e) => scan_expr(e, false, sc),
+        Stmt::Job(_) => {}
         _ => {}
     }
 }

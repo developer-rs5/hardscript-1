@@ -184,6 +184,10 @@ pub enum HirStmt {
     Race { tasks: Vec<HirExpr>, span: Span },
     Expect { lhs: HirExpr, op: BinOp, rhs: HirExpr, span: Span },
     Expr { expr: HirExpr },
+    /// `job Name(..)` declarations in bodies. Top-level ones are items like
+    /// `Protect` (counted, not lowered); this carries the name for the passes
+    /// to see.
+    Job { name: String, span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -451,9 +455,9 @@ pub fn lower(prog: &ast::Program) -> HirProgram {
                 items.push(HirItem::Fn(f));
                 stats.items += 1;
             }
-            // The guard is a codegen-time decision: HIR keeps routes as they
-            // are and the emitter consults the declaration when it walks them.
-            ast::Stmt::Protect(_) => {
+            // Job declarations are the same: counted, not lowered (bodies
+            // lower them as statements).
+            ast::Stmt::Protect(_) | ast::Stmt::Job(_) => {
                 stats.items += 1;
             }
             ast::Stmt::If { .. } | ast::Stmt::Loop { .. } | ast::Stmt::Return(..)
@@ -521,6 +525,7 @@ fn walk_block(b: &HirBlock, ec: &mut usize, bc: &mut usize, vc: &mut usize) {
                 walk_expr_count(rhs, ec, bc, vc);
             }
             HirStmt::Expr { expr } => walk_expr_count(expr, ec, bc, vc),
+            HirStmt::Job { .. } => {}
         }
     }
 }
@@ -771,6 +776,7 @@ impl Lowerer {
                 span: *span,
             },
             ast::Stmt::ExprStmt(e) => HirStmt::Expr { expr: self.expr(e) },
+            ast::Stmt::Job(j) => HirStmt::Job { name: j.name.clone(), span: j.span },
             // Items are handled by the program walker; guards keep exhaustiveness.
             ast::Stmt::Bring(..) | ast::Stmt::Import { .. } | ast::Stmt::App(..)
             | ast::Stmt::Model(..) | ast::Stmt::Route(..) | ast::Stmt::Socket(..)
@@ -1048,6 +1054,9 @@ fn print_stmt(p: &mut Printer, indent: usize, s: &HirStmt) {
         HirStmt::Expr { expr } => {
             p.line(indent, &format!("expr {}", p.sp(expr.span)));
             print_expr(p, indent + 1, expr);
+        }
+        HirStmt::Job { name, span } => {
+            p.line(indent, &format!("job {name:?} {}", p.sp(*span)));
         }
     }
 }

@@ -11,6 +11,7 @@
 // actually crossed the socket.
 
 #include "hs_runtime_pgsql.hpp"
+#include "hs_runtime_queue.hpp"
 
 #include "test_support.hpp"
 
@@ -657,6 +658,64 @@ void a_server_outlives_one_goodbye() {
     CHECK(s.server_error().empty(), "and the server saw no protocol error: " + s.server_error());
 }
 
+void a_job_queue_runs_on_postgres_through_the_same_backend() {
+    // The SQL job backend reads the dialect off the connection: against
+    // PostgreSQL it claims with SELECT..FOR UPDATE SKIP LOCKED and reads keys
+    // off RETURNING, all in one round trip per call. The mock scripts those
+    // answers; the assertions are about which SQL crossed the socket.
+    std::vector<PgReply> replies;
+    PgReply ins;
+    ins.match = "INSERT INTO \"hs_jobs\"";
+    ins.columns = {PgColumn("id", 23)};
+    ins.rows = {{PgCell("5")}};
+    ins.tag = "INSERT 0 1";
+    replies.push_back(ins);
+    PgReply poll;
+    poll.match = "FOR UPDATE SKIP LOCKED";
+    poll.columns = {PgColumn("id", 23), PgColumn("type", 25), PgColumn("payload", 25),
+                    PgColumn("attempts", 23), PgColumn("max_attempts", 23), PgColumn("priority", 23),
+                    PgColumn("run_after", 20), PgColumn("last_error", 25), PgColumn("created", 20)};
+    poll.rows = {{PgCell("5"), PgCell("mail"), PgCell("{\"to\":\"a\"}"), PgCell("0"), PgCell("5"),
+                  PgCell("0"), PgCell("1000000"), PgCell(""), PgCell("1000000")}};
+    poll.tag = "SELECT 1";
+    replies.push_back(poll);
+    PgReply del;
+    del.match = "DELETE FROM \"hs_jobs\"";
+    del.tag = "DELETE 1";
+    replies.push_back(del);
+    PgReply count;
+    count.match = "COUNT(*)";
+    count.columns = {PgColumn("n", 20)};
+    count.rows = {{PgCell("0")}};
+    count.tag = "SELECT 1";
+    replies.push_back(count);
+    // Catch-all last: DDL, the recovery UPDATE, anything the test does not
+    // assert on. First match wins, so the specific scripts above keep theirs.
+    replies.push_back(PgReply());
+    MockPg s(replies);
+    hs::PgDb db(s.conninfo());
+    hs::SqlJobBackend b(&db);
+    hs::Job j;
+    j.type = "mail";
+    j.payload = hs::Val::object({{"to", hs::Val::text("a")}});
+    j.max_attempts = 5;
+    CHECK_EQ(b.push(j), int64_t(5), "the key off RETURNING");
+    hs::Job out;
+    CHECK(b.poll({"mail"}, 1000000, out), "claimed");
+    CHECK_EQ(out.id, int64_t(5), "the same job");
+    CHECK_EQ(out.payload.find("to")->sv, std::string("a"), "payload decoded");
+    b.complete(out.id);
+    auto seen = s.statements();
+    bool saw_returning = false, saw_skip_locked = false;
+    for (auto& st : seen) {
+        if (st.sql.find("RETURNING \"id\"") != std::string::npos) saw_returning = true;
+        if (st.sql.find("FOR UPDATE SKIP LOCKED") != std::string::npos) saw_skip_locked = true;
+        CHECK(st.sql.find("?") == std::string::npos, "numbered placeholders, never question marks");
+    }
+    CHECK(saw_returning, "postgres insert asks for its key");
+    CHECK(saw_skip_locked, "postgres claim skips locked rows");
+}
+
 void a_closing_connection_says_goodbye() {
     // Terminate is the one message with no reply, and the server thread exits
     // when it arrives. A client that just dropped the socket would leave the
@@ -724,6 +783,7 @@ int main() {
 
     qa::a_connection_string_is_read_either_way_it_is_written();
     qa::a_server_outlives_one_goodbye();
+    qa::a_job_queue_runs_on_postgres_through_the_same_backend();
     qa::a_closing_connection_says_goodbye();
     qa::a_dropped_connection_says_the_connection_was_lost();
 

@@ -5,14 +5,16 @@
 #ifndef HS_QA_RUNTIME_SUPPORT_HPP
 #define HS_QA_RUNTIME_SUPPORT_HPP
 
+#include <atomic>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 namespace qa {
 
-inline int g_checks = 0;
-inline int g_failed = 0;
+// Atomic: worker threads assert inside handlers, so the counters are shared.
+inline std::atomic<int> g_checks{0};
+inline std::atomic<int> g_failed{0};
 
 inline void fail(const char* file, int line, const std::string& what, const std::string& got,
                  const std::string& want) {
@@ -50,11 +52,13 @@ inline std::string show(double v) {
 }
 
 inline int report(const char* name) {
-    if (g_failed) {
-        std::fprintf(stderr, "%s: %d of %d checks failed\n", name, g_failed, g_checks);
+    int failed = g_failed.load();
+    int checks = g_checks.load();
+    if (failed) {
+        std::fprintf(stderr, "%s: %d of %d checks failed\n", name, failed, checks);
         return 1;
     }
-    std::printf("%s: %d checks passed\n", name, g_checks);
+    std::printf("%s: %d checks passed\n", name, checks);
     return 0;
 }
 

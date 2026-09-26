@@ -139,6 +139,7 @@ fn each_block_expr(b: &mut HirBlock, f: &mut impl FnMut(&mut HirExpr)) {
                 map_expr(rhs, f);
             }
             HirStmt::Expr { expr } => map_expr(expr, f),
+            HirStmt::Job { .. } => {}
         }
     }
 }
@@ -426,6 +427,7 @@ fn collect_block_uses(b: &HirBlock, uses: &mut HashMap<VarId, usize>) {
                 collect_expr_uses(rhs, uses);
             }
             HirStmt::Expr { expr } => collect_expr_uses(expr, uses),
+            HirStmt::Job { .. } => {}
         }
     }
 }
@@ -799,6 +801,7 @@ fn for_each_expr_ref(b: &HirBlock, f: &mut impl FnMut(&HirExpr)) {
                 walk_expr_ref(rhs, f);
             }
             HirStmt::Expr { expr } => walk_expr_ref(expr, f),
+            HirStmt::Job { .. } => {}
         }
     }
 }
@@ -1111,6 +1114,7 @@ fn rewrite_block_inline(
                 inline_in_expr(lhs, fns, next, s);
                 inline_in_expr(rhs, fns, next, s);
             }
+            HirStmt::Job { .. } => {}
         }
     }
 }
@@ -1174,6 +1178,7 @@ fn stmt_kind(st: &HirStmt) -> &'static str {
         HirStmt::Race { .. } => "race",
         HirStmt::Expect { .. } => "expect",
         HirStmt::Expr { .. } => "expr",
+        HirStmt::Job { .. } => "job",
     }
 }
 

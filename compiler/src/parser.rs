@@ -18,6 +18,10 @@ pub struct Parser {
     pub routes: Vec<RouteDef>,
     pub sockets: Vec<SocketDef>,
     pub funcs: Vec<FunDef>,
+    /// Declared background jobs (`job Name(..)`), in order: name to payload
+    /// parameters. `worker` blocks desugar against this table, so a job must
+    /// be declared above the worker that handles it.
+    pub jobs: Vec<(String, Vec<JobParam>)>,
     pub middlewares: Vec<(String, Vec<Stmt>)>,
     pub tests: Vec<TestDef>,
     /// Non-fatal parse errors recovered inside statement regions (blocks,
@@ -56,6 +60,7 @@ impl Parser {
             routes: Vec::new(),
             sockets: Vec::new(),
             funcs: Vec::new(),
+            jobs: Vec::new(),
             middlewares: Vec::new(),
             tests: Vec::new(),
             na_errs: Vec::new(),
@@ -454,8 +459,198 @@ impl Parser {
         })
     }
 
+    /// `job SendEmail(User user, Int retries)`: declare a background job type.
+    /// Parameter types are identifiers (a model or a primitive); arity is what
+    /// matters downstream, and the runtime checks it on enqueue.
+    fn parse_job(&mut self) -> Result<Stmt, Vec<Diag>> {
+        let sp = self.span();
+        self.advance(); // `job`
+        let (name, _) = self.expect_ident("as a job name")?;
+        self.expect_sym(Sym::LParen, "to start the job parameters")?;
+        let mut params = Vec::new();
+        while !matches!(self.peek(), Tok::Sym(Sym::RParen)) {
+            if *self.peek() == Tok::Eof {
+                break;
+            }
+            let psp = self.span();
+            let ty = match self.peek().clone() {
+                Tok::Ident(t) => {
+                    let t = t.clone();
+                    self.advance();
+                    t
+                }
+                other => {
+                    return Err(vec![Diag::new(
+                        ErrorKind::Parse,
+                        format!("expected a parameter type, found {other}"),
+                        self.span(),
+                        "Write parameters as `Type name`, e.g. `job SendEmail(User user)`.",
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)])
+                }
+            };
+            let (pname, _) = self.expect_ident("as a parameter name")?;
+            params.push(JobParam { ty, name: pname, span: psp });
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen, "to close the job parameters")?;
+        if self.jobs.iter().any(|(n, _)| n == &name) {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("job `{name}` is declared twice"),
+                sp,
+                "Declare each job once; enqueue it as often as needed.",
+            )
+            .with_code(cat::EXPECTED_TOKEN)]);
+        }
+        self.jobs.push((name.clone(), params.clone()));
+        Ok(Stmt::Job(JobDef { name, params, span: sp }))
+    }
+
+    /// `queue SendEmail(user, delay = 60)`: enqueue one job. Desugars to an
+    /// ordinary `queue.enqueue("SendEmail", [user], {delay: 60})` call, so no
+    /// new expression form is needed in either position. Trailing `name =
+    /// value` pairs are options (`delay` seconds, `priority`, `max_attempts`);
+    /// anything else is a positional payload argument.
+    fn parse_enqueue_call(&mut self) -> Result<Expr, Vec<Diag>> {
+        let sp = self.span();
+        self.advance(); // `queue`
+        let (job, _) = self.expect_ident("as a job name")?;
+        if !self.jobs.iter().any(|(n, _)| n == &job) {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("queue target `{job}` is not a declared job"),
+                sp,
+                format!("Declare it first: `job {job}(...)`."),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]);
+        }
+        self.expect_sym(Sym::LParen, "to start the job arguments")?;
+        let mut args = Vec::new();
+        let mut options = Vec::new();
+        while !matches!(self.peek(), Tok::Sym(Sym::RParen)) {
+            if *self.peek() == Tok::Eof {
+                break;
+            }
+            // An option is `name = expr`; anything else is positional. `=` never
+            // appears inside an expression, so the lookahead is exact.
+            if let Tok::Ident(opt) = self.peek().clone() {
+                if matches!(self.peek_at(1), Tok::Sym(Sym::Assign)) {
+                    let opt = opt.clone();
+                    self.advance();
+                    self.advance();
+                    if !matches!(opt.as_str(), "delay" | "priority" | "max_attempts") {
+                        return Err(vec![Diag::new(
+                            ErrorKind::Parse,
+                            format!("unknown queue option `{opt}`"),
+                            self.span(),
+                            "The options are `delay` (seconds), `priority` and `max_attempts`.",
+                        )
+                        .with_code(cat::EXPECTED_TOKEN)]);
+                    }
+                    let v = self.parse_expr()?;
+                    options.push((opt, v));
+                    if !self.eat_sym(Sym::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            args.push(self.parse_expr()?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen, "to close the job arguments")?;
+        let callee = Expr::Member(
+            Box::new(Expr::Ident("queue".to_string(), sp)),
+            "enqueue".to_string(),
+            sp,
+        );
+        Ok(Expr::Call {
+            callee: Box::new(callee),
+            args: vec![
+                Expr::Str(job, sp),
+                Expr::List(args, sp),
+                Expr::Obj(options, sp),
+            ],
+            span: sp,
+        })
+    }
+
+    /// `worker SendEmail { ... }`: handle a job type. Lowers to an ordinary
+    /// function taking the payload, with each declared parameter bound up
+    /// front, so the rest of the pipeline never learns a new statement form.
+    /// The job must be declared above: its parameter names become the body's
+    /// bindings. Codegen registers every `__worker_*` function in `main`.
+    /// Workers live at the top level, like the functions they lower to.
+    fn parse_worker(&mut self) -> Result<Stmt, Vec<Diag>> {
+        let sp = self.span();
+        self.advance(); // `worker`
+        let (job, _) = self.expect_ident("as a job name")?;
+        let Some((_, params)) = self.jobs.iter().find(|(n, _)| n == &job).cloned() else {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("worker for undeclared job `{job}`"),
+                sp,
+                format!("Declare it first: `job {job}(...)` above the worker."),
+            )
+            .with_code(cat::EXPECTED_TOKEN)]);
+        };
+        let body = self.parse_block()?;
+        let fname = format!("__worker_{job}");
+        // Bind each payload field before the body runs: `user` reads naturally
+        // instead of through a payload object.
+        let mut prelude = Vec::with_capacity(params.len());
+        for p in &params {
+            prelude.push(Stmt::Var(VarDef {
+                name: p.name.clone(),
+                ty: Some(p.ty.clone()),
+                value: Expr::Member(
+                    Box::new(Expr::Ident("__payload".to_string(), p.span)),
+                    p.name.clone(),
+                    p.span,
+                ),
+                span: p.span,
+            }));
+        }
+        let mut full = prelude;
+        full.extend(body);
+        let fd = FunDef {
+            name: fname,
+            ret: None,
+            params: vec![FunParam { ty: None, name: "__payload".to_string(), is_body: false, span: sp }],
+            body: full,
+            span: sp,
+        };
+        self.funcs.push(fd.clone());
+        Ok(Stmt::Func(fd))
+    }
+
     fn parse_block_stmt(&mut self) -> Result<Stmt, Vec<Diag>> {
         let sp = self.span();
+        // `job Name(T p, ...)`, `queue Name(args, opt = v)` and
+        // `worker Name { ... }` are recognized by shape: the leading keyword
+        // plus what follows it. Anything else starting with these words parses
+        // as an expression, exactly as before.
+        if matches!(self.peek(), Tok::Ident(n) if n == "job") {
+            if matches!(self.peek_at(1), Tok::Ident(_)) && matches!(self.peek_at(2), Tok::Sym(Sym::LParen)) {
+                return self.parse_job();
+            }
+        }
+        if matches!(self.peek(), Tok::Ident(n) if n == "queue") {
+            if matches!(self.peek_at(1), Tok::Ident(_)) && matches!(self.peek_at(2), Tok::Sym(Sym::LParen)) {
+                let e = self.parse_enqueue_call()?;
+                return Ok(Stmt::ExprStmt(e));
+            }
+        }
+        if matches!(self.peek(), Tok::Ident(n) if n == "worker") {
+            if matches!(self.peek_at(1), Tok::Ident(_)) && matches!(self.peek_at(2), Tok::Sym(Sym::LBrace)) {
+                return self.parse_worker();
+            }
+        }
         // `cache users ttl 10m`: declare a cache entry's default TTL. It
         // desugars to an ordinary `cache.declare("users", 600)` call, so the
         // rest of the pipeline never learns a new statement form. The four
@@ -1347,6 +1542,16 @@ None => Err(vec![Diag::new(
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, Vec<Diag>> {
+        // `queue Name(args, opt = v)` in expression position desugars to an
+        // ordinary call, exactly like the statement form. Checked before the
+        // atom so `queue` itself is consumed by the dedicated parser; anything
+        // else starting with `queue` parses as before.
+        if matches!(self.peek(), Tok::Ident(n) if n == "queue")
+            && matches!(self.peek_at(1), Tok::Ident(_))
+            && matches!(self.peek_at(2), Tok::Sym(Sym::LParen))
+        {
+            return self.parse_enqueue_call();
+        }
         let mut e = self.parse_atom()?;
         let mut k = 0usize;
         loop {
@@ -1942,5 +2147,104 @@ mod tests {
         let toks: Vec<Token> = crate::Lexer::new("cache\nusers\n").tokenize().unwrap();
         let prog = crate::Parser::new(toks).parse_program().unwrap();
         assert_eq!(prog.stmts.len(), 2, "two expression statements, not a declaration");
+    }
+
+    fn job_of(src: &str) -> JobDef {
+        match parse_one(src) {
+            Stmt::Job(j) => j,
+            other => panic!("expected a job declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn job_declares_params_in_order() {
+        let j = job_of("job SendEmail(User user, Int retries)\n");
+        assert_eq!(j.name, "SendEmail");
+        assert_eq!(j.params.len(), 2);
+        assert_eq!(j.params[0].ty, "User");
+        assert_eq!(j.params[0].name, "user");
+        assert_eq!(j.params[1].ty, "Int");
+    }
+
+    #[test]
+    fn job_needs_parens_and_unique_names() {
+        // Without parentheses there is no declaration: two meaningless but
+        // legal expression statements, the same boundary `cache` keeps.
+        let toks: Vec<Token> = crate::Lexer::new("job SendEmail\n").tokenize().unwrap();
+        let prog = crate::Parser::new(toks).parse_program().unwrap();
+        assert_eq!(prog.stmts.len(), 2);
+        assert!(!parse_errs("job SendEmail(User user)\njob SendEmail(User user)\n").is_empty(),
+            "declared twice");
+    }
+
+    #[test]
+    fn queue_desugars_to_enqueue_call() {
+        // Declared first, so the name resolves.
+        let src = "job SendEmail(User user)\nGET \"/\" :: {\n    id <- queue SendEmail(u, delay = 60)\n    <- id\n}\n";
+        let prog = crate::frontend(src, "t.hard").expect("parses");
+        let route = prog.stmts.iter().find_map(|s| match s {
+            Stmt::Route(r) => Some(r),
+            _ => None,
+        });
+        let route = route.expect("a route");
+        let call = match &route.body[0] {
+            Stmt::Var(v) => &v.value,
+            other => panic!("expected the enqueue binding, got {other:?}"),
+        };
+        let (callee, args) = match call {
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args),
+            other => panic!("expected a call, got {other:?}"),
+        };
+        let (base, method) = match callee {
+            Expr::Member(b, m, _) => (b.as_ref(), m.clone()),
+            other => panic!("expected queue.enqueue, got {other:?}"),
+        };
+        assert!(matches!(base, Expr::Ident(n, _) if n == "queue"));
+        assert_eq!(method, "enqueue");
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[0], Expr::Str(s, _) if s == "SendEmail"));
+        // Options ride along as an object: {delay: 60}.
+        match &args[2] {
+            Expr::Obj(kvs, _) => {
+                assert_eq!(kvs.len(), 1);
+                assert_eq!(kvs[0].0, "delay");
+                assert!(matches!(&kvs[0].1, Expr::Int(60, _)));
+            }
+            other => panic!("expected options object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_rejects_unknown_jobs_and_options() {
+        assert!(!parse_errs("GET \"/\" :: {\n id <- queue Nope(1)\n}\n").is_empty(), "undeclared job");
+        let errs = parse_errs("job A(Int x)\nGET \"/\" :: {\n id <- queue A(1, bogus = 2)\n}\n");
+        assert!(!errs.is_empty(), "unknown option");
+        assert!(errs[0].message.contains("bogus"), "got {}", errs[0].message);
+    }
+
+    #[test]
+    fn worker_lowers_to_a_function_with_payload_binds() {
+        let src = "job SendEmail(User user)\nworker SendEmail {\n    sent <- user\n    <- sent\n}\n";
+        let prog = crate::frontend(src, "t.hard").expect("parses");
+        let func = prog.stmts.iter().find_map(|s| match s {
+            Stmt::Func(f) => Some(f),
+            _ => None,
+        });
+        let func = func.expect("a lowered function");
+        assert_eq!(func.name, "__worker_SendEmail");
+        assert_eq!(func.params.len(), 1);
+        assert_eq!(func.params[0].name, "__payload");
+        // First statement binds the declared parameter.
+        match &func.body[0] {
+            Stmt::Var(v) => assert_eq!(v.name, "user"),
+            other => panic!("expected the payload bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_needs_its_job_declared_above() {
+        let errs = parse_errs("worker Nope {\n    <- 1\n}\n");
+        assert!(!errs.is_empty(), "undeclared job");
+        assert!(errs[0].message.contains("undeclared job"), "got {}", errs[0].message);
     }
 }

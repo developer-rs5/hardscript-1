@@ -1,0 +1,5 @@
+hs::queue_declare_job(hs::Val::text("SendEmail"), hs::Val::list({hs::Val::text("user")}), hs::Val::nil())
+hs::queue_register_worker(hs::Val::text("SendEmail"), hs::Val::int_(4), fn___worker_SendEmail)
+hs::queue_enqueue(hs::Val::text("SendEmail")
+static hs::Val fn___worker_SendEmail(const hs::Val& __payload)
+hs::Val user = hs::get_member(__payload, "user")

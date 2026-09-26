@@ -189,6 +189,11 @@ impl Fmt {
                 }
                 self.line(d, "}");
             }
+            Stmt::Job(j) => {
+                let params: Vec<String> =
+                    j.params.iter().map(|p| format!("{} {}", p.ty, p.name)).collect();
+                self.line(d, &format!("job {}({})", j.name, params.join(", ")));
+            }
             Stmt::Protect(p) => {
                 let mut opts = vec![format!("secret = {}", p.secret.render())];
                 if !p.except.is_empty() {

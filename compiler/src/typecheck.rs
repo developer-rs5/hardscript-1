@@ -231,6 +231,9 @@ impl Checker {
                 self.expr(lhs, scope);
                 self.expr(rhs, scope);
             }
+            // A job declaration carries no expressions: parameter types are
+            // documentation, and arity is checked where jobs are queued.
+            Stmt::Job(_) => {}
             // A transaction block in statement position opens a savepoint
             // scope: names created inside are visible to rollbacks in the
             // same block, and die with it. The body gets a fresh scope, like
@@ -618,6 +621,7 @@ fn check_tx_value_use(stmts: &[Stmt], diags: &mut Vec<Diag>) {
                 check_tx_expr(lhs, diags);
                 check_tx_expr(rhs, diags);
             }
+            Stmt::Job(_) => {}
             // Statement position: valid, and the body resets to statement
             // context, so a block nested directly inside is fine again.
             Stmt::ExprStmt(Expr::Transaction { body, .. }) => check_tx_value_use(body, diags),

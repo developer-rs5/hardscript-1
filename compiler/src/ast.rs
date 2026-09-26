@@ -283,6 +283,24 @@ pub struct TestDef {
     pub span: Span,
 }
 
+/// One parameter of a `job` declaration: the payload field's type and name
+/// (`User user`). Types are documentation for the payload shape; arity is
+/// what the compiler and runtime enforce.
+#[derive(Debug, Clone)]
+pub struct JobParam {
+    pub ty: String,
+    pub name: String,
+    pub span: Span,
+}
+
+/// A `job Name(...)` declaration.
+#[derive(Debug, Clone)]
+pub struct JobDef {
+    pub name: String,
+    pub params: Vec<JobParam>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnOp {
     Neg,
@@ -474,6 +492,9 @@ pub enum Stmt {
     Test(TestDef),
     Var(VarDef),
     Const(VarDef),
+    /// `job SendEmail(User user)` — declare a background job type with its
+    /// payload parameters. Registration only; the runtime holds the jobs.
+    Job(JobDef),
     If { cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt>, span: Span },
     Loop { var: String, iter: Expr, body: Vec<Stmt>, span: Span },
     Return(Expr, Span),
@@ -495,6 +516,7 @@ impl Stmt {
             Protect(d) => d.span,
             Test(t) => t.span,
             Var(v) | Const(v) => v.span,
+            Job(j) => j.span,
             If { span: s, .. } | Loop { span: s, .. } | Return(_, s) | Race(_, s)
             | Expect { span: s, .. } => *s,
             ExprStmt(e) => e.span(),

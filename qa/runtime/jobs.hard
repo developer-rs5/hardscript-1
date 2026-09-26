@@ -1,0 +1,20 @@
+bring queue
+
+model User {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+job SendEmail(User user)
+
+worker SendEmail {
+    sent <- user
+    <- sent
+}
+
+GET "/go" :: {
+    u <- User.find(1)
+    id <- queue SendEmail(u, delay = 60, priority = 2)
+    jid <- queue SendEmail(u)
+    <- { queued: id }
+}
