@@ -327,6 +327,26 @@ Fixes:
 - Rename one model.
 - Import the declaring module once.
 
+### `HS0109` — Invalid Protect Declaration
+
+A `protect` declaration names a scheme or an option that does not exist, or asks for a route to be exempt in a way that can never match.
+
+Example:
+
+```hardscript
+protect jwt(secret = k, except = ["health"])
+```
+
+Common causes:
+
+- The scheme is spelled differently from the one implemented.
+- An exempt path is missing its leading `/`, so it can never match a route path.
+
+Fixes:
+
+- Use `protect jwt(secret = ...)`; `jwt` is the only scheme today.
+- Write exempt paths with a leading `/`, e.g. `except = ["/health"]`.
+
 ### `HS0110` — Undefined Member
 
 A field or member access names something that does not exist on the value.
@@ -464,6 +484,47 @@ Common causes:
 Fixes:
 
 - Compare explicitly, e.g. `?(users.count > 0)`.
+
+### `HS0207` — Duplicate Protect
+
+A program declares `protect` more than once.
+
+Example:
+
+```hardscript
+protect jwt(secret = a)
+protect jwt(secret = b)
+```
+
+Common causes:
+
+- A module and the file that imports it both declare a guard.
+
+Fixes:
+
+- Keep one `protect` declaration and merge the two `except` lists.
+
+### `HS0208` — Request Unavailable
+
+A builtin that reads the in-flight HTTP request was called somewhere no request exists, such as a `calc` function or a global initializer.
+
+Example:
+
+```hardscript
+calc peek() => Str {
+    <- http.header("authorization")
+}
+```
+
+Common causes:
+
+- The helper was used in a function instead of a route body.
+- It was used in a global `var` or `const` initializer.
+
+Fixes:
+
+- Move the call into a route or `before` body.
+- Pass the value you need in as an argument.
 
 ### `HS0301` — Import Cycle
 
