@@ -239,9 +239,9 @@ impl Checker {
     /// query naming a column that does not exist still has to reach codegen so
     /// the programmer gets `HS0219` for the column instead of `HS0104` for an
     /// undefined variable.
-    fn orm_chain_steps(&self, e: &Expr) -> Option<Vec<(String, Vec<Expr>)>> {
+    fn orm_chain_steps(&self, e: &Expr, scope: &HashMap<String, Span>) -> Option<Vec<(String, Vec<Expr>)>> {
         let (model, chain, _) = crate::orm::orm_chain(e)?;
-        if !self.models.contains_key(&model) {
+        if !self.models.contains_key(&model) && !scope.contains_key(&model) {
             return None;
         }
         Some(chain.into_iter().map(|(name, args, _)| (name, args)).collect())
@@ -351,7 +351,7 @@ impl Checker {
                 // ordinary code would report `User` and `age` as undefined, so
                 // the chain is walked for its *value* positions only — the
                 // column side is the schema's business, and codegen checks it.
-                if let Some(chain) = self.orm_chain_steps(e) {
+                if let Some(chain) = self.orm_chain_steps(e, scope) {
                     self.scan_orm_chain(&chain, scope);
                     return;
                 }

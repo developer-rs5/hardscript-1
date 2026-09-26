@@ -1,0 +1,47 @@
+bring http
+app @3134
+
+model User {
+    id    : Int @primary @auto_increment
+    email : Email
+    posts : Post @has_many
+    tags  : Tag @many_to_many
+}
+
+model Post {
+    id      : Int @primary @auto_increment
+    title   : String
+    user_id : Int @foreign(user.id)
+    user    : User @belongs_to
+}
+
+model Tag {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+model Profile {
+    id    : Int @primary @auto_increment
+    bio   : String
+    owner : User @belongs_to
+}
+
+GET "/unknown" :: {
+    u <- User.find(1)
+    <- u.notes.all()
+}
+
+GET "/key" :: {
+    u <- User.find(1)
+    <- u.tags.all()
+}
+
+GET "/bare" :: {
+    u <- User.find(1)
+    <- u.posts
+}
+
+GET "/nokey" :: {
+    p <- Profile.find(1)
+    <- p.owner.first()
+}

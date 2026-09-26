@@ -119,6 +119,23 @@ inline std::string db_quote_ident(const std::string& n) {
     return out;
 }
 
+// Quote an identifier that may be qualified, so a `table.column` becomes
+// `"table"."column"` rather than one nonsense name. Used only by the join
+// condition, which is the one place a column lives on a second table.
+inline std::string db_quote_path(const std::string& n) {
+    std::string out;
+    size_t start = 0;
+    while (start <= n.size()) {
+        size_t dot = n.find('.', start);
+        std::string part = n.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
+        if (!out.empty()) out += ".";
+        out += db_quote_ident(part);
+        if (dot == std::string::npos) break;
+        start = dot + 1;
+    }
+    return out;
+}
+
 // The nth placeholder of a dialect (`?` for SQLite, `$n` for PostgreSQL,
 // counting from one).
 inline std::string db_placeholder(DbDialect d, int n) {
@@ -219,16 +236,37 @@ inline const char* cond_sql(CondOp op) {
 // the plan is inspectable before anything runs.
 struct OrmQuery {
     const OrmModel* m = nullptr;
+    /// How a value is stored, which is how it has to be bound. The record's own
+    /// value is the honest answer here: a relationship's target column can sit
+    /// on a third table the model being queried knows nothing about.
+    static OrmKind orm_kind_of(const Val& v) {
+        switch (v.t) {
+            case Val::T::Int: return OrmKind::Int;
+            case Val::T::Flt: return OrmKind::Float;
+            case Val::T::Bool: return OrmKind::Bool;
+            default: return OrmKind::Text;
+        }
+    }
+
     struct Cond {
         std::string column;
         CondOp op = CondOp::Eq;
         OrmKind kind = OrmKind::Text;
         std::vector<Val> values;  // one for a comparison, N for `in`
+        // A relationship's own predicate. The column is on the *target* and
+        // the value comes off the *parent* record, so the comparison can only
+        // be bound once the record is known; the SQL text is the same either
+        // way, which is what keeps `sql()` exact.
+        std::string parent_col;
     };
     std::vector<Cond> conds;
     int64_t limit_n = -1;
     int64_t offset_n = -1;
     std::vector<std::pair<std::string, bool>> order;
+    /// The record a relationship is read from, and any `INNER JOIN` the link
+    /// needs. Both come from the schema by way of the compiler.
+    Val parent;
+    std::string join_sql;
 
     OrmQuery() = default;
     explicit OrmQuery(const OrmModel* mm) : m(mm) {}
@@ -267,6 +305,21 @@ struct OrmQuery {
         return *this;
     }
 
+    /// Read a relationship off `rec`: rows whose `target_col` equals the
+    /// parent record's `parent_col`, joined through `join` when the link needs
+    /// a third table. The compiler has already resolved both column names.
+    OrmQuery& of_record(const Val& rec, const std::string& parent_col, const std::string& target_col,
+                        const std::string& join = std::string()) {
+        parent = rec;
+        join_sql = join;
+        Cond c;
+        c.column = target_col;
+        c.parent_col = parent_col;
+        c.op = CondOp::Eq;
+        conds.insert(conds.begin(), std::move(c));
+        return *this;
+    }
+
     OrmQuery& add(const std::string& col, CondOp op, std::vector<Val> vs) {
         Cond c;
         c.column = col;
@@ -291,7 +344,23 @@ struct OrmQuery {
         for (const auto& c : conds) {
             if (!first) sql += " AND ";
             first = false;
-            std::string col = db_quote_ident(c.column);
+            std::string col = c.column.find('.') == std::string::npos ? db_quote_ident(c.column)
+                                                                      : db_quote_path(c.column);
+            if (!c.parent_col.empty()) {
+                // The value is not known until the record is, so it is read
+                // here rather than stored in the condition. A parent that has
+                // no such column matches nothing: a relationship read from a
+                // record that never had the key is empty, not an error.
+                const Val* pv = parent.find(c.parent_col);
+                Val v = pv ? *pv : Val::nil();
+                if (pv) {
+                    sql += col + " = " + db_placeholder(d, (int)bound.size() + 1);
+                    bound.push_back(db_bind_text(v, orm_kind_of(v)));
+                } else {
+                    sql += "1 = 0";
+                }
+                continue;
+            }
             if (c.op == CondOp::In) {
                 // An empty IN list is a query for nothing, and the SQL way to
                 // say that portably is a false predicate. Emitting `IN ()` is
@@ -329,7 +398,7 @@ struct OrmQuery {
             sql += " ORDER BY ";
             for (size_t i = 0; i < order.size(); i++) {
                 if (i) sql += ", ";
-                sql += db_quote_ident(order[i].first);
+                sql += (order[i].first.find(".") == std::string::npos ? db_quote_ident(order[i].first) : db_quote_path(order[i].first));
                 if (order[i].second) sql += " DESC";
             }
         }
@@ -361,6 +430,10 @@ struct OrmQuery {
         }
         sql += " FROM ";
         sql += db_quote_ident(m ? m->table : std::string());
+        if (!join_sql.empty()) {
+            sql += " ";
+            sql += join_sql;
+        }
         where_sql(d, sql, bound);
         order_limit_sql(d, sql);
         return sql;
@@ -387,6 +460,13 @@ struct OrmQuery {
         // Values are carried as Vals to the backend for binding; the text form
         // is only for the SQL text and for the bound list the tests read.
         for (const auto& c : conds) {
+            if (!c.parent_col.empty()) {
+                // The relationship's own value, read off the record. It is
+                // skipped when the record has no such column, because
+                // `where_sql` rendered a false predicate that binds nothing.
+                if (const Val* pv = parent.find(c.parent_col)) params.push_back(*pv);
+                continue;
+            }
             for (const auto& v : c.values) params.push_back(v);
         }
         DbDialect d = b->dialect();

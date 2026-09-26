@@ -379,7 +379,31 @@ impl Codegen {
     /// yield `User` rows, `User.count()` yields a number and so yields no
     /// model at all.
     fn expr_record_type(&mut self, e: &Expr) -> Option<String> {
-        let (model, chain, _) = crate::orm::orm_chain(e)?;
+        let (root, chain, _) = crate::orm::orm_chain(e)?;
+
+        // A chain rooted at a record reads a relationship, so what it yields is
+        // the *target's* rows, not the record's own model.
+        if let Some(model) = self.record_types.get(&root).cloned() {
+            let (field, args, _) = chain.first()?.clone();
+            if !args.is_empty() {
+                return None;
+            }
+            let target = self
+                .orm
+                .as_ref()?
+                .relations_from(&model)
+                .find(|r| r.field == field)?
+                .to
+                .clone();
+            let rest = &chain[1..];
+            let terminal = rest.last().map(|(n, _, _)| n.as_str()).unwrap_or("all");
+            return match crate::orm::terminal_of(terminal) {
+                Some(crate::orm::Terminal::All) | Some(crate::orm::Terminal::First) => Some(target),
+                _ => None,
+            };
+        }
+
+        let model = root;
         if !self.model_names.contains(&model) {
             return None;
         }
@@ -488,7 +512,12 @@ impl Codegen {
     /// names that came from the schema.
     fn orm_query(&mut self, call: &Expr) -> Option<String> {
         let schema = self.orm.clone()?;
-        let plan = match crate::orm::parse_query(call, &schema) {
+        // A chain rooted at a record reads a relationship; one rooted at a
+        // model queries the model. The root says which, and the value's
+        // declared type is what makes it knowable.
+        let base = crate::orm::orm_chain(call)
+            .and_then(|(root, _, _)| self.record_types.get(&root).cloned());
+        let plan = match crate::orm::parse_query_from(call, base.as_deref(), &schema) {
             Ok(p) => p,
             Err(mut d) => {
                 self.diags.append(&mut d);
@@ -517,7 +546,10 @@ impl Codegen {
         // did, and generate the C++ for each step's value. One step is pushed
         // per builder method, so the two sequences line up exactly.
         let (_, chain, _) = crate::orm::orm_chain(call)?;
-        let mut builder = chain.iter().filter(|(name, _, _)| !crate::orm::is_orm_terminal(name));
+        // A relationship is the chain's first step but not a query step, so it
+        // is consumed here; the rest line up with the plan one for one.
+        let query_steps = if plan.join.is_some() { &chain[1..] } else { &chain[..] };
+        let mut builder = query_steps.iter().filter(|(name, _, _)| !crate::orm::is_orm_terminal(name));
         let mut emitted: Vec<String> = Vec::new();
         for step in &plan.steps {
             let Some((name, args, _)) = builder.next() else { break };
@@ -556,8 +588,29 @@ impl Codegen {
             crate::orm::Terminal::Count => "count",
             crate::orm::Terminal::Exists => "exists",
         };
+        // A relationship's own predicate, named here from the schema and bound
+        // to the parent record at run time.
+        let rel = match (&plan.join, &plan.parent) {
+            (Some(j), Some(p)) => {
+                let rec = self.expr(&Expr::Ident(p.clone(), call.span()));
+                format!(
+                    ".of_record({}, {:?}, {:?}, {:?})",
+                    rec, j.parent_col, j.target_col, j.join
+                )
+            }
+            (Some(_), None) => {
+                self.diags.push(crate::orm::err(
+                    call.span(),
+                    crate::catalog::ORM_UNKNOWN_RELATION,
+                    "this relationship is read from something the compiler cannot name.",
+                    "Bind the record to a variable first, e.g. `u <- User.find(1)`.",
+                ));
+                return Some("hs::Val::nil()".to_string());
+            }
+            _ => String::new(),
+        };
         Some(format!(
-            "hs::OrmQuery(&{}){}.{}(hs::db_need())",
+            "hs::OrmQuery(&{}){rel}{}.{}(hs::db_need())",
             Self::orm_sym(&plan.model),
             emitted.join(""),
             terminal
@@ -1102,6 +1155,11 @@ impl Codegen {
                         }
                     }
                 }
+                // A `has_one` read bare is the one relationship that needs no
+                // terminal, so it is a query rather than a field read.
+                if let Some(r) = self.orm_bare_rel(base, name, *sp) {
+                    return r;
+                }
                 let b = self.expr(base);
                 format!("hs::get_member({b}, {:?})", name)
             }
@@ -1162,11 +1220,12 @@ impl Codegen {
                 args: args.to_vec(),
                 span,
             };
-            // Gate on the root being a declared model, not on the chain's
-            // shape: `json.parse(..)` has the same shape as `User.all()` and
-            // must not be reported as a query against a missing model.
+            // Gate on the root being a declared model or a known record, not
+            // on the chain's shape: `json.parse(..)` has the same shape as
+            // `User.all()` and must not be reported as a query against a
+            // missing model. A record root is a relationship read.
             let is_query = crate::orm::chain_root(&whole)
-                .map(|root| self.model_names.contains(&root))
+                .map(|root| self.model_names.contains(&root) || self.record_types.contains_key(&root))
                 .unwrap_or(false);
             // A write is tried first: `create` and friends are the same
             // shape as a query, and the query path would report them as
@@ -1182,6 +1241,12 @@ impl Codegen {
         }
         match callee {
             Expr::Member(base, name, msp) => {
+                // A relationship read without a call is a `has_one`: one row,
+                // and reading it should not need `.first()`. A `has_many` has
+                // no single-row reading, so it says so rather than guessing.
+                if let Some(r) = self.orm_bare_rel(base, name, *msp) {
+                    return r;
+                }
                 if let Expr::Ident(module, _) = base.as_ref() {
                     if MODULES.contains(&module.as_str()) {
                         // The callee's own span reads better in a diagnostic
@@ -1209,6 +1274,39 @@ impl Codegen {
                 "hs::Val::nil()".to_string()
             }
         }
+    }
+
+    /// A relationship read with no call on it, as in `author.latest`.
+    fn orm_bare_rel(&mut self, base: &Expr, field: &str, sp: Span) -> Option<String> {
+        let Expr::Ident(name, _) = base else { return None };
+        let model = self.record_types.get(name)?.clone();
+        let rel = self
+            .orm
+            .as_ref()?
+            .relations_from(&model)
+            .find(|r| r.field == field)?
+            .clone();
+        if rel.kind == crate::orm::RelKind::HasMany || rel.kind == crate::orm::RelKind::ManyToMany {
+            self.diags.push(crate::orm::err(
+                sp,
+                crate::catalog::ORM_BAD_QUERY,
+                format!("`{model}.{field}` is a list, so it has to be read with a terminal."),
+                "Read every row with `.all()`, or one with `.first()`.",
+            ));
+            return Some("hs::Val::nil()".to_string());
+        }
+        // The same call a programmer would have written, so one path validates
+        // it: `author.latest` is `author.latest.first()`.
+        let call = Expr::Call {
+            callee: Box::new(Expr::Member(
+                Box::new(Expr::Member(Box::new(base.clone()), field.to_string(), sp)),
+                "first".to_string(),
+                sp,
+            )),
+            args: Vec::new(),
+            span: sp,
+        };
+        self.orm_query(&call)
     }
 
     fn arg_at(&mut self, args: &[Expr], i: usize) -> String {

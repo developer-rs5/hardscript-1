@@ -431,6 +431,8 @@ pub struct Relation {
     pub field: String,
     /// For `@foreign(users.id)` on the field, the referenced target.
     pub foreign: Option<ForeignKey>,
+    /// For `@through(user_tag)` on a `@many_to_many`, the join table's model.
+    pub through: Option<String>,
     pub span: Span,
 }
 
@@ -815,6 +817,8 @@ pub fn build(models: &[ModelDef], opts: BuildOpts) -> Result<Schema, Vec<Diag>> 
     let known = model_names(models);
     let mut schema = Schema::default();
     let mut seen_tables: BTreeMap<String, Span> = BTreeMap::new();
+    // Models with no primary key, reported once the join tables are known.
+    let mut without_key: Vec<(String, Span)> = Vec::new();
 
     for (ordinal, md) in models.iter().enumerate() {
         let mut columns: Vec<ColumnDef> = Vec::new();
@@ -858,6 +862,13 @@ pub fn build(models: &[ModelDef], opts: BuildOpts) -> Result<Schema, Vec<Diag>> 
                         to: base_ty.to_string(),
                         field: f.name.clone(),
                         foreign,
+                        through: f.attrs.iter().find(|a| a.name == "through").and_then(|a| {
+                            match a.arg.as_ref() {
+                                Some(Expr::Ident(t, _)) => Some(t.clone()),
+                                Some(Expr::Str(t, _)) => Some(t.clone()),
+                                _ => None,
+                            }
+                        }),
                         span: f.span,
                     });
                     continue;
@@ -994,12 +1005,9 @@ pub fn build(models: &[ModelDef], opts: BuildOpts) -> Result<Schema, Vec<Diag>> 
             }
         }
         if !columns.iter().any(|c| c.primary) {
-            diags.push(err(
-                md.span,
-                cat::ORM_MISSING_PRIMARY_KEY,
-                format!("`{}` has no primary key.", md.name),
-                "Mark a field `@primary`, or name it `id`.",
-            ));
+            // Deferred, because a join table is allowed to have no key of its
+            // own: it is only ever reached through the two sides it links.
+            without_key.push((md.name.clone(), md.span));
         }
         if columns.iter().filter(|c| c.primary).count() > 1 {
             let names: Vec<&str> = columns.iter().filter(|c| c.primary).map(|c| c.name.as_str()).collect();
@@ -1123,6 +1131,52 @@ pub fn build(models: &[ModelDef], opts: BuildOpts) -> Result<Schema, Vec<Diag>> 
         }
     }
 
+    // `@foreign(..)` belongs on the key column, because that is the thing in
+    // the database; a relation written as `user : User @belongs_to` has no
+    // column to hang it on. When the two name each other -- which the `<field>_id`
+    // convention already has to do to find the column at all -- the relation
+    // adopts the column's reference, so `@foreign(user.email)` means the same
+    // thing whether it is read as a column or as a relation.
+    for ri in 0..schema.relations.len() {
+        if schema.relations[ri].foreign.is_some() {
+            continue;
+        }
+        let r = schema.relations[ri].clone();
+        if r.kind != RelKind::BelongsTo {
+            continue;
+        }
+        let Some(from) = schema.table(&r.from) else { continue };
+        let Some(col) = existing_key(from, &r.field) else { continue };
+        let Some(fk) = from.column(&col).and_then(|c| c.foreign.clone()) else { continue };
+        if schema.resolve_ref(&fk.ref_table).map(|t| t.model == r.to).unwrap_or(false) {
+            schema.relations[ri].foreign = Some(fk);
+        }
+    }
+
+    // A table named by some `@through(..)` is a join table, and a junction's
+    // real key is the pair of columns pointing at each side, which is not one
+    // field. Requiring a single `@primary` there would mean inventing one.
+    let join_tables: Vec<String> = schema
+        .relations
+        .iter()
+        .filter_map(|r| r.through.as_ref())
+        .filter_map(|t| schema.resolve_ref(t).map(|d| d.model.clone()))
+        .collect();
+    for (model, span) in without_key {
+        if join_tables.contains(&model) {
+            continue;
+        }
+        diags.push(err(
+            span,
+            cat::ORM_MISSING_PRIMARY_KEY,
+            format!("`{model}` has no primary key."),
+            "Mark a field `@primary`, or name it `id`.",
+        ));
+    }
+    if !diags.is_empty() {
+        return Err(diags);
+    }
+
     Ok(schema)
 }
 
@@ -1210,6 +1264,11 @@ pub struct QueryPlan {
     pub table: String,
     pub steps: Vec<QueryStep>,
     pub terminal: Terminal,
+    /// Set when the query starts from a record's relationship rather than from
+    /// the model itself.
+    pub join: Option<JoinPath>,
+    /// The variable a relationship was read from, as written.
+    pub parent: Option<String>,
 }
 
 impl QueryPlan {
@@ -1288,16 +1347,21 @@ pub fn orm_chain(call: &Expr) -> Option<(String, Vec<(String, Vec<Expr>, Span)>,
     };
     let outer_span = *span;
     let model = loop {
-        match cur {
-            Expr::Call { callee, args, span } => {
-                let Expr::Member(base, name, _) = *callee else { return None };
-                steps.push((name, args, span));
-                match *base {
-                    Expr::Ident(m, _) => break m,
-                    inner @ Expr::Call { .. } => cur = inner,
-                    _ => return None,
-                }
-            }
+        // A step is either a call (`f(..)`) or a bare field read (`x.f`). A
+        // relationship is written as the second followed by the first:
+        // `u.posts.all()` is three steps, and the middle one has no arguments.
+        let (base, name, args, sp) = match &cur {
+            Expr::Call { callee, args, span } => match &**callee {
+                Expr::Member(base, name, _) => (base.clone(), name.clone(), args.clone(), *span),
+                _ => return None,
+            },
+            Expr::Member(base, name, sp) => (base.clone(), name.clone(), Vec::new(), *sp),
+            _ => return None,
+        };
+        steps.push((name, args, sp));
+        match *base {
+            Expr::Ident(m, _) => break m,
+            inner @ (Expr::Call { .. } | Expr::Member(..)) => cur = inner,
             _ => return None,
         }
     };
@@ -1312,7 +1376,17 @@ pub fn orm_chain(call: &Expr) -> Option<(String, Vec<(String, Vec<Expr>, Span)>,
 /// error naming the typo, rather than a SQL error naming a missing column
 /// discovered at request time.
 pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>> {
-    let (model, raw_steps, span) = orm_chain(call).ok_or_else(|| {
+    parse_query_from(call, None, schema)
+}
+
+/// A query that starts from a model, or from a record's relation.
+///
+/// `base` is the model a record holds, for `user.posts.all()`. The caller knows
+/// it from the value's declared type; without it a record-rooted chain is not
+/// an ORM chain at all, which is the right default — `x.anything()` is a plain
+/// member read until something says `x` is a row.
+pub fn parse_query_from(call: &Expr, base: Option<&str>, schema: &Schema) -> Result<QueryPlan, Vec<Diag>> {
+    let (root, all_steps, span) = orm_chain(call).ok_or_else(|| {
         vec![err(
             call.span(),
             cat::ORM_BAD_QUERY,
@@ -1320,14 +1394,58 @@ pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>>
             "Start from a model, e.g. `User.all()`.",
         )]
     })?;
-    let table = schema.table(&model).ok_or_else(|| {
-        vec![err(
+
+    // A record-rooted chain has the same shape as a model-rooted one; only the
+    // root means a value instead of a model. The first step is then a relation
+    // rather than a query method, and everything after it queries the model
+    // that relation reaches.
+    let mut join: Option<JoinPath> = None;
+    let mut parent: Option<String> = None;
+    let (model, raw_steps): (String, &[(String, Vec<Expr>, Span)]) = match base {
+        None => (root, &all_steps),
+        Some(b) => {
+            // `b` is the model the *root value* holds, which only the caller
+            // knows; it is the value of `u` in `u.posts.all()`, not the name
+            // `u`. The root is the variable codegen will name in the emitted
+            // call, and it is what `parent` records.
+            let (field, fargs, fsp) = all_steps.first().cloned().ok_or_else(|| {
+                vec![err(
+                    span,
+                    cat::ORM_BAD_QUERY,
+                    "a relationship has to be read from a record.",
+                    "Use `record.field.all()`, or `record.field.first()` for one row.",
+                )]
+            })?;
+            if !fargs.is_empty() {
+                return Err(vec![arity_err(fsp, &field, 0, fargs.len())]);
+            }
+            let Some(rel) = schema.relations_from(b).find(|r| r.field == field) else {
+                return Err(vec![err(
+                    fsp,
+                    cat::ORM_UNKNOWN_RELATION,
+                    format!("`{b}` has no relationship `{field}`."),
+                    relation_help(schema, b),
+                )]);
+            };
+            let path = resolve_join(schema, rel)?;
+            let to = path.to.clone();
+            // The *variable* the relationship is read from, which is what
+            // codegen needs in order to name it; `JoinPath::from` is its model.
+            parent = Some(root.clone());
+            join = Some(path);
+            (to, &all_steps[1..])
+        }
+    };
+
+    if schema.table(&model).is_none() {
+        return Err(vec![err(
             span,
             cat::ORM_UNKNOWN_MODEL,
             format!("no model named `{model}` is declared."),
             "Check the spelling against the `model` declarations in this file.",
-        )]
-    })?;
+        )]);
+    }
+    let table = schema.table(&model).expect("checked above");
 
     let mut diags: Vec<Diag> = Vec::new();
     let mut steps: Vec<QueryStep> = Vec::new();
@@ -1489,6 +1607,11 @@ pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>>
         }
     }
 
+    // A `has_one` is one row, so reading it without a terminal means that. A
+    // `has_many` without one still means every row.
+    if terminal.is_none() && join.as_ref().is_some_and(|j| j.implies_first()) {
+        terminal = Some(Terminal::First);
+    }
     if !diags.is_empty() {
         return Err(diags);
     }
@@ -1497,7 +1620,21 @@ pub fn parse_query(call: &Expr, schema: &Schema) -> Result<QueryPlan, Vec<Diag>>
         table: table.table.clone(),
         steps,
         terminal: terminal.unwrap_or(Terminal::All),
+        join,
+        parent,
     })
+}
+
+/// What to suggest when a relationship is read that the model does not
+/// declare: the relations it does have, since that is nearly always what was
+/// meant.
+fn relation_help(schema: &Schema, model: &str) -> String {
+    let names: Vec<&str> = schema.relations_from(model).map(|r| r.field.as_str()).collect();
+    if names.is_empty() {
+        format!("`{model}` declares no relationships.")
+    } else {
+        format!("`{model}` has: {}.", names.join(", "))
+    }
 }
 
 // ---- writes (M5.3.3) ------------------------------------------------------
@@ -1932,6 +2069,336 @@ fn column_name(e: &Expr, model: &str, table: &TableDef, diags: &mut Vec<Diag>) -
     Some(col)
 }
 
+// ---- relationships (M5.3.4) -----------------------------------------------
+
+/// A relationship read from a record: `user.posts.all()`.
+///
+/// Everything a statement needs is resolved here, at compile time. The
+/// generated code names the parent's column, the target's column and any join
+/// fragment as plain strings, so the runtime never has to know what a
+/// relationship is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinPath {
+    pub kind: RelKind,
+    /// The model the record is.
+    pub from: String,
+    /// The model the rows will be.
+    pub to: String,
+    /// The relation field (`posts`).
+    pub field: String,
+    /// The column read off the parent record.
+    pub parent_col: String,
+    /// The column compared on the target. Qualified when it lives on a join
+    /// table, as `user_tag.tag_id`.
+    pub target_col: String,
+    /// An `INNER JOIN .. ON ..` fragment, empty for a direct link.
+    pub join: String,
+}
+
+impl JoinPath {
+    /// A `has_one` is a `has_many` of one, so it needs the same link and
+    /// defaults to reading a single row.
+    /// Whether reading the relation without a terminal yields one row.
+    ///
+    /// A `has_one` and a `belongs_to` both reach a single row, so `a.latest`
+    /// can stand for `a.latest.first()`. A `has_many` or a `many_to_many`
+    /// reaches a list, and pretending otherwise would hand back one arbitrary
+    /// element while the source said nothing about picking one.
+    pub fn implies_first(&self) -> bool {
+        matches!(self.kind, RelKind::HasOne | RelKind::BelongsTo)
+    }
+}
+
+/// The singular of a plural field name, for the conventional `user_id`.
+///
+/// English plurals are regular enough to guess from (`posts` -> `post`) and a
+/// wrong guess only costs a diagnostic naming the column to declare, so this
+/// stays a guess rather than asking the developer to spell it out twice.
+pub fn singular_of(name: &str) -> String {
+    if let Some(s) = name.strip_suffix("ies") {
+        return format!("{s}y");
+    }
+    for suffix in ["sses", "shes", "ches", "xes"] {
+        if let Some(s) = name.strip_suffix(suffix) {
+            return format!("{s}{}", &suffix[..suffix.len() - 2]);
+        }
+    }
+    // A trailing `s` is a plural only sometimes: `status`, `address` and
+    // `bonus` are singular, and guessing otherwise would rename a column.
+    if let Some(s) = name.strip_suffix("s") {
+        if !s.is_empty() && !name.ends_with("ss") && !name.ends_with("us") && !name.ends_with("is") {
+            return s.to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// The column names that could hold a relation's key, in the order they are
+/// tried. The field's own name comes first because a developer who declares
+/// `user : Int` alongside `user : User` is naming the same thing twice on
+/// purpose; `_id` is the convention.
+fn key_candidates(field: &str) -> Vec<String> {
+    let mut v = vec![field.to_string(), format!("{field}_id")];
+    let single = singular_of(field);
+    if single != field {
+        v.push(format!("{single}_id"));
+    }
+    v
+}
+
+/// The first candidate that is a real column of `table`.
+fn existing_key(table: &TableDef, field: &str) -> Option<String> {
+    key_candidates(field).into_iter().find(|c| table.column(c).is_some())
+}
+
+/// Resolve a relationship into the columns that link it.
+///
+/// The columns are found rather than invented. `model Post { user : User }`
+/// plus a declared `user_id : Int` column is the whole contract: the relation
+/// field says which table it reaches, and a real column says how. Generating a
+/// key nobody declared would put a column in the database that the source does
+/// not describe, which is exactly the kind of surprise this ORM exists to
+/// avoid.
+pub fn resolve_join(schema: &Schema, rel: &Relation) -> Result<JoinPath, Vec<Diag>> {
+    let Some(from) = schema.table(&rel.from) else {
+        return Err(vec![err(
+            rel.span,
+            cat::ORM_UNKNOWN_MODEL,
+            format!("no model named `{}` is declared.", rel.from),
+            "Check the spelling against the `model` declarations in this file.",
+        )]);
+    };
+    let Some(to) = schema.table(&rel.to) else {
+        return Err(vec![err(
+            rel.span,
+            cat::ORM_UNKNOWN_MODEL,
+            format!("`{}` reaches for `{}`, which no model declares.", rel.from, rel.to),
+            "Declare the model, or point the field at one that exists.",
+        )]);
+    };
+
+    // A direct link: compare one column to another.
+    let direct = |parent_col: &str, target_col: &str, span| -> Result<JoinPath, Vec<Diag>> {
+        if from.column(parent_col).is_none() {
+            return Err(vec![no_key(
+                span,
+                &rel.from,
+                &rel.field,
+                parent_col,
+                "`{model}.{parent_col}` is the column this relation reads its key from, and it is not declared.",
+            )]);
+        }
+        if to.column(target_col).is_none() {
+            return Err(vec![no_key(
+                span,
+                &rel.to,
+                &rel.field,
+                target_col,
+                "`{model}.{target_col}` is the column the far side is matched on, and it is not declared.",
+            )]);
+        }
+        Ok(JoinPath {
+            kind: rel.kind,
+            from: rel.from.clone(),
+            to: rel.to.clone(),
+            field: rel.field.clone(),
+            parent_col: parent_col.to_string(),
+            target_col: target_col.to_string(),
+            join: String::new(),
+        })
+    };
+
+    match rel.kind {
+        RelKind::BelongsTo => {
+            // The declared field, or the conventional `<field>_id`.
+            let local = existing_key(from, &rel.field).ok_or_else(|| {
+                vec![no_key(
+                    rel.span,
+                    &rel.from,
+                    &rel.field,
+                    &format!("{}_id", rel.field),
+                    "`{model}.{field}` is a relation, not a column, so it stores nothing by itself.",
+                )]
+            })?;
+            // A `@foreign(..)` names the column on the far side; without one
+            // the target's own key is what is meant.
+            let remote = match &rel.foreign {
+                Some(fk) => fk.ref_column.clone(),
+                None => to
+                    .primary_key_name()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        vec![err(
+                            rel.span,
+                            cat::ORM_MISSING_PRIMARY_KEY,
+                            format!("`{}` has no primary key to match against.", rel.to),
+                            "Give the model a primary key, or point the relation with `@foreign(..)`.",
+                        )]
+                    })?,
+            };
+            direct(&local, &remote, rel.span)
+        }
+        RelKind::HasMany | RelKind::HasOne => {
+            // The other side of the link, if the target declares it. That is
+            // better evidence than any guess: it is a field a person wrote
+            // saying "these belong to that". Several `belongs_to` fields can
+            // point back at the same parent -- a post has both an author and a
+            // reviewer -- and there is nothing in the source to choose between
+            // them, so the first declared is the one used.
+            let back = schema
+                .relations
+                .iter()
+                .find(|r| r.to == rel.from && r.from == rel.to && r.kind == RelKind::BelongsTo);
+            if let Some(back) = back {
+                let local_on_target = schema.table(&back.from).and_then(|t| existing_key(t, &back.field));
+                let remote_on_parent = match &back.foreign {
+                    Some(fk) => Some(fk.ref_column.clone()),
+                    None => from.primary_key_name().map(|s| s.to_string()),
+                };
+                if let (Some(l), Some(rp)) = (local_on_target, remote_on_parent) {
+                    return direct(&rp, &l, rel.span);
+                }
+            }
+            // No declared back-reference, so fall back to the convention. The
+            // column on the target is named after the *parent* -- `User.posts`
+            // looks for `post.user_id`, because that is what a column pointing
+            // back at a user is called. Naming it after the relation instead
+            // (`Author.latest` -> `post.latest_id`) is tried second, for the
+            // case where the relation is named after the link.
+            // The table name, not the model name: columns are snake_case, and
+            // `model BlogPost` has a `blog_post_id` column, not a `BlogPost_id`.
+            let parent_col = format!("{}_id", singular_of(&from.table));
+            let after_rel = format!("{}_id", singular_of(&rel.field));
+            let Some(target_col) = [parent_col.as_str(), after_rel.as_str()]
+                .into_iter()
+                .find_map(|c| to.column(c).map(|_| c.to_string()))
+            else {
+                // Two ways out, and the second is the better one: name the
+                // column, or declare the other side so nothing has to be
+                // inferred at all.
+                return Err(vec![err(
+                    rel.span,
+                    cat::ORM_NO_JOIN_KEY,
+                    format!(
+                        "Nothing on `{}` says which column points back at `{}`.",
+                        rel.to, rel.from
+                    ),
+                    format!(
+                        "Declare `{parent_col}` on `{}`, or give `{}` a `{} : {} @belongs_to`.",
+                        rel.to,
+                        rel.to,
+                        singular_of(&from.table),
+                        rel.from
+                    ),
+                )]);
+            };
+            let Some(pk) = from.primary_key_name() else {
+                return Err(vec![err(
+                    rel.span,
+                    cat::ORM_MISSING_PRIMARY_KEY,
+                    format!("`{}` has no primary key to match against.", rel.from),
+                    "Give the model a primary key, or declare the link on both sides.",
+                )]);
+            };
+            direct(pk, &target_col, rel.span)
+        }
+        RelKind::ManyToMany => {
+            // A many-to-many is a third table, and the developer has to say
+            // which: the join table's shape is not guessable, and guessing it
+            // would mean generating a table nobody declared.
+            let Some(through) = through_table(rel) else {
+                return Err(vec![err(
+                    rel.span,
+                    cat::ORM_NO_JOIN_TABLE,
+                    format!("`{}.{}` is a many-to-many, so it needs a join table.", rel.from, rel.field),
+                    format!("Name it: `{} : {} @many_to_many @through({})`.",
+                            rel.field, rel.to, default_join_table(&rel.from, &rel.to)),
+                )]);
+            };
+            let Some(join) = schema.table(&through) else {
+                return Err(vec![err(
+                    rel.span,
+                    cat::ORM_UNKNOWN_MODEL,
+                    format!("`{}.{}` joins through `{through}`, which no model declares.",
+                            rel.from, rel.field),
+                    "Declare the join table as a model, so its columns are real columns.",
+                )]);
+            };
+            let from_side = format!("{}_id", singular_of(&rel.from.to_lowercase()));
+            let to_side = format!("{}_id", singular_of(&rel.to.to_lowercase()));
+            for c in [&from_side, &to_side] {
+                if join.column(c).is_none() {
+                    return Err(vec![no_key(
+                        rel.span,
+                        &through,
+                        &rel.field,
+                        c,
+                        "A join table needs a column for each side of the link.",
+                    )]);
+                }
+            }
+            let Some(pk) = from.primary_key_name() else {
+                return Err(vec![err(
+                    rel.span,
+                    cat::ORM_MISSING_PRIMARY_KEY,
+                    format!("`{}` has no primary key to match against.", rel.from),
+                    "Give the model a primary key.",
+                )]);
+            };
+            let Some(to_pk) = to.primary_key_name() else {
+                return Err(vec![err(
+                    rel.span,
+                    cat::ORM_MISSING_PRIMARY_KEY,
+                    format!("`{}` has no primary key to match against.", rel.to),
+                    "Give the model a primary key.",
+                )]);
+            };
+            Ok(JoinPath {
+                kind: rel.kind,
+                from: rel.from.clone(),
+                to: rel.to.clone(),
+                field: rel.field.clone(),
+                parent_col: pk.to_string(),
+                // Qualified, because the comparison happens on the join table
+                // rather than on the target.
+                target_col: format!("{through}.{to_side}"),
+                join: format!(
+                    "INNER JOIN {jt} ON {jt}.{to_side} = {tt}.{to_pk}",
+                    jt = quote_ident(Dialect::Sqlite, &join.table),
+                    to_side = quote_ident(Dialect::Sqlite, &to_side),
+                    tt = quote_ident(Dialect::Sqlite, &to.table),
+                    to_pk = quote_ident(Dialect::Sqlite, to_pk),
+                ),
+            })
+        }
+    }
+}
+
+/// A missing key is not a bad attribute; it is a column the source never
+/// declared, and the fix has to name that column.
+fn no_key(span: Span, model: &str, field: &str, col: &str, what: &str) -> Diag {
+    err(
+        span,
+        cat::ORM_NO_JOIN_KEY,
+        what.replace("{model}", model)
+            .replace("{field}", field)
+            .replace("{parent_col}", col)
+            .replace("{target_col}", col)
+            .replace("{col}", col),
+        format!("Declare `{col}` on `{model}`, or point the relation at the column that exists."),
+    )
+}
+
+/// The join table `@through(..)` names, if the relation names one.
+pub fn through_table(rel: &Relation) -> Option<String> {
+    rel.through.clone()
+}
+
+/// The conventional join table name, used to make the diagnostic actionable.
+pub fn default_join_table(from: &str, to: &str) -> String {
+    format!("{}_{}", singular_of(&from.to_lowercase()), singular_of(&to.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1946,6 +2413,353 @@ mod tests {
         let mut prog = crate::frontend(src, "test.hard").expect("parse");
         prog.models = Vec::new();
         prog
+    }
+
+    // ---------------- relationships (M5.3.4) ----------------
+
+    const REL_SRC: &str = r#"
+        model User {
+            id    : Int @primary @auto_increment
+            email : Email
+            posts : Post @has_many
+        }
+        model Post {
+            id        : Int @primary @auto_increment
+            title     : String
+            user_id   : Int @foreign(user.id)
+            user      : User @belongs_to
+            author_id : Int @foreign(author.id)
+            author    : Author @belongs_to
+            tags      : Tag @many_to_many @through(post_tag)
+        }
+        model Author {
+            id     : Int @primary @auto_increment
+            name   : String
+            latest : Post @has_one
+        }
+        model Tag {
+            id   : Int @primary @auto_increment
+            name : String
+        }
+        model post_tag {
+            post_id : Int
+            tag_id  : Int
+        }
+    "#;
+
+    /// The plan for a model-rooted query, for contrast with a record-rooted one.
+    fn mq(src: &str) -> Result<QueryPlan, Vec<u16>> {
+        let schema = build(&parse_models(REL_SRC), BuildOpts::strict()).expect("schema");
+        let prog = crate::frontend(src, "q.hard").expect("parse");
+        let expr = first_call(&prog).expect("a call");
+        match parse_query(&expr, &schema) {
+            Ok(p) => Ok(p),
+            Err(d) => Err(d.iter().map(|x| x.code).collect()),
+        }
+    }
+
+    /// The plan for a query that starts from a record, given the model the
+    /// record holds.
+    fn rq(base: &str, src: &str) -> Result<QueryPlan, Vec<u16>> {
+        let schema = build(&parse_models(REL_SRC), BuildOpts::strict()).expect("schema");
+        let prog = crate::frontend(src, "q.hard").expect("parse");
+        let expr = first_call(&prog).expect("a call");
+        match parse_query_from(&expr, Some(base), &schema) {
+            Ok(p) => Ok(p),
+            Err(d) => Err(d.iter().map(|x| x.code).collect()),
+        }
+    }
+
+    /// `(parent_col, target_col, join)` of a relationship read.
+    fn link(base: &str, src: &str) -> (String, String, String) {
+        let p = rq(base, src).expect("plan");
+        let j = p.join.expect("a relationship");
+        (j.parent_col, j.target_col, j.join)
+    }
+
+    #[test]
+    fn a_has_many_matches_the_child_key_against_the_parent_key() {
+        assert_eq!(
+            link("User", "GET \"/\" :: { u <- User.find(1)\n <- u.posts.all() }"),
+            ("id".to_string(), "user_id".to_string(), String::new()),
+            "the parent's key against the child's foreign key"
+        );
+    }
+
+    #[test]
+    fn a_belongs_to_reads_the_other_way_round() {
+        assert_eq!(
+            link("Post", "GET \"/\" :: { p <- Post.find(1)\n <- p.user.first() }"),
+            ("user_id".to_string(), "id".to_string(), String::new()),
+            "the child's foreign key against the parent's key"
+        );
+    }
+
+    #[test]
+    fn a_has_many_uses_the_declared_back_reference_when_there_is_one() {
+        // `Post.user` is a `@belongs_to` with a declared `user_id`, which is
+        // better evidence than the `posts` name convention.
+        let s = build(&parse_models(REL_SRC), BuildOpts::strict()).unwrap();
+        let rel = s.relations_from("User").find(|r| r.field == "posts").unwrap();
+        let j = resolve_join(&s, rel).unwrap();
+        assert_eq!(j.to, "Post");
+        assert_eq!(j.target_col, "user_id");
+    }
+
+    #[test]
+    fn a_has_many_falls_back_to_the_naming_convention() {
+        let s = schema_of(
+            r#"
+            model User { id : Int @primary, posts : Post @has_many }
+            model Post { id : Int @primary, title : String, user_id : Int }
+            "#,
+        )
+        .expect("schema");
+        // No back-reference, so the only thing left is a column named after the
+        // parent: `User.posts` reads `post.user_id`.
+        let rel = s.relations_from("User").find(|r| r.field == "posts").unwrap();
+        let j = resolve_join(&s, rel).expect("join");
+        assert_eq!(j.parent_col, "id");
+        assert_eq!(j.target_col, "user_id");
+
+        // Named after the link instead of the parent, which is what a person
+        // writing `author : Post @has_one` means.
+        let s = schema_of(
+            r#"
+            model Author { id : Int @primary, latest : Post @has_one }
+            model Post { id : Int @primary, title : String, latest_id : Int }
+            "#,
+        )
+        .expect("schema");
+        let rel = s.relations_from("Author").find(|r| r.field == "latest").unwrap();
+        assert_eq!(resolve_join(&s, rel).expect("join").target_col, "latest_id");
+    }
+
+    #[test]
+    fn a_foreign_key_names_the_column_on_the_far_side() {
+        // `@foreign(user.email)` is a person saying the parent is matched on
+        // something other than its primary key, which the relation has to
+        // honour instead of assuming `id`.
+        let s = schema_of(
+            r#"
+            model User { id : Int @primary, email : Email }
+            model Post { id : Int @primary, user_id : Email @foreign(user.email), user : User @belongs_to }
+            "#,
+        )
+        .expect("schema");
+        let rel = s.relations_from("Post").find(|r| r.field == "user").unwrap();
+        let j = resolve_join(&s, rel).unwrap();
+        assert_eq!(j.parent_col, "user_id", "the local column is the conventional one");
+        assert_eq!(j.target_col, "email", "and the far column is the one `@foreign` named");
+    }
+
+    #[test]
+    fn a_foreign_key_on_another_column_does_not_stand_in_for_the_relation_key() {
+        // `owner` is a real column pointing at a `User`, but the relation is
+        // called `user`, and nothing in the source says those are the same
+        // thing. Guessing would read a column the source never connected.
+        let s = schema_of("model User { id : Int @primary, name : String }\nmodel Post { id : Int @primary, owner : Int @foreign(user.id), user : User @belongs_to }")
+            .expect("the models are fine; the relation is only read on use");
+        let rel = s.relations_from("Post").find(|r| r.field == "user").expect("a relation");
+        let d = resolve_join(&s, rel).expect_err("no key for the relation");
+        assert_eq!(d.len(), 1, "one problem, not a cascade: {d:?}");
+        assert_eq!(d[0].code, cat::ORM_NO_JOIN_KEY);
+        assert!(d[0].message.contains("stores nothing by itself"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn a_relation_with_no_key_column_is_reported() {
+        let s = schema_of(
+            r#"
+            model User { id : Int @primary, name : String }
+            model Post { id : Int @primary, title : String, user : User @belongs_to }
+            "#,
+        )
+        .expect("schema");
+        let rel = s.relations_from("Post").find(|r| r.field == "user").unwrap();
+        let d = resolve_join(&s, rel).unwrap_err();
+        assert_eq!(d[0].code, cat::ORM_NO_JOIN_KEY);
+        assert!(d[0].suggestion.as_deref().unwrap_or("").contains("user_id"),
+                "and the fix names the column to declare");
+    }
+
+    #[test]
+    fn a_relation_read_that_the_model_does_not_declare_is_reported() {
+        let c = rq("User", "GET \"/\" :: { u <- User.find(1)\n <- u.tags.all() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_RELATION]);
+    }
+
+    #[test]
+    fn the_diagnostic_for_an_unknown_relationship_lists_the_real_ones() {
+        let schema = build(&parse_models(REL_SRC), BuildOpts::strict()).unwrap();
+        let help = relation_help(&schema, "User");
+        assert!(help.contains("posts"), "the declared relation is named: {help}");
+    }
+
+    #[test]
+    fn a_column_is_not_read_as_a_relationship() {
+        let c = rq("Post", "GET \"/\" :: { p <- Post.find(1)\n <- p.title.all() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_RELATION]);
+    }
+
+    #[test]
+    fn a_relationship_takes_no_arguments() {
+        let c = rq("User", "GET \"/\" :: { u <- User.find(1)\n <- u.posts(1).all() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn a_relationship_query_can_be_narrowed_further() {
+        let p = rq("User", "GET \"/\" :: { u <- User.find(1)\n <- u.posts.where(title == \"hi\").limit(2).all() }")
+            .expect("plan");
+        assert_eq!(p.model, "Post", "the rest of the chain queries the model it reaches");
+        assert_eq!(p.steps.len(), 2, "and the narrowing steps are kept");
+        assert!(p.join.is_some(), "with the relationship still attached");
+    }
+
+    #[test]
+    fn a_relationship_column_is_checked_against_the_target() {
+        let c = rq("User", "GET \"/\" :: { u <- User.find(1)\n <- u.posts.where(age > 1).all() }");
+        assert_eq!(c.unwrap_err(), vec![cat::ORM_UNKNOWN_COLUMN], "`age` is a User column, not a Post one");
+    }
+
+    #[test]
+    fn an_explicit_terminal_is_never_second_guessed() {
+        // `a.latest` alone is one row, but `.all()` is what the source said, and
+        // the point of a `has_one` is the promise -- not a licence to rewrite it.
+        let p = rq("Author", "GET \"/\" :: { a <- Author.find(1)\n <- a.latest.all() }")
+            .expect("plan");
+        assert_eq!(p.terminal, Terminal::All);
+    }
+
+    #[test]
+    fn a_relation_to_one_row_reads_one_row_without_a_terminal() {
+        let s = build(&parse_models(REL_SRC), BuildOpts::strict()).expect("schema");
+        for field in ["latest", "user"] {
+            let rel = s.relations.iter().find(|r| r.field == field).expect("a relation");
+            assert!(resolve_join(&s, rel).expect("join").implies_first(), "`{field}` reaches one row");
+        }
+        for field in ["posts", "tags"] {
+            let rel = s.relations.iter().find(|r| r.field == field).expect("a relation");
+            assert!(!resolve_join(&s, rel).expect("join").implies_first(), "`{field}` reaches a list");
+        }
+    }
+
+    #[test]
+    fn a_many_to_many_reads_through_its_join_table() {
+        let s = schema_of(
+            r#"
+            model Post { id : Int @primary, title : String, tags : Tag @many_to_many @through(post_tag) }
+            model Tag { id : Int @primary, name : String }
+            model post_tag { post_id : Int, tag_id : Int }
+            "#,
+        )
+        .expect("schema");
+        let rel = s.relations_from("Post").find(|r| r.field == "tags").unwrap();
+        let j = resolve_join(&s, rel).expect("join");
+        assert_eq!(j.parent_col, "id");
+        assert_eq!(j.target_col, "post_tag.tag_id", "the comparison is on the join table");
+        assert_eq!(j.join, "INNER JOIN \"post_tag\" ON \"post_tag\".\"tag_id\" = \"tag\".\"id\"");
+    }
+
+    #[test]
+    fn a_many_to_many_without_a_join_table_is_reported() {
+        let s = schema_of("model Post { id : Int @primary, tags : Tag @many_to_many }\nmodel Tag { id : Int @primary }")
+            .expect("schema");
+        let rel = s.relations_from("Post").find(|r| r.field == "tags").unwrap();
+        let d = resolve_join(&s, rel).unwrap_err();
+        assert_eq!(d[0].code, cat::ORM_NO_JOIN_TABLE);
+        assert!(d[0].suggestion.as_deref().unwrap_or("").contains("@through"),
+                "and the fix spells the attribute");
+    }
+
+    #[test]
+    fn a_join_table_needs_no_primary_key_of_its_own() {
+        // A junction's key is the pair of columns pointing at each side, which
+        // is not one field, so requiring `@primary` would mean inventing one.
+        let s = schema_of(
+            r#"
+            model Post { id : Int @primary, tags : Tag @many_to_many @through(post_tag) }
+            model Tag { id : Int @primary }
+            model post_tag { post_id : Int, tag_id : Int }
+            "#,
+        );
+        assert!(s.is_ok(), "a join table builds: {s:?}");
+    }
+
+    #[test]
+    fn a_join_table_still_needs_both_sides() {
+        let s = schema_of(
+            r#"
+            model Post { id : Int @primary, tags : Tag @many_to_many @through(post_tag) }
+            model Tag { id : Int @primary }
+            model post_tag { post_id : Int }
+            "#,
+        )
+        .expect("schema");
+        let rel = s.relations_from("Post").find(|r| r.field == "tags").unwrap();
+        let d = resolve_join(&s, rel).unwrap_err();
+        assert_eq!(d[0].code, cat::ORM_NO_JOIN_KEY);
+        assert!(d[0].suggestion.as_deref().unwrap_or("").contains("tag_id"),
+                "naming the column that is missing");
+    }
+
+    #[test]
+    fn a_many_to_many_through_an_undeclared_table_is_reported() {
+        let s = schema_of("model Post { id : Int @primary, tags : Tag @many_to_many @through(nope) }\nmodel Tag { id : Int @primary }")
+            .expect("schema");
+        let rel = s.relations_from("Post").find(|r| r.field == "tags").unwrap();
+        assert_eq!(resolve_join(&s, rel).unwrap_err()[0].code, cat::ORM_UNKNOWN_MODEL);
+    }
+
+    #[test]
+    fn a_relationship_records_the_variable_it_was_read_from() {
+        let p = rq("User", "GET \"/\" :: { u <- User.find(1)\n <- u.posts.all() }").expect("plan");
+        assert_eq!(p.parent.as_deref(), Some("u"), "codegen needs the name, not the model");
+    }
+
+    #[test]
+    fn a_model_rooted_query_has_no_parent() {
+        let p = mq("GET \"/\" :: { <- User.all() }").expect("plan");
+        assert!(p.parent.is_none());
+        assert!(p.join.is_none());
+    }
+
+    #[test]
+    fn a_chain_of_member_steps_is_still_a_chain() {
+        // `u.posts.all()` is three steps, and the middle one is a bare field.
+        let prog = crate::frontend("GET \"/\" :: { u <- User.find(1)\n <- u.posts.all() }", "q.hard").unwrap();
+        let expr = first_call(&prog).expect("a call");
+        let (root, steps, _) = orm_chain(&expr).expect("a chain");
+        assert_eq!(root, "u");
+        let names: Vec<&str> = steps.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["posts", "all"]);
+    }
+
+    #[test]
+    fn a_member_chain_on_something_that_is_not_a_record_is_not_a_query() {
+        // The shape of `x.y()` is the same either way, so the shape function
+        // cannot tell the two apart; the root does. A number is neither a
+        // model nor a row, so this is left as a plain call and no SQL is
+        // invented for it.
+        let src = format!("{REL_SRC}\nGET \"/\" :: {{ n <- User.count()\n <- n.posts.all() }}");
+        let cpp = crate::compile_to_cpp(&src, "q.hard").expect("compiles");
+        assert_eq!(cpp.matches("OrmQuery").count(), 1, "only the count is a query: {cpp}");
+        assert!(!cpp.contains("of_record"), "and no relationship is read");
+    }
+
+    #[test]
+    fn plural_field_names_singularise() {
+        assert_eq!(singular_of("posts"), "post");
+        assert_eq!(singular_of("categories"), "category");
+        assert_eq!(singular_of("boxes"), "box");
+        assert_eq!(singular_of("addresses"), "address");
+        assert_eq!(singular_of("status"), "status", "already singular");
+    }
+
+    #[test]
+    fn the_default_join_table_name_is_both_sides_singular() {
+        assert_eq!(default_join_table("Post", "Tag"), "post_tag");
     }
 
     // ---------------- writes (M5.3.3) ----------------
@@ -2657,7 +3471,7 @@ mod tests {
 
     #[test]
     fn all_is_the_default_terminal() {
-        let p = q("GET \"/\" :: { <- User.all() }").expect("plan");
+        let p = mq("GET \"/\" :: { <- User.all() }").expect("plan");
         assert_eq!(p.model, "User");
         assert_eq!(p.terminal, Terminal::All);
         assert!(p.steps.is_empty());

@@ -1,0 +1,69 @@
+bring http
+app @3131
+
+model User {
+    id    : Int @primary @auto_increment
+    email : Email
+    posts : Post @has_many
+}
+
+model Post {
+    id        : Int @primary @auto_increment
+    title     : String
+    user_id   : Int @foreign(user.id)
+    user      : User @belongs_to
+    author_id : Int @foreign(author.id)
+    author    : Author @belongs_to
+    tags      : Tag @many_to_many @through(post_tag)
+}
+
+model Tag {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+model post_tag {
+    post_id : Int
+    tag_id  : Int
+}
+
+model Author {
+    id     : Int @primary @auto_increment
+    name   : String
+    latest : Post @has_one
+}
+
+GET "/u" :: {
+    u <- User.find(1)
+    <- u.posts.all()
+}
+
+GET "/mine" :: {
+    u <- User.find(1)
+    <- u.posts.where(title == "hi").order_by(title, asc).limit(3).all()
+}
+
+GET "/count" :: {
+    u <- User.find(1)
+    <- u.posts.count()
+}
+
+GET "/one" :: {
+    u <- User.find(1)
+    <- u.posts.where(title == "hi").first()
+}
+
+GET "/owner" :: {
+    p <- Post.find(1)
+    <- p.user.first()
+}
+
+GET "/tags" :: {
+    p <- Post.find(1)
+    <- p.tags.all()
+}
+
+GET "/author" :: {
+    a <- Author.find(1)
+    <- a.latest
+}

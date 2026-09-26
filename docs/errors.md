@@ -526,6 +526,419 @@ Fixes:
 - Move the call into a route or `before` body.
 - Pass the value you need in as an argument.
 
+### `HS0211` — Unknown Column Type
+
+A model field used as a table column has a type the ORM has no storage mapping for.
+
+Example:
+
+```hardscript
+model User {
+    id : Int @primary
+    avatar : Blob
+}
+```
+
+Common causes:
+
+- The type name is misspelled.
+- The type is a container, so the field describes a relationship instead of a column.
+
+Fixes:
+
+- Use Int, Float, Bool, String, Time, UUID, or JSON for a column field.
+- Declare the field as a relationship, e.g. `posts : Post[]`.
+
+### `HS0212` — Missing Primary Key
+
+A model the ORM will use declares no primary key, so rows could not be addressed individually.
+
+Example:
+
+```hardscript
+model User {
+    email : String @unique
+}
+```
+
+Common causes:
+
+- No field is marked `@primary` and none is named `id`.
+- The field named `id` was renamed.
+
+Fixes:
+
+- Mark a field `@primary`.
+- Name the key field `id`; it becomes the primary key and, if it is an Int, auto-increments.
+
+### `HS0213` — Bad Model Attribute
+
+A model attribute is contradictory or does not fit the field it is written on.
+
+Example:
+
+```hardscript
+model User {
+    id : Int @primary @nullable
+}
+```
+
+Common causes:
+
+- A field is both `@primary` and `@nullable`.
+- A field is both `@auto_increment` and `@default`.
+- `@auto_increment` is on a non-integer field.
+
+Fixes:
+
+- Keep one spelling of the intent: a primary key is never nullable, and an auto-incrementing column takes no default.
+
+### `HS0214` — Bad Foreign Reference
+
+A `@foreign(...)` target does not name a declared table and column.
+
+Example:
+
+```hardscript
+model Post {
+    id : Int @primary
+    user_id : Int @foreign(users.email)
+}
+```
+
+Common causes:
+
+- The referenced table matches no model.
+- The referenced column is not declared on that model.
+- `@foreign` was written without a `table.column` target.
+
+Fixes:
+
+- Point at a table and column that exist, e.g. `@foreign(users.id)`.
+- Declare the referenced model if it is missing.
+
+### `HS0215` — Duplicate Column
+
+A model declares the same field name twice, which would create two columns with one name.
+
+Example:
+
+```hardscript
+model User {
+    id : Int @primary
+    name : String
+    name : Int
+}
+```
+
+Common causes:
+
+- A field was added twice.
+- Two fields differ only in a way the table cannot express.
+
+Fixes:
+
+- Rename one of the fields.
+
+### `HS0216` — Bad Default
+
+A `@default(...)` value is not a literal the schema can record.
+
+Example:
+
+```hardscript
+model User {
+    id : Int @primary
+    limit : Int @default(env.get("LIMIT"))
+}
+```
+
+Common causes:
+
+- The default is a computed expression rather than a literal.
+- `@default` was written with no value.
+
+Fixes:
+
+- Use a literal, or `@default(now())` for the current time.
+- Move runtime-dependent values into the insert instead of the schema.
+
+### `HS0217` — Duplicate Table
+
+Two models map to the same table name.
+
+Example:
+
+```hardscript
+model User = users [ id => Int @primary ]
+model Account = users [ id => Int @primary ]
+```
+
+Common causes:
+
+- A model was copied and the table name left as it was.
+
+Fixes:
+
+- Give each model its own table name.
+
+### `HS0218` — Unknown Model
+
+An ORM operation names a model that no `model` declaration provides.
+
+Example:
+
+```hardscript
+GET "/" :: {
+    <- User.all()
+}
+```
+
+Common causes:
+
+- The model is spelled differently from its declaration.
+- The model lives in a file that is not part of this build.
+
+Fixes:
+
+- Check the spelling against the `model` declaration.
+- Declare the model in this file.
+
+### `HS0219` — Unknown Column
+
+An ORM operation names a column the model does not declare.
+
+Example:
+
+```hardscript
+GET "/" :: {
+    <- User.where(emial = "a@b.c")
+}
+```
+
+Common causes:
+
+- The field name is misspelled.
+- The field is a relationship, not a column.
+
+Fixes:
+
+- Use a field the model declares.
+- Compare through a relationship instead of a column.
+
+### `HS0220` — Bad Order Column
+
+`order_by` names a field the model does not declare, or an order direction that is neither ascending nor descending.
+
+Example:
+
+```hardscript
+GET "/" :: {
+    <- User.order_by(createdd, desc)
+}
+```
+
+Common causes:
+
+- The field name is misspelled.
+- The direction is a value other than `asc` or `desc`.
+
+Fixes:
+
+- Order by a declared field.
+- Pass `asc` or `desc` as the direction.
+
+### `HS0221` — Bad Query
+
+A chained ORM call is used in a way that cannot be executed, such as `limit` after the query has already run.
+
+Example:
+
+```hardscript
+GET "/" :: {
+    q <- User.all()
+    <- q.limit(10)
+}
+```
+
+Common causes:
+
+- A builder method was called after a terminal method such as `all`, `first`, `count` or `exists`.
+- A builder method was given the wrong number of arguments.
+
+Fixes:
+
+- Call builder methods before the terminal one.
+- Start a new query to change the shape of a result.
+
+### `HS0222` — No Dialect
+
+A database command was asked to generate SQL without naming a supported backend.
+
+Example:
+
+```hardscript
+hard migrate diff
+```
+
+Common causes:
+
+- No `dialect` is set in the manifest.
+- The dialect name is not one the ORM supports.
+
+Fixes:
+
+- Set `dialect = "sqlite"` or `dialect = "postgres"` in the manifest.
+- Pass `--dialect <name>` to the command.
+
+### `HS0223` — Migration Conflict
+
+A migration cannot be applied or rolled back because the database history does not line up with the files on disk.
+
+Example:
+
+```hardscript
+hard migrate up
+```
+
+Common causes:
+
+- A migration file on disk is newer than the last applied one.
+- The same migration version was applied twice.
+- The database has no migration table yet.
+
+Fixes:
+
+- Run `hard migrate status` to see the applied and pending versions.
+- Reconcile the migrations directory with the database, then retry.
+
+### `HS0224` — Seed Failed
+
+A seed file could not be read, or a statement in it failed.
+
+Example:
+
+```hardscript
+hard seed
+```
+
+Common causes:
+
+- A seed file does not parse.
+- A statement violates a constraint or references a missing table.
+
+Fixes:
+
+- Fix the reported seed file.
+- Run the migrations first so the tables exist.
+
+### `HS0225` — Missing Field
+
+A write left out a column the database will not fill in, so the insert could not succeed.
+
+Example:
+
+```hardscript
+model User {
+    id : Int @primary @auto_increment
+    email : Email
+}
+
+User.create({})
+```
+
+Common causes:
+
+- A field has no `@default`, no `@auto_increment` and no timestamp attribute.
+- A field was renamed and the write still uses the old name.
+
+Fixes:
+
+- Give the field a value in the write.
+- Give the field a default, or mark it `@nullable` if absence is allowed.
+
+### `HS0226` — Not a Record
+
+`save`, `touch` and `destroy` were called on something that is not a model row.
+
+Example:
+
+```hardscript
+n <- User.count()
+<- n.save()
+```
+
+Common causes:
+
+- The value came from a query that returns a number or a list, such as `count()` or `all()`.
+- The value is a map, a request body or anything else that is not a row.
+
+Fixes:
+
+- Read one row first: `u <- User.find(1)` gives a record `save` can write.
+- Use the model-rooted write instead: `User.create(..)`, `User.upsert(..)` or `User.delete(..)`.
+
+### `HS0227` — Unknown Relation
+
+A relationship was read from a model that does not declare it.
+
+Example:
+
+```hardscript
+u <- User.find(1)
+<- u.posts.all()
+```
+
+Common causes:
+
+- The field is not declared in the model, or its type is not another model.
+- The field's type names a model that is declared after it under a different name.
+
+Fixes:
+
+- Declare the relation, e.g. `posts : Post @has_many`.
+- Check the field name: relation fields are read as written on the model.
+
+### `HS0228` — No Join Key
+
+A relationship is declared, but no column links the two tables.
+
+Example:
+
+```hardscript
+model Post { id : Int @primary, user : User @belongs_to }
+```
+
+Common causes:
+
+- A `@belongs_to` has no `user` or `user_id` column to hold the key.
+- A `@has_many` names neither a back-reference nor a `<field>_id` column on the target.
+
+Fixes:
+
+- Declare the key column, e.g. `user_id : Int @foreign(user.id)`.
+- Declare both sides of the link, so the `@has_many` can find the `@belongs_to`.
+
+### `HS0229` — No Join Table
+
+A `@many_to_many` does not name the table that joins the two sides.
+
+Example:
+
+```hardscript
+model Post { id : Int @primary, tags : Tag @many_to_many }
+```
+
+Common causes:
+
+- `@many_to_many` was declared without `@through(..)`.
+- `@through(..)` names a model that is not declared.
+
+Fixes:
+
+- Name the join table, e.g. `@through(post_tag)`.
+- Declare the join table as a model with a column for each side, e.g. `post_id` and `tag_id`.
+
 ### `HS0301` — Import Cycle
 
 Two or more modules import each other (directly or transitively).

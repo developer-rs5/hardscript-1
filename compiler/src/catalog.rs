@@ -67,6 +67,9 @@ pub const MIGRATION_CONFLICT: u16 = 223;
 pub const SEED_FAILED: u16 = 224;
 pub const ORM_MISSING_FIELD: u16 = 225;
 pub const ORM_NOT_A_RECORD: u16 = 226;
+pub const ORM_UNKNOWN_RELATION: u16 = 227;
+pub const ORM_NO_JOIN_KEY: u16 = 228;
+pub const ORM_NO_JOIN_TABLE: u16 = 229;
 pub const IMPORT_CYCLE: u16 = 301;
 pub const MODULE_NOT_FOUND: u16 = 302;
 pub const IMPORT_CHAIN_TOO_DEEP: u16 = 303;
@@ -563,6 +566,33 @@ pub fn catalog() -> &'static [CodeDef] {
             example: "n <- User.count()\n<- n.save()",
             causes: &["The value came from a query that returns a number or a list, such as `count()` or `all()`.", "The value is a map, a request body or anything else that is not a row."],
             fixes: &["Read one row first: `u <- User.find(1)` gives a record `save` can write.", "Use the model-rooted write instead: `User.create(..)`, `User.upsert(..)` or `User.delete(..)`."],
+        },
+        CodeDef {
+            number: 227,
+            name: "Unknown Relation",
+            kind: ErrorKind::Type,
+            meaning: "A relationship was read from a model that does not declare it.",
+            example: "u <- User.find(1)\n<- u.posts.all()",
+            causes: &["The field is not declared in the model, or its type is not another model.", "The field's type names a model that is declared after it under a different name."],
+            fixes: &["Declare the relation, e.g. `posts : Post @has_many`.", "Check the field name: relation fields are read as written on the model."],
+        },
+        CodeDef {
+            number: 228,
+            name: "No Join Key",
+            kind: ErrorKind::Type,
+            meaning: "A relationship is declared, but no column links the two tables.",
+            example: "model Post { id : Int @primary, user : User @belongs_to }",
+            causes: &["A `@belongs_to` has no `user` or `user_id` column to hold the key.", "A `@has_many` names neither a back-reference nor a `<field>_id` column on the target."],
+            fixes: &["Declare the key column, e.g. `user_id : Int @foreign(user.id)`.", "Declare both sides of the link, so the `@has_many` can find the `@belongs_to`."],
+        },
+        CodeDef {
+            number: 229,
+            name: "No Join Table",
+            kind: ErrorKind::Type,
+            meaning: "A `@many_to_many` does not name the table that joins the two sides.",
+            example: "model Post { id : Int @primary, tags : Tag @many_to_many }",
+            causes: &["`@many_to_many` was declared without `@through(..)`.", "`@through(..)` names a model that is not declared."],
+            fixes: &["Name the join table, e.g. `@through(post_tag)`.", "Declare the join table as a model with a column for each side, e.g. `post_id` and `tag_id`."],
         },
         // ---------------- Modules (HS0300..=HS0399) ----------------
         CodeDef {

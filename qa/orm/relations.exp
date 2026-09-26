@@ -1,0 +1,7 @@
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_Post).of_record(u, "id", "user_id", "").all(hs::db_need()));
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_Post).of_record(u, "id", "user_id", "").where_eq("title", hs::Val::text("hi")).order_by("title", false).limit(3).all(hs::db_need()));
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_Post).of_record(u, "id", "user_id", "").count(hs::db_need()));
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_Post).of_record(u, "id", "user_id", "").where_eq("title", hs::Val::text("hi")).first(hs::db_need()));
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_User).of_record(p, "user_id", "id", "").first(hs::db_need()));
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_Tag).of_record(p, "id", "post_tag.tag_id", "INNER JOIN \"post_tag\" ON \"post_tag\".\"tag_id\" = \"tag\".\"id\"").all(hs::db_need()));
+return hs::hs_respond(hs::OrmQuery(&__hs_orm_Post).of_record(a, "id", "author_id", "").first(hs::db_need()));
