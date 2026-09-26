@@ -335,6 +335,26 @@ inline void email_deliver(const SmtpConfig& cfg, const std::string& to, const st
 }
 
 // ---------------------------------------------------------------------------
+// Counters
+// ---------------------------------------------------------------------------
+
+/// Set by the first send or template, and counted as messages leave, so
+/// `/metrics` can report mail without an SMTP connection of its own.
+struct EmailCounters {
+    std::atomic<uint64_t> sent{0};
+    std::atomic<uint64_t> failed{0};
+    std::atomic<bool> used{false};
+};
+
+inline EmailCounters& email_counters() {
+    static EmailCounters c;
+    return c;
+}
+inline bool email_used() { return email_counters().used.load(std::memory_order_relaxed); }
+inline uint64_t email_sent() { return email_counters().sent.load(std::memory_order_relaxed); }
+inline uint64_t email_failed() { return email_counters().failed.load(std::memory_order_relaxed); }
+
+// ---------------------------------------------------------------------------
 // Language surface
 // ---------------------------------------------------------------------------
 
@@ -429,6 +449,7 @@ inline Val email_worker_send(const Val& payload) {
         if (pt->is_int()) cfg.port = (int)pt->iv;
     }
     email_deliver(cfg, to->sv, subject->sv, body->sv);
+    email_counters().sent.fetch_add(1, std::memory_order_relaxed);
     return Val::boolean(true);
 }
 
@@ -447,12 +468,28 @@ inline void email_ensure_async_declared() {
 /// `email.send(to=..., subject=..., body=...)`: deliver now, or enqueue when
 /// `async=true`. Returns true on delivery, the job id when queued.
 inline Val email_send(const Val& options) {
-    EmailSend s = email_parse_options(options);
+    EmailCounters& counters = email_counters();
+    counters.used.store(true, std::memory_order_relaxed);
+    EmailSend s;
+    try {
+        s = email_parse_options(options);
+    } catch (...) {
+        // A rejected call never reached a server, but it is still a send that
+        // did not happen: counting it keeps the failure visible.
+        counters.failed.fetch_add(1, std::memory_order_relaxed);
+        throw;
+    }
     if (!s.async) {
         // `from` is per message; everything else comes from the environment.
         SmtpConfig cfg = smtp_config();
         cfg.from = s.from;
-        email_deliver(cfg, s.to, s.subject, s.body);
+        try {
+            email_deliver(cfg, s.to, s.subject, s.body);
+        } catch (...) {
+            counters.failed.fetch_add(1, std::memory_order_relaxed);
+            throw;
+        }
+        counters.sent.fetch_add(1, std::memory_order_relaxed);
         return Val::boolean(true);
     }
     email_ensure_async_declared();
@@ -472,6 +509,7 @@ inline Val email_send(const Val& options) {
 /// `email.template(name, content)`: register a named body with `{{var}}`
 /// holes, rendered at send time from `data`.
 inline Val email_template(const Val& name, const Val& content) {
+    email_counters().used.store(true, std::memory_order_relaxed);
     if (!name.is_str() || name.sv.empty())
         throw std::runtime_error("email: template needs a name as text");
     if (!content.is_str()) throw std::runtime_error("email: template needs content as text");

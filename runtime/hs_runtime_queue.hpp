@@ -448,6 +448,14 @@ struct WorkerReg {
     int concurrency = 4;
 };
 
+/// Set once a job is enqueued or a worker registered, so readiness and
+/// `/metrics` can ask about the queue without building one.
+inline std::atomic<bool>& queue_used_flag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+inline bool queue_used() { return queue_used_flag().load(std::memory_order_relaxed); }
+
 /// The process-wide queue state. One static, stopped and joined before it
 /// destroys, so worker threads never outlive the backends they poll.
 class QueueRuntime {
@@ -475,6 +483,7 @@ class QueueRuntime {
 
     int64_t enqueue(const std::string& type, const Val& args, int64_t delay_ms, int priority,
                     int max_attempts) {
+        queue_used_flag().store(true, std::memory_order_relaxed);
         JobDecl decl;
         {
             std::lock_guard<std::mutex> lock(mu_);
@@ -512,6 +521,7 @@ class QueueRuntime {
     }
 
     void register_worker(const std::string& type, int concurrency, JobHandler handler) {
+        queue_used_flag().store(true, std::memory_order_relaxed);
         if (concurrency <= 0)
             throw std::runtime_error("queue: worker concurrency must be 1 or more");
         std::lock_guard<std::mutex> lock(mu_);

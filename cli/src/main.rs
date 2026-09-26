@@ -94,6 +94,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/hs_runtime_email.hpp"),
     ),
     (
+        "hs_runtime_metrics.hpp",
+        include_str!("../../runtime/hs_runtime_metrics.hpp"),
+    ),
+    (
         "hs_runtime_util.hpp",
         include_str!("../../runtime/hs_runtime_util.hpp"),
     ),

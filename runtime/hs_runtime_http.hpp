@@ -20,6 +20,13 @@ inline void (*hs_request_start_hook)() = nullptr;
 // sessions: one predictable branch per response.
 inline void (*hs_respond_drain_hook)(Response& res) = nullptr;
 
+// Finished-request hook, set by the metrics registry when it is linked in
+// (M6.7). Carries the response and how long the request took, which is why it
+// hangs off dispatch rather than the response drain: the drain sees a cookie,
+// not a latency. Null without metrics: one predictable branch per request.
+inline void (*hs_request_done_hook)(const struct Request& req, const struct Response& res,
+                                    double ms) = nullptr;
+
 // ===========================================================================
 // HTTP
 // ===========================================================================
@@ -540,7 +547,23 @@ struct Server {
         return -1;
     }
 
+    /// Time the dispatch, then hand the finished request to the metrics hook
+    /// if one is installed. The old body, unchanged: this wrapper exists so
+    /// every exit path -- 404, a thrown handler, a shed rate limit -- is
+    /// counted, and there is exactly one place that can do that.
     Response dispatch(Request& req) {
+        if (!hs_request_done_hook) return dispatch_inner(req);
+        auto t0 = std::chrono::steady_clock::now();
+        Response r = dispatch_inner(req);
+        double ms = (double)std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count() /
+                    1000.0;
+        hs_request_done_hook(req, r, ms);
+        return r;
+    }
+
+    Response dispatch_inner(Request& req) {
         // Reset per-request state (sessions when linked in): a thrown request
         // bypasses the response drain, and without this its leftovers would
         // leak into the next request on the same worker.

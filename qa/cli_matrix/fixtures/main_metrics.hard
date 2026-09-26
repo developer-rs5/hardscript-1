@@ -1,0 +1,7 @@
+GET "/orders" :: {
+    metrics.incr("orders_total")
+    metrics.observe("order_value", 42)
+    health.set("db", true, "connected")
+    seen <- metrics.value("orders_total")
+    <- { placed: true, seen: seen }
+}

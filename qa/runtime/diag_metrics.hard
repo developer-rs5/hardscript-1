@@ -1,0 +1,8 @@
+GET "/mine" :: {
+    metrics.incr("x")
+    <- { ok: true }
+}
+
+GET "/metrics" :: {
+    <- "my own"
+}

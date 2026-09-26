@@ -240,6 +240,10 @@ struct Codegen {
     /// are only meaningful where one exists; without this the mistake would
     /// surface as a raw g++ "req was not declared" error.
     ctx: Ctx,
+    /// Set when the program records a metric or a health gate. Only then does
+    /// `main` install `/metrics`, `/healthz` and `/readyz`: a program that
+    /// never asked about its own numbers does not grow three public routes.
+    uses_metrics: bool,
 }
 
 /// Generate the C++ translation unit for `prog`.
@@ -254,6 +258,7 @@ pub fn generate(prog: &Program) -> Result<String, Vec<Diag>> {
         record_types: std::collections::HashMap::new(),
         protect: None,
         ctx: Ctx::Func,
+        uses_metrics: false,
     };
     cg.run(prog);
     if cg.diags.is_empty() {
@@ -447,6 +452,26 @@ impl Codegen {
             .unwrap_or(3000);
 
         self.emit_socket_registrations(&sockets);
+        // Route bodies are emitted by now, so `uses_metrics` is final: a
+        // program that records a metric cannot also own one of the three
+        // endpoint paths, or the router would answer with whichever won.
+        if self.uses_metrics {
+            for r in &routes {
+                if matches!(r.path.as_str(), "/metrics" | "/healthz" | "/readyz") {
+                    self.diags.push(
+                        Diag::new(
+                            ErrorKind::Type,
+                            format!("`{}` is served by the metrics endpoints", r.path),
+                            r.span,
+                            "Rename the route, or expose the numbers yourself with \
+                             `metrics.scrape()` on a path of your own.",
+                        )
+                        .with_code(crate::catalog::DUPLICATE_ROUTE),
+                    );
+                }
+            }
+        }
+
         self.emit_test_registrations(&tests);
         self.emit_main(
             port,
@@ -461,6 +486,7 @@ impl Codegen {
             &worker_regs,
             &sched_regs,
             &email_templates,
+            self.uses_metrics,
         );
     }
 
@@ -1112,7 +1138,7 @@ impl Codegen {
     fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize,
                  nmodels: usize, cache_decls: &[String], job_decls: &[(String, Vec<String>)],
                  top_enqueues: &[String], worker_regs: &[String], sched_regs: &[String],
-                 email_templates: &[String]) {
+                 email_templates: &[String], uses_metrics: bool) {
         self.wln("int main(int argc, char** argv) {");
         self.ind += 1;
         self.wln("hs::set_args(argc, argv);");
@@ -1147,6 +1173,12 @@ impl Codegen {
         }
         self.wln("hs::Server app;");
         self.wln("hs::hs_set_server(&app);");
+        // The metrics endpoints exist only because this program records a
+        // metric somewhere, and they are installed before the app's own routes
+        // so a user route can never shadow them silently.
+        if uses_metrics {
+            self.wln("(void)hs::metrics_install(app);");
+        }
         for i in 0..nmw {
             let line = format!("app.before(mw_{i});");
             self.wln(&line);
@@ -1777,6 +1809,41 @@ impl Codegen {
                 Some(format!(
                     "hs::limit_check_or_abort({id}, (int)({algo}), {rate}, {per}, hs::limit_key_or_ip({key}, req.peer_ip))"
                 ))
+            }
+            // metrics / health (M6.7). `metrics.scrape` is the only one that
+            // reads: everything else records, and the endpoints are installed
+            // by `metrics_install` when a program touches this module at all.
+            (_, _) if module == "metrics" && name == "incr" => {
+                self.uses_metrics = true;
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::metrics_inc({a}, {b})"))
+            }
+            (_, _) if module == "metrics" && name == "set" => {
+                self.uses_metrics = true;
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::metrics_set({a}, {b})"))
+            }
+            (_, _) if module == "metrics" && name == "observe" => {
+                self.uses_metrics = true;
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::metrics_observe({a}, {b})"))
+            }
+            (_, _) if module == "metrics" && name == "value" => {
+                self.uses_metrics = true;
+                Some(format!("hs::metrics_value({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "metrics" && name == "scrape" => {
+                self.uses_metrics = true;
+                Some("hs::metrics_snapshot_json()".to_string())
+            }
+            (_, _) if module == "health" && name == "set" => {
+                self.uses_metrics = true;
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::health_set_val({a}, {b})"))
+            }
+            (_, _) if module == "health" && name == "ready" => {
+                self.uses_metrics = true;
+                Some("hs::metrics_ready_json()".to_string())
             }
             (_, _) if module == "email" && name == "send" => {
                 // The parser has already collected the named options into one

@@ -217,6 +217,16 @@ inline LimitRegistry& limit_registry() {
     return r;
 }
 
+/// Set by the first check, so `/metrics` reports rate limits without building
+/// a registry a program never used.
+inline std::atomic<bool>& ratelimit_used_flag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+inline bool ratelimit_used() { return ratelimit_used_flag().load(std::memory_order_relaxed); }
+inline uint64_t ratelimit_allowed() { return limit_registry().allowed(); }
+inline uint64_t ratelimit_denied() { return limit_registry().denied(); }
+
 /// The key when none was given: the client address, or one shared bucket for
 /// traffic without a socket (in-process calls, tests).
 inline std::string limit_key_or_ip(const Val& key, const std::string& ip) {
@@ -234,6 +244,7 @@ inline LimitVerdict limit_check(const std::string& id, int algo, int64_t limit, 
     if (window_ms <= 0) throw std::runtime_error("limit: window must be positive");
     if (algo != LIMIT_TOKEN_BUCKET && algo != LIMIT_SLIDING_WINDOW)
         throw std::runtime_error("limit: unknown algorithm");
+    ratelimit_used_flag().store(true, std::memory_order_relaxed);
     RateLimiter& lim = limit_registry().get(id, algo, limit, window_ms);
     LimitVerdict v = lim.check(key, limit_now_ms());
     limit_registry().count(v.allowed);

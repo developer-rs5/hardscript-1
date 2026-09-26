@@ -433,10 +433,19 @@ inline Cache& cache_default() {
     return cache_runtime().cache;
 }
 
+/// Set by every entry point below, so `/metrics` can report cache numbers
+/// without constructing the cache a program never used.
+inline std::atomic<bool>& cache_used_flag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+inline bool cache_used() { return cache_used_flag().load(std::memory_order_relaxed); }
+
 /// Start the background sweeper once per process: every second it drops
 /// whatever the wheel says is due. Shutdown joins it before the cache it
 /// sweeps is destroyed.
 inline void cache_start_sweeper() {
+    cache_used_flag().store(true, std::memory_order_relaxed);
     cache_runtime().sweeper.start();
 }
 

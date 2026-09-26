@@ -98,6 +98,7 @@ MAIN_SCHED = F("main_sched.hard")
 MAIN_SESSION = F("main_session.hard")
 MAIN_LIMIT = F("main_limit.hard")
 MAIN_EMAIL = F("main_email.hard")
+MAIN_METRICS = F("main_metrics.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -150,13 +151,19 @@ def setup_email(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_metrics(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_METRICS)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
-    "session": setup_session, "limit": setup_limit, "email": setup_email,
+    "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics,
 }
 
 # id, argv, expected_rc, setup, note
@@ -251,6 +258,10 @@ CASES = [
     ("em001", ["build", "main.hard"], 0, "email", "build an email program"),
     ("em002", ["fmt", "main.hard"], 0, "email", "format email.send options"),
     ("em003", ["docs", "main.hard"], 0, "email", "document an email program"),
+    # metrics and health =======================================================
+    ("mt001", ["build", "main.hard"], 0, "metrics", "build a metrics program"),
+    ("mt002", ["fmt", "main.hard"], 0, "metrics", "format metric calls"),
+    ("mt003", ["docs", "main.hard"], 0, "metrics", "document a metrics program"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

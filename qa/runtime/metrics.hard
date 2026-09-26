@@ -1,0 +1,12 @@
+GET "/orders" :: {
+    metrics.incr("orders_total")
+    metrics.observe("order_value", 42)
+    depth <- metrics.value("orders_total")
+    <- { placed: true, seen: depth }
+}
+
+GET "/depth" :: {
+    metrics.set("queue_depth", 3)
+    health.set("redis", true, "ping ok")
+    <- { ok: true }
+}

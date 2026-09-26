@@ -62,6 +62,10 @@ pub enum Module {
     Session,
     /// Email delivery: SMTP, templates, queue-backed async sends (M6.6).
     Email,
+    /// Metrics registry and health endpoints (M6.7).
+    Metrics,
+    /// Readiness gates reported by `/readyz` (M6.7).
+    Health,
 }
 
 impl Module {
@@ -87,6 +91,8 @@ impl Module {
         "ratelimit",
         "session",
         "email",
+        "metrics",
+        "health",
     ];
 
     /// Human-readable module list used in diagnostics.
@@ -117,6 +123,8 @@ impl Module {
             Module::RateLimit => "ratelimit",
             Module::Session => "session",
             Module::Email => "email",
+            Module::Metrics => "metrics",
+            Module::Health => "health",
         }
     }
 
@@ -142,6 +150,8 @@ impl Module {
         Module::RateLimit,
         Module::Session,
         Module::Email,
+        Module::Metrics,
+        Module::Health,
     ];
 
     /// The allowed-module set as strings (lowercased names), for validation
@@ -169,6 +179,8 @@ impl Module {
             "ratelimit" => Some(Module::RateLimit),
             "session" => Some(Module::Session),
             "email" => Some(Module::Email),
+            "metrics" => Some(Module::Metrics),
+            "health" => Some(Module::Health),
             _ => {
                 let _ = span;
                 None
