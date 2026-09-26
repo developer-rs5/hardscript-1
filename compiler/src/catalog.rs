@@ -51,6 +51,20 @@ pub const RETURN_TYPE_MISMATCH: u16 = 205;
 pub const CONDITION_NOT_BOOL: u16 = 206;
 pub const DUPLICATE_PROTECT: u16 = 207;
 pub const REQUEST_UNAVAILABLE: u16 = 208;
+pub const ORM_UNKNOWN_TYPE: u16 = 211;
+pub const ORM_MISSING_PRIMARY_KEY: u16 = 212;
+pub const ORM_BAD_ATTRIBUTE: u16 = 213;
+pub const ORM_BAD_FOREIGN: u16 = 214;
+pub const ORM_DUPLICATE_COLUMN: u16 = 215;
+pub const ORM_BAD_DEFAULT: u16 = 216;
+pub const ORM_DUPLICATE_TABLE: u16 = 217;
+pub const ORM_UNKNOWN_MODEL: u16 = 218;
+pub const ORM_UNKNOWN_COLUMN: u16 = 219;
+pub const ORM_BAD_ORDER: u16 = 220;
+pub const ORM_BAD_QUERY: u16 = 221;
+pub const ORM_NO_DIALECT: u16 = 222;
+pub const MIGRATION_CONFLICT: u16 = 223;
+pub const SEED_FAILED: u16 = 224;
 pub const IMPORT_CYCLE: u16 = 301;
 pub const MODULE_NOT_FOUND: u16 = 302;
 pub const IMPORT_CHAIN_TOO_DEEP: u16 = 303;
@@ -402,6 +416,133 @@ pub fn catalog() -> &'static [CodeDef] {
                 "Move the call into a route or `before` body.",
                 "Pass the value you need in as an argument.",
             ],
+        },
+        // ---------------- ORM schema & migrations (HS0211..=HS0224) ----------------
+        CodeDef {
+            number: 211,
+            name: "Unknown Column Type",
+            kind: ErrorKind::Type,
+            meaning: "A model field used as a table column has a type the ORM has no storage mapping for.",
+            example: "model User {\n    id : Int @primary\n    avatar : Blob\n}",
+            causes: &["The type name is misspelled.", "The type is a container, so the field describes a relationship instead of a column."],
+            fixes: &["Use Int, Float, Bool, String, Time, UUID, or JSON for a column field.", "Declare the field as a relationship, e.g. `posts : Post[]`."],
+        },
+        CodeDef {
+            number: 212,
+            name: "Missing Primary Key",
+            kind: ErrorKind::Type,
+            meaning: "A model the ORM will use declares no primary key, so rows could not be addressed individually.",
+            example: "model User {\n    email : String @unique\n}",
+            causes: &["No field is marked `@primary` and none is named `id`.", "The field named `id` was renamed."],
+            fixes: &["Mark a field `@primary`.", "Name the key field `id`; it becomes the primary key and, if it is an Int, auto-increments."],
+        },
+        CodeDef {
+            number: 213,
+            name: "Bad Model Attribute",
+            kind: ErrorKind::Type,
+            meaning: "A model attribute is contradictory or does not fit the field it is written on.",
+            example: "model User {\n    id : Int @primary @nullable\n}",
+            causes: &["A field is both `@primary` and `@nullable`.", "A field is both `@auto_increment` and `@default`.", "`@auto_increment` is on a non-integer field."],
+            fixes: &["Keep one spelling of the intent: a primary key is never nullable, and an auto-incrementing column takes no default."],
+        },
+        CodeDef {
+            number: 214,
+            name: "Bad Foreign Reference",
+            kind: ErrorKind::Type,
+            meaning: "A `@foreign(...)` target does not name a declared table and column.",
+            example: "model Post {\n    id : Int @primary\n    user_id : Int @foreign(users.email)\n}",
+            causes: &["The referenced table matches no model.", "The referenced column is not declared on that model.", "`@foreign` was written without a `table.column` target."],
+            fixes: &["Point at a table and column that exist, e.g. `@foreign(users.id)`.", "Declare the referenced model if it is missing."],
+        },
+        CodeDef {
+            number: 215,
+            name: "Duplicate Column",
+            kind: ErrorKind::Type,
+            meaning: "A model declares the same field name twice, which would create two columns with one name.",
+            example: "model User {\n    id : Int @primary\n    name : String\n    name : Int\n}",
+            causes: &["A field was added twice.", "Two fields differ only in a way the table cannot express."],
+            fixes: &["Rename one of the fields."],
+        },
+        CodeDef {
+            number: 216,
+            name: "Bad Default",
+            kind: ErrorKind::Type,
+            meaning: "A `@default(...)` value is not a literal the schema can record.",
+            example: "model User {\n    id : Int @primary\n    limit : Int @default(env.get(\"LIMIT\"))\n}",
+            causes: &["The default is a computed expression rather than a literal.", "`@default` was written with no value."],
+            fixes: &["Use a literal, or `@default(now())` for the current time.", "Move runtime-dependent values into the insert instead of the schema."],
+        },
+        CodeDef {
+            number: 217,
+            name: "Duplicate Table",
+            kind: ErrorKind::Type,
+            meaning: "Two models map to the same table name.",
+            example: "model User = users [ id => Int @primary ]\nmodel Account = users [ id => Int @primary ]",
+            causes: &["A model was copied and the table name left as it was."],
+            fixes: &["Give each model its own table name."],
+        },
+        CodeDef {
+            number: 218,
+            name: "Unknown Model",
+            kind: ErrorKind::Type,
+            meaning: "An ORM operation names a model that no `model` declaration provides.",
+            example: "GET \"/\" :: {\n    <- User.all()\n}",
+            causes: &["The model is spelled differently from its declaration.", "The model lives in a file that is not part of this build."],
+            fixes: &["Check the spelling against the `model` declaration.", "Declare the model in this file."],
+        },
+        CodeDef {
+            number: 219,
+            name: "Unknown Column",
+            kind: ErrorKind::Type,
+            meaning: "An ORM operation names a column the model does not declare.",
+            example: "GET \"/\" :: {\n    <- User.where(emial = \"a@b.c\")\n}",
+            causes: &["The field name is misspelled.", "The field is a relationship, not a column."],
+            fixes: &["Use a field the model declares.", "Compare through a relationship instead of a column."],
+        },
+        CodeDef {
+            number: 220,
+            name: "Bad Order Column",
+            kind: ErrorKind::Type,
+            meaning: "`order_by` names a field the model does not declare, or an order direction that is neither ascending nor descending.",
+            example: "GET \"/\" :: {\n    <- User.order_by(createdd, desc)\n}",
+            causes: &["The field name is misspelled.", "The direction is a value other than `asc` or `desc`."],
+            fixes: &["Order by a declared field.", "Pass `asc` or `desc` as the direction."],
+        },
+        CodeDef {
+            number: 221,
+            name: "Bad Query",
+            kind: ErrorKind::Type,
+            meaning: "A chained ORM call is used in a way that cannot be executed, such as `limit` after the query has already run.",
+            example: "GET \"/\" :: {\n    q <- User.all()\n    <- q.limit(10)\n}",
+            causes: &["A builder method was called after a terminal method such as `all`, `first`, `count` or `exists`.", "A builder method was given the wrong number of arguments."],
+            fixes: &["Call builder methods before the terminal one.", "Start a new query to change the shape of a result."],
+        },
+        CodeDef {
+            number: 222,
+            name: "No Dialect",
+            kind: ErrorKind::Type,
+            meaning: "A database command was asked to generate SQL without naming a supported backend.",
+            example: "hard migrate diff",
+            causes: &["No `dialect` is set in the manifest.", "The dialect name is not one the ORM supports."],
+            fixes: &["Set `dialect = \"sqlite\"` or `dialect = \"postgres\"` in the manifest.", "Pass `--dialect <name>` to the command."],
+        },
+        CodeDef {
+            number: 223,
+            name: "Migration Conflict",
+            kind: ErrorKind::Type,
+            meaning: "A migration cannot be applied or rolled back because the database history does not line up with the files on disk.",
+            example: "hard migrate up",
+            causes: &["A migration file on disk is newer than the last applied one.", "The same migration version was applied twice.", "The database has no migration table yet."],
+            fixes: &["Run `hard migrate status` to see the applied and pending versions.", "Reconcile the migrations directory with the database, then retry."],
+        },
+        CodeDef {
+            number: 224,
+            name: "Seed Failed",
+            kind: ErrorKind::Type,
+            meaning: "A seed file could not be read, or a statement in it failed.",
+            example: "hard seed",
+            causes: &["A seed file does not parse.", "A statement violates a constraint or references a missing table."],
+            fixes: &["Fix the reported seed file.", "Run the migrations first so the tables exist."],
         },
         // ---------------- Modules (HS0300..=HS0399) ----------------
         CodeDef {

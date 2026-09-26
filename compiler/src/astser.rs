@@ -992,6 +992,7 @@ test "hello" {
         let prog = Program {
             stmts: stmts.to_vec(),
             path: String::new(),
+            models: Vec::new(),
         };
         format(&prog)
     }

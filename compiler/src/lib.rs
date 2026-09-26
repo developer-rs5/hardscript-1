@@ -25,6 +25,7 @@ pub mod lexer;
 pub mod manifest;
 pub mod optimizer;
 pub mod optimize;
+pub mod orm;
 pub mod parser;
 pub mod sha256;
 pub mod suggest;

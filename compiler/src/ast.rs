@@ -4,6 +4,11 @@ use crate::token::Span;
 pub struct Program {
     pub stmts: Vec<Stmt>,
     pub path: String,
+    /// `model` declarations, lifted out of `stmts` by the parser. The ORM
+    /// schema engine, the migration commands and codegen all need the model
+    /// *metadata* rather than the statements, and a model is not a runtime
+    /// statement, so it travels beside the program instead of inside it.
+    pub models: Vec<ModelDef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

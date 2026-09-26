@@ -247,7 +247,7 @@ impl Parser {
         }
         errs.append(&mut self.na_errs);
         if errs.is_empty() {
-            Ok(Program { stmts, path: String::new() })
+            Ok(Program { stmts, path: String::new(), models: std::mem::take(&mut self.models) })
         } else {
             Err(errs)
         }

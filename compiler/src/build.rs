@@ -285,7 +285,7 @@ pub fn plan(target: &Path, opts: &BuildOptions, warm_ok: bool) -> Result<Plan, V
         return Err(errs);
     }
 
-    let mut prog = Program { stmts: merged, path: root_path };
+    let mut prog = Program { stmts: merged, path: root_path, models: Vec::new() };
 
     // Static warnings (M3.4.4): analyzed on the UN-optimized tree so they
     // reflect what the user wrote (the optimizer legitimately rewrites away
