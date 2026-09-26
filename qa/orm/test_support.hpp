@@ -6,9 +6,9 @@
 // program exits non-zero with the file, line, and both texts. The runner only
 // has to look at the exit status.
 #include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include "hs_runtime_orm.hpp"
 
@@ -108,6 +108,10 @@ class FakeBackend : public hs::DbBackend {
     int begins = 0, commits = 0, rollbacks = 0;
     int depth = 0;
     bool throw_on_run = false;
+    /// Savepoint traffic, in order: "sp:name", "rel:name", "to:name".
+    std::vector<std::string> savepoints;
+    std::vector<std::string> open_sps;
+    int sp_next = 0;
 
     const char* name() const override { return "fake"; }
     hs::DbDialect dialect() const override { return d; }
@@ -132,6 +136,22 @@ class FakeBackend : public hs::DbBackend {
     }
     int tx_depth() const override { return depth; }
 
+    std::string savepoint(const std::string& name) override {
+        std::string sp = name.empty() ? "hs_sp_" + std::to_string(++sp_next) : name;
+        savepoints.push_back("sp:" + sp);
+        open_sps.push_back(sp);
+        return sp;
+    }
+    void release_savepoint(const std::string& name) override {
+        savepoints.push_back("rel:" + name);
+        open_sps.erase(std::remove(open_sps.begin(), open_sps.end(), name), open_sps.end());
+    }
+    void rollback_to(const std::string& name) override {
+        if (std::find(open_sps.begin(), open_sps.end(), name) == open_sps.end())
+            throw std::runtime_error("fake: no savepoint \"" + name + "\" is open");
+        savepoints.push_back("to:" + name);
+    }
+
     const std::string& last_sql() const {
         static const std::string none;
         return sqls.empty() ? none : sqls.back();
@@ -152,6 +172,9 @@ class DialectOnly : public hs::DbBackend {
     void commit() override {}
     void rollback() override {}
     int tx_depth() const override { return 0; }
+    std::string savepoint(const std::string& name) override { return name; }
+    void release_savepoint(const std::string&) override {}
+    void rollback_to(const std::string&) override {}
 };
 
 /// The `User` table the fixtures query, matching the schema in the compiler

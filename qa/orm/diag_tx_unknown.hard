@@ -1,0 +1,8 @@
+bring http
+app @3134
+
+GET "/undo" :: {
+    db.transaction {
+        db.rollback_to("before_post")
+    }
+}

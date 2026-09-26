@@ -1262,6 +1262,24 @@ None => Err(vec![Diag::new(
                     e = Expr::Member(Box::new(e), name, sp);
                 }
                 Tok::Sym(Sym::LParen) => {
+                    // `db.transaction` takes a block, never parentheses: catch
+                    // it here so the mistake points at the paren, not at an
+                    // undefined `db` later.
+                    if let Expr::Member(base, name, _) = &e {
+                        if name == "transaction" {
+                            if let Expr::Ident(root, _) = base.as_ref() {
+                                if root == "db" {
+                                    return Err(vec![Diag::new(
+                                        ErrorKind::Parse,
+                                        "db.transaction takes a block, not parentheses",
+                                        self.span(),
+                                        "Write `db.transaction { ... }`.",
+                                    )
+                                    .with_code(cat::EXPECTED_TOKEN)]);
+                                }
+                            }
+                        }
+                    }
                     k += 1;
                     self.chain_ok(k)?;
                     let sp = self.span();
@@ -1287,6 +1305,25 @@ None => Err(vec![Diag::new(
                     let idx = self.parse_expr()?;
                     self.expect_sym(Sym::RBracket, "to close index")?;
                     e = Expr::Index(Box::new(e), Box::new(idx), sp);
+                }
+                Tok::Sym(Sym::LBrace) => {
+                    // `db.transaction { ... }` is the only call that takes a
+                    // block. A brace after anything else is not a call, so it
+                    // breaks out exactly as before.
+                    let is_tx = match &e {
+                        Expr::Member(base, name, _) if name == "transaction" => {
+                            matches!(base.as_ref(), Expr::Ident(root, _) if root == "db")
+                        }
+                        _ => false,
+                    };
+                    if !is_tx {
+                        break;
+                    }
+                    let sp = e.span();
+                    let body = self.parse_block()?;
+                    e = Expr::Transaction { body, span: sp };
+                    // A transaction is complete: it takes no further chaining.
+                    break;
                 }
                 _ => break,
             }

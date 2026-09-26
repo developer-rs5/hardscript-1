@@ -253,6 +253,13 @@ impl Fmt {
                     ),
                 );
             }
+            Stmt::ExprStmt(Expr::Transaction { body, .. }) => {
+                self.line(d, "db.transaction {");
+                for s in body {
+                    self.stmt(s, d + 1);
+                }
+                self.line(d, "}");
+            }
             Stmt::ExprStmt(e) => self.line(d, &format!("{}", self.expr(e, 0))),
         }
     }
@@ -307,6 +314,16 @@ impl Fmt {
                     .map(|b| format!(" {{ {} }}", self.expr(b, 0)))
                     .unwrap_or_default();
                 format!("{verb} {:?}{b}", path)
+            }
+            // A transaction in value position is rejected by typecheck, but
+            // the formatter sees raw parses: emit it so formatting never
+            // crashes, and in a shape that re-parses.
+            Expr::Transaction { body, .. } => {
+                let mut inner = Fmt::default();
+                for s in body {
+                    inner.stmt(s, 1);
+                }
+                format!("db.transaction {{\n{}}}", inner.out)
             }
         }
     }
@@ -373,5 +390,15 @@ mod tests {
         assert!(once.contains("GET \"/\" :: {"), "got:\n{once}");
         let twice = format(&crate::frontend(&once, "test.hard").unwrap());
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_transaction_block_survives_roundtrip() {
+        let src = "GET \"/\" :: {\n    db.transaction {\n        db.savepoint(\"s\")\n        db.rollback_to(\"s\")\n    }\n    <- { ok: true }\n}\n";
+        let once = format(&crate::frontend(src, "test.hard").unwrap());
+        assert!(once.contains("db.transaction {"), "got:\n{once}");
+        assert!(once.contains("db.savepoint(\"s\")"), "got:\n{once}");
+        let twice = format(&crate::frontend(&once, "test.hard").unwrap());
+        assert_eq!(once, twice, "formatting must be idempotent:\n{once}");
     }
 }

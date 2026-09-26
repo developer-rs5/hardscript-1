@@ -15,6 +15,9 @@
 // and those come from the schema, never from a request.
 #include "hs_runtime_value.hpp"
 
+#include <cctype>
+#include <exception>
+
 namespace hs {
 
 // How a column's text is bound and read back. The compiler picks this from the
@@ -88,6 +91,95 @@ struct DbBackend {
     virtual void rollback() = 0;
     // Nesting depth of open transactions on this connection.
     virtual int tx_depth() const = 0;
+    // Mark a point inside the open transaction, returning the name it is
+    // known by. An empty name mints one (`hs_sp_1`, ...); a non-empty name is
+    // validated first, because a savepoint name travels into SQL unquoted.
+    virtual std::string savepoint(const std::string& name) = 0;
+    // Forget a savepoint after a successful stretch: everything since it
+    // stays, the mark goes.
+    virtual void release_savepoint(const std::string& name) = 0;
+    // Undo everything since the named savepoint. The transaction — and the
+    // savepoint itself — stay open.
+    virtual void rollback_to(const std::string& name) = 0;
+};
+
+/// A savepoint name is safe to interpolate only when it is already an
+/// identifier. The compiler checks literal names; this is the backstop for
+/// names built at runtime.
+inline bool db_valid_savepoint_name(const std::string& name) {
+    if (name.empty()) return false;
+    if (!(isalpha((unsigned char)name[0]) || name[0] == '_')) return false;
+    for (size_t i = 1; i < name.size(); i++) {
+        if (!(isalnum((unsigned char)name[i]) || name[i] == '_')) return false;
+    }
+    return true;
+}
+
+/// Mark a point in the open transaction. Returns nil: a savepoint is an
+/// effect, and handing back a value would invite assigning it.
+inline Val db_savepoint(DbBackend* b, const Val& name) {
+    if (!name.is_str() || !db_valid_savepoint_name(name.sv))
+        throw std::runtime_error("db: savepoint name must use letters, digits and underscores");
+    if (b->tx_depth() == 0)
+        throw std::runtime_error("db: savepoint \"" + name.sv + "\" needs an open transaction");
+    b->savepoint(name.sv);
+    return Val::nil();
+}
+
+/// Undo everything since the named savepoint, keeping the transaction open.
+inline Val db_rollback_to(DbBackend* b, const Val& name) {
+    if (!name.is_str() || !db_valid_savepoint_name(name.sv))
+        throw std::runtime_error("db: savepoint name must use letters, digits and underscores");
+    if (b->tx_depth() == 0)
+        throw std::runtime_error("db: rollback_to \"" + name.sv + "\" needs an open transaction");
+    b->rollback_to(name.sv);
+    return Val::nil();
+}
+
+/// One `db.transaction { ... }` block. The outermost guard opens the
+/// transaction; a nested one marks a savepoint instead, so an inner failure
+/// rolls back the inner block without killing the outer one. Destruction
+/// commits a clean exit and rolls back an exceptional one, which is what
+/// makes a runtime error inside the block unwind the block's writes.
+struct TxGuard {
+    DbBackend* b = nullptr;
+    bool top = false;
+    std::string sp;
+    int exc = 0;
+
+    explicit TxGuard(DbBackend* bb)
+        : b(bb), top(bb->tx_depth() == 0), exc(std::uncaught_exceptions()) {
+        if (top) {
+            b->begin();
+        } else {
+            sp = b->savepoint("");
+        }
+    }
+    TxGuard(const TxGuard&) = delete;
+    TxGuard& operator=(const TxGuard&) = delete;
+
+    ~TxGuard() noexcept {
+        try {
+            bool failed = std::uncaught_exceptions() > exc;
+            if (top) {
+                if (failed) {
+                    b->rollback();
+                } else {
+                    b->commit();
+                }
+            } else if (failed) {
+                // Unwind the inner block completely: roll back to the mark,
+                // then forget the mark itself.
+                b->rollback_to(sp);
+                b->release_savepoint(sp);
+            } else {
+                b->release_savepoint(sp);
+            }
+        } catch (...) {
+            // A destructor that throws terminates the program, and a guard
+            // whose commit failed has nothing useful left to say.
+        }
+    }
 };
 
 // The ambient connection. One per thread, matching how the auth guard scopes

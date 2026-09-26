@@ -207,6 +207,20 @@ impl Codegen {
     fn blank(&mut self) {
         self.out.push('\n');
     }
+
+    /// Render statements to a string instead of the output, for positions
+    /// where the emitter needs a value (the transaction-in-value fallback).
+    /// Declaration tracking is shared, not swapped: the statements execute in
+    /// order either way.
+    fn stmt_str(&mut self, body: &[Stmt], ctx: Ctx) -> String {
+        let saved = std::mem::take(&mut self.out);
+        let saved_ind = self.ind;
+        self.ind = 0;
+        self.stmts(body, ctx);
+        let rendered = std::mem::replace(&mut self.out, saved);
+        self.ind = saved_ind;
+        rendered
+    }
     fn err_with(&mut self, msg: impl Into<String>, span: Span, help: &str) {
         self.diags.push(
             Diag::new(ErrorKind::Type, msg, span, help)
@@ -1080,6 +1094,19 @@ impl Codegen {
                 let line = format!("hs::expect({cond}, {:?}, {:?});", what, where_);
                 self.wln(&line);
             }
+            Stmt::ExprStmt(Expr::Transaction { body, span }) => {
+                // The guard's name comes from the source position, which is
+                // unique per transaction and keeps the output deterministic.
+                // The guard begins (or savepoints, when nested) here and
+                // commits when the scope ends; an exception unwinds through
+                // it into a rollback.
+                let g = format!("__tx_{}_{}", span.line, span.col);
+                self.wln(&format!("{{ hs::TxGuard {g}(hs::db_need());"));
+                self.ind += 1;
+                self.stmts(body, ctx);
+                self.ind -= 1;
+                self.wln("}");
+            }
             Stmt::ExprStmt(e) => {
                 let cpp = self.expr(e);
                 if !cpp.is_empty() {
@@ -1206,6 +1233,13 @@ impl Codegen {
                 };
                 format!("hs::test_call({:?}, {:?}, {b})", verb, path)
             }
+            // Unreachable in valid programs: typecheck rejects a transaction
+            // in value position before codegen runs. The fallback keeps the
+            // emitter total so an unchecked pipeline still produces valid C++.
+            Expr::Transaction { body, .. } => {
+                let inner = self.stmt_str(body, self.ctx);
+                format!("([&]() -> hs::Val {{ hs::TxGuard __tx(hs::db_need());\n{inner} return hs::Val::nil(); }}())")
+            }
         }
     }
 
@@ -1247,6 +1281,14 @@ impl Codegen {
                 if let Some(r) = self.orm_bare_rel(base, name, *msp) {
                     return r;
                 }
+                // Database control calls: savepoints against the ambient
+                // connection. Names are validated here so a bad call fails
+                // with a diagnostic, not with a SQL error at runtime.
+                if let Expr::Ident(root, _) = base.as_ref() {
+                    if root == "db" && (name == "savepoint" || name == "rollback_to") {
+                        return self.db_savepoint_call(name, args, span, *msp);
+                    }
+                }
                 if let Expr::Ident(module, _) = base.as_ref() {
                     if MODULES.contains(&module.as_str()) {
                         // The callee's own span reads better in a diagnostic
@@ -1274,6 +1316,42 @@ impl Codegen {
                 "hs::Val::nil()".to_string()
             }
         }
+    }
+
+    /// `db.savepoint("x")` / `db.rollback_to("x")` against the ambient
+    /// connection. Typecheck validates every savepoint call before codegen
+    /// runs, so a malformed one here means an unchecked pipeline: diagnose
+    /// it rather than emitting a call the runtime would refuse.
+    fn db_savepoint_call(&mut self, method: &str, args: &[Expr], span: Span, msp: Span) -> String {
+        let _ = msp;
+        if args.len() != 1 {
+            self.diags.push(crate::orm::err(
+                span,
+                crate::catalog::TX_BAD_SAVEPOINT,
+                format!("`db.{method}` takes exactly one savepoint name"),
+                format!("Write `db.{method}(\"name\")`."),
+            ));
+            return "hs::Val::nil()".to_string();
+        }
+        let ok = match &args[0] {
+            Expr::Str(s, _) => {
+                let mut chars = s.chars();
+                matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            _ => false,
+        };
+        if !ok {
+            self.diags.push(crate::orm::err(
+                args[0].span(),
+                crate::catalog::TX_BAD_SAVEPOINT,
+                format!("`db.{method}` needs its name as a string literal"),
+                "Write the name in quotes with letters, digits and underscores.".to_string(),
+            ));
+            return "hs::Val::nil()".to_string();
+        }
+        let arg = self.expr(&args[0]);
+        format!("hs::db_{method}(hs::db_need(), {arg})")
     }
 
     /// A relationship read with no call on it, as in `author.latest`.

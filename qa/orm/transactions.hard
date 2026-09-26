@@ -1,0 +1,26 @@
+bring http
+app @3134
+
+model User {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+model Post {
+    id      : Int @primary @auto_increment
+    title   : String
+    user_id : Int @foreign(user.id)
+}
+
+GET "/move" :: {
+    db.transaction {
+        User.create({ name: "ann" })
+        db.savepoint("before_post")
+        Post.create({ title: "hi", user_id: 1 })
+        db.rollback_to("before_post")
+        db.transaction {
+            User.create({ name: "bo" })
+        }
+    }
+    <- { ok: true }
+}

@@ -175,6 +175,11 @@ fn write_expr(enc: &mut Enc, e: &Expr, depth: u64) -> Result<(), String> {
             }
             enc.span(*s);
         }
+        Expr::Transaction { body, span } => {
+            enc.u8(15);
+            write_stmt_items(enc, body)?;
+            enc.span(*span);
+        }
     }
     Ok(())
 }
@@ -639,6 +644,11 @@ fn read_expr(dec: &mut Dec, depth: u64) -> Result<Expr, String> {
             let s = dec.span()?;
             Expr::Match(Box::new(subj), arms, s)
         }
+        15 => {
+            let body = read_ms(dec, depth + 1)?;
+            let s = dec.span()?;
+            Expr::Transaction { body, span: s }
+        }
         other => return Err(format!("unknown expr tag {other}")),
     })
 }
@@ -1087,5 +1097,15 @@ test "hello" {
         let before = parse_ok(&src);
         let after = deserialize_stmts(&serialize_stmts(&before).unwrap()).unwrap();
         assert_eq!(before.len(), after.len());
+    }
+
+    #[test]
+    fn a_transaction_block_round_trips() {
+        // Tag 15 carries a statement body: if the length prefix or the span
+        // drifts, the statements after the block decode as garbage.
+        let src = "GET \"/\" :: {\n    db.transaction {\n        db.savepoint(\"s\")\n        db.rollback_to(\"s\")\n    }\n}\n";
+        let before = parse_ok(src);
+        let after = deserialize_stmts(&serialize_stmts(&before).unwrap()).unwrap();
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
     }
 }

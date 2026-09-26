@@ -242,6 +242,9 @@ struct PgDb : DbBackend {
     /// names the statement that caused it.
     bool aborted = false;
     std::string conninfo;
+    /// Open savepoints, oldest first, stacked like the database stacks them.
+    std::vector<std::string> sps;
+    int sp_next = 0;
 
     PgDb() = default;
     explicit PgDb(const std::string& ci) { open(ci); }
@@ -387,7 +390,7 @@ struct PgDb : DbBackend {
     DbResult run(const std::string& sql, const std::vector<Val>& params) override {
         DbResult out;
         if (fd < 0) throw std::runtime_error("postgres: the connection is closed");
-        if (aborted && depth > 0) {
+        if (aborted && depth > 0 && !is_rollback_sql(sql)) {
             throw std::runtime_error(
                 "postgres: the transaction is already failed, so this statement cannot run; roll it back "
                 "first (the statement that failed was: " + failed_stmt + ")");
@@ -541,7 +544,12 @@ struct PgDb : DbBackend {
         // transaction that never began: the outermost one owns the transaction,
         // and the outermost commit or rollback ends it. The same mapping
         // SQLite gets, for the same reason.
-        if (depth == 0) run("BEGIN", {});
+        if (depth == 0) {
+            // A fresh top-level transaction cannot be failed: whatever aborted
+            // the last one ended with it.
+            aborted = false;
+            run("BEGIN", {});
+        }
         depth++;
     }
 
@@ -549,6 +557,7 @@ struct PgDb : DbBackend {
         if (depth == 0) return;
         depth--;
         if (depth == 0) {
+            sps.clear();
             run("COMMIT", {});
             aborted = false;
         }
@@ -557,7 +566,62 @@ struct PgDb : DbBackend {
     void rollback() override {
         if (depth == 0) return;
         depth = 0;
+        sps.clear();
         run("ROLLBACK", {});
+        aborted = false;
+    }
+
+    /// `ROLLBACK` and `ROLLBACK TO SAVEPOINT` are the two statements
+    /// PostgreSQL accepts from a failed transaction, which is why they pass
+    /// the refusal above: they are the way out, not another statement piling
+    /// onto the failure.
+    static bool is_rollback_sql(const std::string& sql) {
+        size_t i = 0;
+        while (i < sql.size() && isspace((unsigned char)sql[i])) i++;
+        const char* want = "rollback";
+        for (int k = 0; k < 8; k++) {
+            if (i + (size_t)k >= sql.size()) return false;
+            if (tolower((unsigned char)sql[i + (size_t)k]) != want[k]) return false;
+        }
+        return true;
+    }
+
+    std::string savepoint(const std::string& name) override {
+        if (depth == 0) throw std::runtime_error("postgres: savepoint needs an open transaction");
+        std::string sp = name;
+        if (sp.empty()) sp = "hs_sp_" + std::to_string(++sp_next);
+        if (!db_valid_savepoint_name(sp))
+            throw std::runtime_error("postgres: savepoint name must use letters, digits and underscores");
+        run("SAVEPOINT \"" + sp + "\"", {});
+        sps.push_back(sp);
+        return sp;
+    }
+
+    void release_savepoint(const std::string& name) override {
+        bool found = false;
+        while (!sps.empty()) {
+            std::string top = sps.back();
+            sps.pop_back();
+            if (top == name) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) throw std::runtime_error("postgres: no savepoint \"" + name + "\" is open");
+        run("RELEASE \"" + name + "\"", {});
+    }
+
+    void rollback_to(const std::string& name) override {
+        bool found = false;
+        for (const auto& s : sps)
+            if (s == name) {
+                found = true;
+                break;
+            }
+        if (!found) throw std::runtime_error("postgres: no savepoint \"" + name + "\" is open");
+        run("ROLLBACK TO \"" + name + "\"", {});
+        // Rolling back to a savepoint un-aborts the transaction on the
+        // server, so the flag goes with it. Anything after this runs again.
         aborted = false;
     }
 

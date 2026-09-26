@@ -273,6 +273,13 @@ fn scan_expr(e: &Expr, esc: bool, sc: &mut Scope) {
                 scan_expr(&a.body, esc, sc);
             }
         }
+        // A transaction body is ordinary code in a scope of its own: names
+        // bound inside stay inside, and the block itself evaluates to nothing.
+        Expr::Transaction { body, .. } => {
+            for s in body {
+                scan_stmt(s, sc);
+            }
+        }
     }
 }
 

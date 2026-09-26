@@ -353,6 +353,10 @@ pub enum Expr {
     /// Entity-call used in tests: POST "/users" { body }
     HttpCall { verb: String, path: String, body: Option<Box<Expr>>, span: Span },
     Match(Box<Expr>, Vec<MatchArm>, Span),
+    /// `db.transaction { ... }`: run the body inside one database transaction,
+    /// committing when it completes and rolling back on error. A statement,
+    /// not a value: codegen only accepts it in statement position.
+    Transaction { body: Vec<Stmt>, span: Span },
 }
 
 impl Expr {
@@ -362,7 +366,7 @@ impl Expr {
             Int(_, s) | Float(_, s) | Str(_, s) | Bool(_, s) | List(_, s) | Obj(_, s)
             | Ident(_, s) | Member(_, _, s) | Index(_, _, s) | Unary(_, _, s)
             | Binary(_, _, _, s) | Range(_, _, s) | Call { span: s, .. } | Match(_, _, s)
-            | HttpCall { span: s, .. } => *s,
+            | HttpCall { span: s, .. } | Transaction { span: s, .. } => *s,
         }
     }
 
@@ -398,6 +402,7 @@ impl Expr {
             Expr::Range(l, h, _) => format!("{}..{}", l.render(), h.render()),
             Expr::Match(_, _, _) => "pick(..)".to_string(),
             Expr::HttpCall { verb, path, .. } => format!("{verb} \"{path}\""),
+            Expr::Transaction { .. } => "db.transaction { .. }".to_string(),
         }
     }
 }

@@ -1,0 +1,3 @@
+hs::TxGuard __tx_
+hs::db_savepoint(hs::db_need()
+hs::db_rollback_to(hs::db_need()

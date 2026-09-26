@@ -165,6 +165,11 @@ struct SqliteDb : DbBackend {
     std::string path;
     /// Set for `:memory:`, which is per-connection and so per-object.
     bool memory = false;
+    /// Open savepoints, oldest first. A name may appear more than once: like
+    /// the database itself, a second mark with the same name stacks on top of
+    /// the first, and rolling back or releasing names the most recent one.
+    std::vector<std::string> sps;
+    int sp_next = 0;
 
     explicit SqliteDb(const std::string& filename, bool readonly = false) : path(filename) {
         SqliteApi& a = sqlite_api();
@@ -295,12 +300,61 @@ struct SqliteDb : DbBackend {
     void commit() override {
         if (depth == 0) return;
         depth--;
-        if (depth == 0) run("COMMIT", {});
+        if (depth == 0) {
+            sps.clear();
+            run("COMMIT", {});
+        }
+    }
+
+    std::string savepoint(const std::string& name) override {
+        // A savepoint outside a transaction starts one implicitly on SQLite,
+        // which would commit-bookkeep nobody owns. The language requires the
+        // block, and `db_savepoint` enforces it; reaching here with none open
+        // means an unchecked pipeline, and refusing beats a silent implicit
+        // transaction.
+        if (depth == 0) throw std::runtime_error("sqlite: savepoint needs an open transaction");
+        std::string sp = name;
+        if (sp.empty()) sp = "hs_sp_" + std::to_string(++sp_next);
+        if (!db_valid_savepoint_name(sp))
+            throw std::runtime_error("sqlite: savepoint name must use letters, digits and underscores");
+        run("SAVEPOINT \"" + sp + "\"", {});
+        sps.push_back(sp);
+        return sp;
+    }
+
+    void release_savepoint(const std::string& name) override {
+        // Like the database, releasing a mark forgets everything from it
+        // forward: a savepoint made after it cannot outlive it.
+        bool found = false;
+        while (!sps.empty()) {
+            std::string top = sps.back();
+            sps.pop_back();
+            if (top == name) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) throw std::runtime_error("sqlite: no savepoint \"" + name + "\" is open");
+        run("RELEASE \"" + name + "\"", {});
+    }
+
+    void rollback_to(const std::string& name) override {
+        bool found = false;
+        for (const auto& s : sps)
+            if (s == name) {
+                found = true;
+                break;
+            }
+        if (!found) throw std::runtime_error("sqlite: no savepoint \"" + name + "\" is open");
+        // The mark stays: rolling back to it does not forget it, so the same
+        // stretch can be retried or released afterwards.
+        run("ROLLBACK TO \"" + name + "\"", {});
     }
 
     void rollback() override {
         if (depth == 0) return;
         depth = 0;
+        sps.clear();
         run("ROLLBACK", {});
     }
 
@@ -311,6 +365,7 @@ struct SqliteDb : DbBackend {
     void rollback_all() {
         if (depth > 0) {
             depth = 0;
+            sps.clear();
             run("ROLLBACK", {});
         }
     }

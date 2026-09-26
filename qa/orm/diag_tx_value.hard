@@ -1,0 +1,14 @@
+bring http
+app @3134
+
+model User {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+GET "/all" :: {
+    u <- db.transaction {
+        User.create({ name: "ann" })
+    }
+    <- u
+}

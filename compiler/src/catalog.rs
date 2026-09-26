@@ -70,6 +70,10 @@ pub const ORM_NOT_A_RECORD: u16 = 226;
 pub const ORM_UNKNOWN_RELATION: u16 = 227;
 pub const ORM_NO_JOIN_KEY: u16 = 228;
 pub const ORM_NO_JOIN_TABLE: u16 = 229;
+pub const TX_SCOPE: u16 = 230;
+pub const TX_UNKNOWN_SAVEPOINT: u16 = 231;
+pub const TX_BAD_SAVEPOINT: u16 = 232;
+pub const TX_VALUE: u16 = 233;
 pub const IMPORT_CYCLE: u16 = 301;
 pub const MODULE_NOT_FOUND: u16 = 302;
 pub const IMPORT_CHAIN_TOO_DEEP: u16 = 303;
@@ -593,6 +597,42 @@ pub fn catalog() -> &'static [CodeDef] {
             example: "model Post { id : Int @primary, tags : Tag @many_to_many }",
             causes: &["`@many_to_many` was declared without `@through(..)`.", "`@through(..)` names a model that is not declared."],
             fixes: &["Name the join table, e.g. `@through(post_tag)`.", "Declare the join table as a model with a column for each side, e.g. `post_id` and `tag_id`."],
+        },
+        CodeDef {
+            number: 230,
+            name: "Transaction Scope",
+            kind: ErrorKind::Type,
+            meaning: "`db.savepoint` or `db.rollback_to` was used outside a `db.transaction` block, where there is no transaction to mark.",
+            example: "db.savepoint(\"before_post\")",
+            causes: &["The call sits at the top level of a route or function instead of inside `db.transaction { ... }`.", "The transaction block it belonged to was removed."],
+            fixes: &["Move the call inside a `db.transaction { ... }` block.", "Open the transaction first: savepoints mark a point inside one, they do not open one."],
+        },
+        CodeDef {
+            number: 231,
+            name: "Unknown Savepoint",
+            kind: ErrorKind::Type,
+            meaning: "`db.rollback_to` names a savepoint that no `db.savepoint` created in the same transaction block.",
+            example: "db.transaction {\n    db.rollback_to(\"before_post\")\n}",
+            causes: &["The `db.savepoint(\"before_post\")` call is missing.", "The savepoint was created in a nested `db.transaction` block, which releases its savepoints when it ends.", "The name is misspelled."],
+            fixes: &["Create the savepoint first: `db.savepoint(\"before_post\")` before rolling back to it.", "Keep the pair in the same block: a nested block's savepoints do not survive it."],
+        },
+        CodeDef {
+            number: 232,
+            name: "Bad Savepoint",
+            kind: ErrorKind::Type,
+            meaning: "A `db.savepoint` or `db.rollback_to` call is malformed: it does not name exactly one savepoint, or the name is not a valid identifier.",
+            example: "db.savepoint()",
+            causes: &["The call has no name, or more than one.", "The name is not a string literal, so the compiler cannot check it.", "The name contains characters outside `[A-Za-z_][A-Za-z0-9_]*`, which a savepoint name cannot carry into SQL."],
+            fixes: &["Pass exactly one name: `db.savepoint(\"before_post\")`.", "Write the name as a string literal using letters, digits and underscores, starting with a letter or underscore."],
+        },
+        CodeDef {
+            number: 233,
+            name: "Transaction Value",
+            kind: ErrorKind::Type,
+            meaning: "`db.transaction { ... }` was used where a value was expected, but a transaction is an effect, not a value.",
+            example: "u <- db.transaction {\n    User.create({ name: \"ann\" })\n}",
+            causes: &["The block was assigned to a variable or returned.", "The block was passed as a call argument."],
+            fixes: &["Use the block as a statement: `db.transaction { ... }` on its own line.", "Read back what the block wrote instead of capturing the block itself."],
         },
         // ---------------- Modules (HS0300..=HS0399) ----------------
         CodeDef {

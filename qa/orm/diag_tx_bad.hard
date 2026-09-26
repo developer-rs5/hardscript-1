@@ -1,0 +1,8 @@
+bring http
+app @3134
+
+GET "/mark" :: {
+    db.transaction {
+        db.savepoint()
+    }
+}

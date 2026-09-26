@@ -779,6 +779,7 @@ fn expr_kind_name(e: &Expr) -> &'static str {
         Expr::Range(..) => "range",
         Expr::HttpCall { .. } => "http",
         Expr::Match(..) => "match",
+        Expr::Transaction { .. } => "transaction",
     }
 }
 

@@ -210,6 +210,7 @@ pub enum HirExprKind {
     Range { lo: Box<HirExpr>, hi: Box<HirExpr> },
     HttpCall { verb: String, path: String, body: Option<Box<HirExpr>> },
     Match { scrutinee: Box<HirExpr>, arms: Vec<HirMatchArm> },
+    Transaction { body: HirBlock },
 }
 
 #[derive(Debug, Clone)]
@@ -477,7 +478,7 @@ pub fn lower(prog: &ast::Program) -> HirProgram {
             walk_block(&f.body, &mut ec, &mut bc, &mut vc);
         } else if let HirItem::Var { value, .. } = it {
             vc += 1;
-            walk_expr_count(value, &mut ec);
+            walk_expr_count(value, &mut ec, &mut bc, &mut vc);
         }
     }
     stats.exprs = ec;
@@ -492,10 +493,10 @@ fn walk_block(b: &HirBlock, ec: &mut usize, bc: &mut usize, vc: &mut usize) {
         match s {
             HirStmt::Var { value, .. } | HirStmt::Const { value, .. } => {
                 *vc += 1;
-                walk_expr_count(value, ec);
+                walk_expr_count(value, ec, bc, vc);
             }
             HirStmt::If { cond, then_b, else_b, .. } => {
-                walk_expr_count(cond, ec);
+                walk_expr_count(cond, ec, bc, vc);
                 *bc += 1;
                 walk_block(then_b, ec, bc, vc);
                 if let Some(e) = else_b {
@@ -505,74 +506,78 @@ fn walk_block(b: &HirBlock, ec: &mut usize, bc: &mut usize, vc: &mut usize) {
             }
             HirStmt::Loop { iter, body, .. } => {
                 *vc += 1;
-                walk_expr_count(iter, ec);
+                walk_expr_count(iter, ec, bc, vc);
                 *bc += 1;
                 walk_block(body, ec, bc, vc);
             }
-            HirStmt::Return { value, .. } => walk_expr_count(value, ec),
+            HirStmt::Return { value, .. } => walk_expr_count(value, ec, bc, vc),
             HirStmt::Race { tasks, .. } => {
                 for t in tasks {
-                    walk_expr_count(t, ec);
+                    walk_expr_count(t, ec, bc, vc);
                 }
             }
             HirStmt::Expect { lhs, rhs, .. } => {
-                walk_expr_count(lhs, ec);
-                walk_expr_count(rhs, ec);
+                walk_expr_count(lhs, ec, bc, vc);
+                walk_expr_count(rhs, ec, bc, vc);
             }
-            HirStmt::Expr { expr } => walk_expr_count(expr, ec),
+            HirStmt::Expr { expr } => walk_expr_count(expr, ec, bc, vc),
         }
     }
 }
 
-fn walk_expr_count(e: &HirExpr, ec: &mut usize) {
+fn walk_expr_count(e: &HirExpr, ec: &mut usize, bc: &mut usize, vc: &mut usize) {
     *ec += 1;
     use HirExprKind::*;
     match &e.kind {
         Int(_) | Float(_) | Str(_) | Bool(_) => {}
         List(items) => {
             for i in items {
-                walk_expr_count(i, ec);
+                walk_expr_count(i, ec, bc, vc);
             }
         }
         Obj(kvs) => {
             for (_, v) in kvs {
-                walk_expr_count(v, ec);
+                walk_expr_count(v, ec, bc, vc);
             }
         }
         Ident { .. } => {}
-        Member { base, .. } => walk_expr_count(base, ec),
+        Member { base, .. } => walk_expr_count(base, ec, bc, vc),
         Index { base, index } => {
-            walk_expr_count(base, ec);
-            walk_expr_count(index, ec);
+            walk_expr_count(base, ec, bc, vc);
+            walk_expr_count(index, ec, bc, vc);
         }
         Call { callee, args } => {
-            walk_expr_count(callee, ec);
+            walk_expr_count(callee, ec, bc, vc);
             for a in args {
-                walk_expr_count(a, ec);
+                walk_expr_count(a, ec, bc, vc);
             }
         }
-        Unary { operand, .. } => walk_expr_count(operand, ec),
+        Unary { operand, .. } => walk_expr_count(operand, ec, bc, vc),
         Binary { lhs, rhs, .. } => {
-            walk_expr_count(lhs, ec);
-            walk_expr_count(rhs, ec);
+            walk_expr_count(lhs, ec, bc, vc);
+            walk_expr_count(rhs, ec, bc, vc);
         }
         Range { lo, hi } => {
-            walk_expr_count(lo, ec);
-            walk_expr_count(hi, ec);
+            walk_expr_count(lo, ec, bc, vc);
+            walk_expr_count(hi, ec, bc, vc);
         }
         HttpCall { body, .. } => {
             if let Some(b) = body {
-                walk_expr_count(b, ec);
+                walk_expr_count(b, ec, bc, vc);
             }
         }
         Match { scrutinee, arms } => {
-            walk_expr_count(scrutinee, ec);
+            walk_expr_count(scrutinee, ec, bc, vc);
             for a in arms {
                 if let Some(v) = &a.value {
-                    walk_expr_count(v, ec);
+                    walk_expr_count(v, ec, bc, vc);
                 }
-                walk_expr_count(&a.body, ec);
+                walk_expr_count(&a.body, ec, bc, vc);
             }
+        }
+        Transaction { body } => {
+            *bc += 1;
+            walk_block(body, ec, bc, vc);
         }
     }
 }
@@ -845,6 +850,9 @@ impl Lowerer {
                         body: self.expr(&a.body),
                     })
                     .collect(),
+            },
+            ast::Expr::Transaction { body, span } => HirExprKind::Transaction {
+                body: self.block(body, *span),
             },
         };
         HirExpr { id, span, kind }
@@ -1146,6 +1154,10 @@ fn print_expr(p: &mut Printer, indent: usize, e: &HirExpr) {
                     }
                 }
             }
+        }
+        Transaction { body } => {
+            p.line(indent, &tag(p, format!("transaction #{}", e.id.0)));
+            print_block(p, indent + 1, body);
         }
     }
 }

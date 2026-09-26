@@ -1,0 +1,6 @@
+bring http
+app @3134
+
+GET "/mark" :: {
+    db.savepoint("before_post")
+}

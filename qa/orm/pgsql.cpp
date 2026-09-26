@@ -395,6 +395,31 @@ class MockPg {
             send(fd, 'C', c);
             return;
         }
+        // Savepoints are control too: the mock tracks nothing, because the
+        // client under test tracks everything. What matters on the wire is
+        // the tag the server answers with.
+        if (trimmed.compare(0, 9, "SAVEPOINT") == 0) {
+            std::string c;
+            c += "SAVEPOINT";
+            c += '\0';
+            send(fd, 'C', c);
+            return;
+        }
+        if (trimmed.compare(0, 7, "RELEASE") == 0) {
+            std::string c;
+            c += "RELEASE";
+            c += '\0';
+            send(fd, 'C', c);
+            return;
+        }
+        if (trimmed.compare(0, 11, "ROLLBACK TO") == 0) {
+            ready_ = 'T';
+            std::string c;
+            c += "ROLLBACK";
+            c += '\0';
+            send(fd, 'C', c);
+            return;
+        }
         const PgReply* r = find_reply(sql);
         // No script matched: a real server would answer this statement, and
         // returning an empty result instead would look like a query that
@@ -454,7 +479,9 @@ class MockPg {
 
     static bool is_control(const std::string& sql) {
         std::string t = trim(sql);
-        return t == "BEGIN" || t == "COMMIT" || t == "ROLLBACK" || t == "START TRANSACTION";
+        return t == "BEGIN" || t == "COMMIT" || t == "ROLLBACK" || t == "START TRANSACTION" ||
+               t.compare(0, 9, "SAVEPOINT") == 0 || t.compare(0, 7, "RELEASE") == 0 ||
+               t.compare(0, 11, "ROLLBACK TO") == 0;
     }
 
     const PgReply* find_reply(const std::string& sql) {
@@ -832,6 +859,93 @@ void a_failed_statement_inside_a_transaction_is_named_the_next_time() {
     CHECK_THROWS_MSG(db.run("SELECT 1", {}), "42P01", "and the server speaks for itself again");
 }
 
+void a_rollback_to_is_the_way_out_of_a_failed_postgres_transaction() {
+    // `ROLLBACK TO SAVEPOINT` is the one statement PostgreSQL accepts from a
+    // failed transaction, so the refusal that guards every other statement
+    // must let it through — and afterwards the transaction runs again.
+    std::vector<PgReply> replies(2);
+    replies[0].match = "INSERT INTO";
+    replies[0].error = "not_null_violation";
+    replies[0].error_code = "23502";
+    replies[0].ready = 'E';
+    replies[1] = users_reply();
+    MockPg s(replies);
+    hs::PgDb db(s.conninfo());
+    db.begin();
+    db.savepoint("before");
+    bool threw = false;
+    try {
+        (void)db.run("INSERT INTO \"user\" (\"name\") VALUES ($1)", {hs::Val::nil()});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw, "the statement failed and the transaction with it");
+    // This is the call the refusal must not eat: without the exemption the
+    // guard's own recovery throws, and a nested block can never unwind
+    // partially on this backend.
+    db.rollback_to("before");
+    auto rows = db.run("SELECT \"id\", \"name\" FROM \"user\"", {});
+    CHECK_EQ(rows.rows.size(), size_t(3), "and statements run again afterwards");
+    db.rollback();
+    auto seen = s.statements();
+    bool saw_to = false, saw_savepoint = false;
+    for (auto& st : seen) {
+        if (st.sql.find("ROLLBACK TO \"before\"") != std::string::npos) saw_to = true;
+        if (st.sql.find("SAVEPOINT \"before\"") != std::string::npos) saw_savepoint = true;
+    }
+    CHECK(saw_savepoint, "the savepoint went out on the wire");
+    CHECK(saw_to, "and so did the rollback to it");
+}
+
+void a_nested_guard_unwinds_partially_on_postgres_too() {
+    MockPg s({users_reply()});
+    hs::PgDb db(s.conninfo());
+    {
+        hs::TxGuard outer(&db);
+        bool threw = false;
+        try {
+            hs::TxGuard inner(&db);
+            throw std::runtime_error("inner");
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw, "the inner error propagates");
+    }
+    auto seen = s.statements();
+    std::string traffic;
+    for (auto& st : seen) traffic += st.sql + "\n";
+    CHECK(traffic.find("SAVEPOINT \"hs_sp_1\"") != std::string::npos, "a savepoint opened the inner block");
+    CHECK(traffic.find("ROLLBACK TO \"hs_sp_1\"") != std::string::npos, "a rollback unwound it");
+    CHECK(traffic.find("RELEASE \"hs_sp_1\"") != std::string::npos, "and a release forgot it");
+    CHECK_EQ(s.count("COMMIT"), size_t(1), "while the outer block committed once");
+}
+
+void a_fresh_beginning_is_never_failed() {
+    // A new top-level transaction cannot inherit the previous one's failure:
+    // whatever aborted is over when the rollback or commit that ended it ran.
+    std::vector<PgReply> replies(2);
+    replies[0].match = "INSERT INTO";
+    replies[0].error = "not_null_violation";
+    replies[0].error_code = "23502";
+    replies[0].ready = 'E';
+    replies[1] = users_reply();
+    MockPg s(replies);
+    hs::PgDb db(s.conninfo());
+    db.begin();
+    bool threw = false;
+    try {
+        (void)db.run("INSERT INTO \"user\" (\"name\") VALUES ($1)", {hs::Val::nil()});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw, "failed");
+    db.rollback();
+    db.begin();
+    auto rows = db.run("SELECT \"id\", \"name\" FROM \"user\"", {});
+    CHECK_EQ(rows.rows.size(), size_t(3), "the next transaction runs clean");
+    db.commit();
+}
+
 void a_statement_with_no_rows_is_not_a_failure() {
     MockPg s({users_reply()});
     hs::PgDb db(s.conninfo());
@@ -1035,6 +1149,9 @@ int main() {
 
     qa::a_database_error_arrives_with_its_code_and_its_hint();
     qa::a_failed_statement_inside_a_transaction_is_named_the_next_time();
+    qa::a_rollback_to_is_the_way_out_of_a_failed_postgres_transaction();
+    qa::a_nested_guard_unwinds_partially_on_postgres_too();
+    qa::a_fresh_beginning_is_never_failed();
     qa::a_statement_with_no_rows_is_not_a_failure();
 
     qa::transactions_nest_the_way_both_databases_allow();

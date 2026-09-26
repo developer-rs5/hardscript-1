@@ -384,6 +384,11 @@ fn collect_expr_uses(e: &HirExpr, uses: &mut HashMap<VarId, usize>) {
                 collect_expr_uses(&arm.body, uses);
             }
         }
+        // Uses inside a transaction body count: dropping a binding the block
+        // reads would change what the database sees.
+        HirExprKind::Transaction { body } => {
+            collect_block_uses(body, uses);
+        }
         _ => {}
     }
 }
@@ -444,6 +449,8 @@ fn is_pure(e: &HirExpr) -> bool {
         HirExprKind::Call { .. } | HirExprKind::HttpCall { .. } | HirExprKind::Match { .. } => {
             false
         }
+        // A transaction writes to the database: never pure, never removable.
+        HirExprKind::Transaction { .. } => false,
     }
 }
 
