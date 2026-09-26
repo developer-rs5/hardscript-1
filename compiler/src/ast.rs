@@ -58,6 +58,8 @@ pub enum Module {
     Schedule,
     /// Sliding-window rate limiter (M5.8).
     RateLimit,
+    /// Cookie session manager (M6.4).
+    Session,
 }
 
 impl Module {
@@ -81,6 +83,7 @@ impl Module {
         "queue",
         "schedule",
         "ratelimit",
+        "session",
     ];
 
     /// Human-readable module list used in diagnostics.
@@ -109,6 +112,7 @@ impl Module {
             Module::Queue => "queue",
             Module::Schedule => "schedule",
             Module::RateLimit => "ratelimit",
+            Module::Session => "session",
         }
     }
 
@@ -132,6 +136,7 @@ impl Module {
         Module::Queue,
         Module::Schedule,
         Module::RateLimit,
+        Module::Session,
     ];
 
     /// The allowed-module set as strings (lowercased names), for validation
@@ -157,6 +162,7 @@ impl Module {
             "queue" => Some(Module::Queue),
             "schedule" => Some(Module::Schedule),
             "ratelimit" => Some(Module::RateLimit),
+            "session" => Some(Module::Session),
             _ => {
                 let _ = span;
                 None

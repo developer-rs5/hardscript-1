@@ -52,18 +52,31 @@ inline std::string random_uuid() {
 }
 
 // Turn a HardScript route/fn value into an HTTP response: strings become
-// text responses, maps/lists become JSON, nil becomes 204.
-inline Response hs_respond(const Val& v) {
+// text responses, maps/lists become JSON, nil becomes 204. The drain hook
+// (hs_respond_drain_hook in hs_runtime_http.hpp, set by the session manager)
+// appends any cookies the handler queued and resets per-request state, so
+// every route return carries its cookies exactly once.
+inline Response hs_respond_inner(const Val& v) {
     if (v.is_nil()) return Response::empty(204);
     if (v.is_str()) return Response::text(v.sv);
     return Response::json(v);
 }
+inline Response hs_respond(const Val& v) {
+    Response r = hs_respond_inner(v);
+    if (hs_respond_drain_hook) hs_respond_drain_hook(r);
+    return r;
+}
 // Rvalue overload: `<- {...}` temporaries move their payload straight into
 // the response so the JSON serializer streams the value to the socket arena.
-inline Response hs_respond(Val&& v) {
+inline Response hs_respond_inner(Val&& v) {
     if (v.is_nil()) return Response::empty(204);
     if (v.is_str()) return Response::text(std::move(v.sv));
     return Response::json(std::move(v));
+}
+inline Response hs_respond(Val&& v) {
+    Response r = hs_respond_inner(std::move(v));
+    if (hs_respond_drain_hook) hs_respond_drain_hook(r);
+    return r;
 }
 
 inline Val args_list() {

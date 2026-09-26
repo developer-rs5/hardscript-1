@@ -1,0 +1,17 @@
+bring session
+
+GET "/login" :: {
+    u <- { id: 1, name: "ann" }
+    session.start(u)
+    session.flash("notice", "welcome")
+    <- u
+}
+
+GET "/me" :: {
+    u <- session.user()
+    t <- session.csrf()
+    ok <- session.csrf_valid(t)
+    n <- session.flash("notice")
+    session.destroy()
+    <- u
+}

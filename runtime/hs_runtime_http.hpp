@@ -6,6 +6,19 @@
 #include "hs_runtime_arena.hpp"
 namespace hs {
 
+struct Response;
+
+// Per-request reset hook, set by the session manager when it is linked in.
+// A thrown request bypasses the response drain, so without a reset its
+// cookies would leak into the next request on the worker thread. Null when
+// sessions are not part of the build: one predictable branch per request.
+inline void (*hs_request_start_hook)() = nullptr;
+
+// Response drain hook, set by the session manager when it is linked in.
+// Every route return appends the cookies its handlers queued. Null without
+// sessions: one predictable branch per response.
+inline void (*hs_respond_drain_hook)(Response& res) = nullptr;
+
 // ===========================================================================
 // HTTP
 // ===========================================================================
@@ -524,6 +537,10 @@ struct Server {
     }
 
     Response dispatch(Request& req) {
+        // Reset per-request state (sessions when linked in): a thrown request
+        // bypasses the response drain, and without this its leftovers would
+        // leak into the next request on the same worker.
+        if (hs_request_start_hook) hs_request_start_hook();
         try {
             if (middlewares.empty()) {
                 int ri = match(req.method, req.path, req);

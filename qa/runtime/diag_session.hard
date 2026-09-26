@@ -1,0 +1,6 @@
+bring session
+
+calc helper() {
+    u <- session.user()
+    <- u
+}

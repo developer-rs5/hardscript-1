@@ -1585,7 +1585,8 @@ impl Codegen {
                 | ("http", "query")
                 | ("auth", "bearer")
                 | ("auth", "require")
-                | ("auth", "optional"))
+                | ("auth", "optional")
+                | ("session", _))
     }
 
     fn builtin(&mut self, module: &str, name: &str, args: &[Expr], span: Span) -> Option<String> {
@@ -1957,6 +1958,29 @@ impl Codegen {
             (_, _) if module == "auth" && name == "optional" => {
                 let secret = self.ttx(args, 0);
                 Some(format!("hs::Val::boolean(hs::auth_optional(req, {secret}))"))
+            }
+            // session (M6.4): cookie sessions against the in-flight request.
+            // Every call threads `req` for cookie input; cookies leave on the
+            // response through the drain, never through a return value.
+            (_, _) if module == "session" && name == "start" => {
+                Some(format!("hs::session_start(req, {})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "session" && name == "user" => {
+                Some("hs::session_user(req)".to_string())
+            }
+            (_, _) if module == "session" && name == "destroy" => {
+                Some("hs::session_destroy(req)".to_string())
+            }
+            (_, _) if module == "session" && name == "flash" => {
+                let a = self.arg_at(args, 0);
+                let b = self.arg_at(args, 1);
+                Some(format!("hs::session_flash(req, {a}, {b})"))
+            }
+            (_, _) if module == "session" && name == "csrf" => {
+                Some("hs::session_csrf(req)".to_string())
+            }
+            (_, _) if module == "session" && name == "csrf_valid" => {
+                Some(format!("hs::session_csrf_valid(req, {})", self.arg_at(args, 0)))
             }
             (_, _) if module == "auth" && name == "reject" => {
                 let status = self.arg_at(args, 0);

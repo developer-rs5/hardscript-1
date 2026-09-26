@@ -95,6 +95,7 @@ MAIN_MODELS = F("main_models.hard")
 MAIN_CACHE = F("main_cache.hard")
 MAIN_QUEUE = F("main_queue.hard")
 MAIN_SCHED = F("main_sched.hard")
+MAIN_SESSION = F("main_session.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -129,12 +130,19 @@ def setup_sched(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_session(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_SESSION)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
+    "session": setup_session,
 }
 
 # id, argv, expected_rc, setup, note
@@ -219,6 +227,9 @@ CASES = [
     # scheduler ==============================================================
     ("s001", ["build", "main.hard"], 0, "sched", "build a schedule program"),
     ("s002", ["fmt", "main.hard"], 0, "sched", "format schedule declarations"),
+    # session ================================================================
+    ("ss001", ["build", "main.hard"], 0, "session", "build a session program"),
+    ("ss002", ["fmt", "main.hard"], 0, "session", "format session calls"),
 ]
 
 for cid, argv, rc, setup, note in CASES:
