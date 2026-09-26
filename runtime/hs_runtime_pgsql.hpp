@@ -274,6 +274,11 @@ struct PgDb : DbBackend {
             throw std::runtime_error("postgres: cannot connect to " + info.host + ":" +
                                      std::to_string(info.port) + " -- " + strerror(e));
         }
+        // The protocol is a ping-pong of small messages, which is exactly the
+        // shape Nagle's algorithm delays: every driver sets TCP_NODELAY, and
+        // so does this one.
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         startup();
     }
 
