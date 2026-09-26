@@ -8,6 +8,8 @@ static hs::Response route_0(const hs::Request& req) {
         hs::Val body = req.json();
         return hs::hs_respond(hs::get_member(body, "x"));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }

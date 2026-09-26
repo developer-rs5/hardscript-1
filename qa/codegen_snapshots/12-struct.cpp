@@ -8,6 +8,8 @@ static hs::Response route_0(const hs::Request& req) {
         hs::Val o = hs::Val::object({ {"a", hs::Val::object({ {"b", hs::Val::list(std::vector<hs::Val>{ hs::Val::int_(10), hs::Val::int_(20), hs::Val::int_(30) })} })} });
         return hs::hs_respond(hs::index_at(hs::get_member(hs::get_member(o, "a"), "b"), hs::Val::int_(2)));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }

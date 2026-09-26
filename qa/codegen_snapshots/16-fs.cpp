@@ -8,6 +8,8 @@ static hs::Response route_0(const hs::Request& req) {
         (void)(([&]() -> hs::Val { hs::fs_write(hs::to_text(hs::Val::text("/tmp/hs_snap.txt")).sv, hs::to_text(hs::Val::text("snap")).sv); return hs::Val::nil(); }()));
         return hs::hs_respond(hs::Val::text(hs::fs_read(hs::to_text(hs::Val::text("/tmp/hs_snap.txt")).sv)));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }

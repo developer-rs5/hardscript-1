@@ -20,6 +20,8 @@ static hs::Response route_0(const hs::Request& req) {
     try {
         return hs::hs_respond(fn_add(hs::Val::int_(20), hs::Val::int_(22)));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }
@@ -29,6 +31,8 @@ static hs::Response route_1(const hs::Request& req) {
     try {
         return hs::hs_respond(fn_fib(hs::Val::int_(10)));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }

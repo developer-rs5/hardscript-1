@@ -25,6 +25,8 @@ static hs::Response route_0(const hs::Request& req) {
         }
         return hs::hs_respond(t);
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }

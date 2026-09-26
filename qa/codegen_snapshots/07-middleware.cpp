@@ -7,6 +7,8 @@ static hs::Response route_0(const hs::Request& req) {
     try {
         return hs::hs_respond(hs::Val::text("ok"));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }
@@ -18,6 +20,8 @@ static hs::Response mw_0(const hs::Request& req, const std::function<hs::Respons
             return hs::hs_respond(hs::Val::object({ {"error", hs::Val::text("denied")} }));
         }
         return next();
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("middleware error: ") + e.what());
     }

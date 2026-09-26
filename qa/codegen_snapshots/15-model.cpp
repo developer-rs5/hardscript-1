@@ -3,10 +3,19 @@
 using namespace hs;
 using std::string;
 
+static bool schema_registered_0 = false;
+static void register_schema_0() { if (schema_registered_0) return; schema_registered_0 = true;
+    hs::register_schema("U", {hs::vf("id", "Int"), hs::vf("name", "Str")}, false);
+}
+
+
+static const hs::OrmModel __hs_orm_U("U", "users", "id", std::vector<std::string>{ "id", "name" }, std::vector<hs::OrmKind>{ hs::OrmKind::Int, hs::OrmKind::Text }, std::vector<std::string>{ "id" }, "");
 static hs::Response route_0(const hs::Request& req) {
     try {
         return hs::hs_respond(hs::Val::text("ok"));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }
@@ -19,6 +28,7 @@ int main(int argc, char** argv) {
     app.handle("GET", "/", route_0);
     app.port = 3031;
 
+    register_schema_0();
     app.listen();
     return 0;
 }

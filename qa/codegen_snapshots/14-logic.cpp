@@ -7,6 +7,8 @@ static hs::Response route_0(const hs::Request& req) {
     try {
         return hs::hs_respond(hs::op_or(hs::op_and(hs::Val::boolean(true), hs::Val::boolean(true)), hs::Val::boolean(!hs::Val::boolean(false) .truthy())));
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }

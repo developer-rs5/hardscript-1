@@ -13,6 +13,8 @@ static hs::Response route_0(const hs::Request& req) {
         hs::Val a = fn_slow(hs::Val::int_(6));
         (void)hs::race_val({ []() -> hs::Val { return fn_slow(hs::Val::int_(1)); }, []() -> hs::Val { return hs::Val::int_(2); } });
         return hs::Response::error(500, "route reached the end without returning a value");
+    } catch (const hs::HttpAbort& a) {
+        return a.r;
     } catch (const std::exception& e) {
         return hs::Response::error(500, std::string("route error: ") + e.what());
     }
