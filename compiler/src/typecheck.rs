@@ -622,6 +622,9 @@ fn check_tx_value_use(stmts: &[Stmt], diags: &mut Vec<Diag>) {
                 check_tx_expr(rhs, diags);
             }
             Stmt::Job(_) => {}
+            // A schedule carries no expressions: the body lowered to a
+            // function, which is walked as one.
+            Stmt::Schedule(_) => {}
             // Statement position: valid, and the body resets to statement
             // context, so a block nested directly inside is fine again.
             Stmt::ExprStmt(Expr::Transaction { body, .. }) => check_tx_value_use(body, diags),

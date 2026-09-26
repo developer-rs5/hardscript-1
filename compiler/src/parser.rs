@@ -22,6 +22,13 @@ pub struct Parser {
     /// parameters. `worker` blocks desugar against this table, so a job must
     /// be declared above the worker that handles it.
     pub jobs: Vec<(String, Vec<JobParam>)>,
+    /// Schedules lowered so far, naming the `__sched_N` functions in order.
+    pub sched_count: u32,
+    /// Desugared functions (`__sched_N` bodies) waiting to join the program.
+    /// A worker lowers to one statement; a schedule lowers to two (the
+    /// function and its spec node), and only one can be returned, so the
+    /// function travels here and `parse_program` appends it.
+    pub synthetic: Vec<FunDef>,
     pub middlewares: Vec<(String, Vec<Stmt>)>,
     pub tests: Vec<TestDef>,
     /// Non-fatal parse errors recovered inside statement regions (blocks,
@@ -46,6 +53,47 @@ const MAX_DEPTH: usize = 256;
 /// compile). Unbounded chains are rejected with a diagnostic.
 const MAX_CHAIN: usize = 256;
 
+/// A schedule day: Monday-first number, or -1 for `day` (every day). Full
+/// names and three-letter abbreviations, any case.
+fn sched_weekday(w: &str) -> Option<i8> {
+    let t = w.to_lowercase();
+    let names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+    let abbrev = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    for (i, (n, a)) in names.iter().zip(abbrev.iter()).enumerate() {
+        if t == *n || t == *a {
+            return Some(i as i8);
+        }
+    }
+    if t == "day" {
+        return Some(-1);
+    }
+    None
+}
+
+/// Split an `at` time ("HH:MM" or "HH:MM:SS") into parts, range-checked.
+fn sched_time(t: &str, span: Span) -> Result<(u8, u8, u8), Vec<Diag>> {
+    let bad = || {
+        vec![Diag::new(
+            ErrorKind::Parse,
+            format!("bad time `{t}`"),
+            span,
+            "Write the time quoted as HH:MM or HH:MM:SS, e.g. `at \"03:00\"`.",
+        )
+        .with_code(cat::EXPECTED_TOKEN)]
+    };
+    let parts: Vec<&str> = t.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(bad());
+    }
+    let h: u32 = parts[0].parse().map_err(|_| bad())?;
+    let m: u32 = parts[1].parse().map_err(|_| bad())?;
+    let s: u32 = if parts.len() == 3 { parts[2].parse().map_err(|_| bad())? } else { 0 };
+    if h > 23 || m > 59 || s > 59 {
+        return Err(bad());
+    }
+    Ok((h as u8, m as u8, s as u8))
+}
+
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Parser {
         Parser {
@@ -61,6 +109,8 @@ impl Parser {
             sockets: Vec::new(),
             funcs: Vec::new(),
             jobs: Vec::new(),
+            sched_count: 0,
+            synthetic: Vec::new(),
             middlewares: Vec::new(),
             tests: Vec::new(),
             na_errs: Vec::new(),
@@ -252,6 +302,9 @@ impl Parser {
         }
         errs.append(&mut self.na_errs);
         if errs.is_empty() {
+            for fd in std::mem::take(&mut self.synthetic) {
+                stmts.push(Stmt::Func(fd));
+            }
             Ok(Program { stmts, path: String::new(), models: std::mem::take(&mut self.models) })
         } else {
             Err(errs)
@@ -629,6 +682,109 @@ impl Parser {
         Ok(Stmt::Func(fd))
     }
 
+    /// `every ... { ... }`: intervals (`1h`), cron days (`day`, weekdays,
+    /// optional `at "HH:MM[:SS]"` and `timezone "..."`), and `startup`.
+    /// Lowers to a `__sched_N` function plus a `Schedule` node carrying the
+    /// firing spec, so the body flows through every existing pass untouched.
+    fn parse_every(&mut self) -> Result<Stmt, Vec<Diag>> {
+        let sp = self.span();
+        self.advance(); // `every`
+        let kind = match self.peek().clone() {
+            Tok::Int(_) => {
+                let secs = self.parse_duration("for a schedule interval")?;
+                SchedKind::Interval { secs }
+            }
+            Tok::Ident(w) if w == "startup" => {
+                self.advance();
+                SchedKind::Startup
+            }
+            Tok::Ident(w) => {
+                let w = w.clone();
+                self.advance();
+                let day = sched_weekday(&w).ok_or_else(|| {
+                    vec![Diag::new(
+                        ErrorKind::Parse,
+                        format!("unknown schedule day `{w}`"),
+                        self.span(),
+                        "Use an interval (`every 1h`), `day`, a weekday, or `startup`.",
+                    )
+                    .with_code(cat::EXPECTED_TOKEN)]
+                })?;
+                // Optional `at "HH:MM[:SS]"`, defaulting to midnight.
+                let (h, m, s) = if matches!(self.peek(), Tok::Ident(t) if t == "at") {
+                    self.advance();
+                    match self.peek().clone() {
+                        Tok::Str(t) => {
+                            let t = t.clone();
+                            self.advance();
+                            sched_time(&t, self.span())?
+                        }
+                        other => {
+                            return Err(vec![Diag::new(
+                                ErrorKind::Parse,
+                                format!("expected a time string after `at`, found {other}"),
+                                self.span(),
+                                "Write the time quoted: `at \"03:00\"`.",
+                            )
+                            .with_code(cat::EXPECTED_TOKEN)])
+                        }
+                    }
+                } else {
+                    (0, 0, 0)
+                };
+                // Optional `timezone "..."`, defaulting to UTC.
+                let tz = if matches!(self.peek(), Tok::Ident(t) if t == "timezone") {
+                    self.advance();
+                    match self.peek().clone() {
+                        Tok::Str(t) => {
+                            let t = t.clone();
+                            self.advance();
+                            Some(t)
+                        }
+                        other => {
+                            return Err(vec![Diag::new(
+                                ErrorKind::Parse,
+                                format!("expected a timezone string, found {other}"),
+                                self.span(),
+                                "Write the zone quoted: `timezone \"local\"`.",
+                            )
+                            .with_code(cat::EXPECTED_TOKEN)])
+                        }
+                    }
+                } else {
+                    None
+                };
+                match day {
+                    -1 => SchedKind::Daily { h, m, s, tz },
+                    w => SchedKind::Weekly { weekday: w as u8, h, m, s, tz },
+                }
+            }
+            other => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("expected an interval, a day, or `startup` after `every`, found {other}"),
+                    self.span(),
+                    "Write `every 1h { ... }`, `every day at \"03:00\" { ... }` or `every startup { ... }`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        };
+        let body = self.parse_block()?;
+        let n = self.sched_count;
+        self.sched_count += 1;
+        let fname = format!("__sched_{n}");
+        let fd = FunDef {
+            name: fname.clone(),
+            ret: None,
+            params: Vec::new(),
+            body,
+            span: sp,
+        };
+        self.funcs.push(fd.clone());
+        self.synthetic.push(fd);
+        Ok(Stmt::Schedule(SchedDef { name: fname, kind, span: sp }))
+    }
+
     fn parse_block_stmt(&mut self) -> Result<Stmt, Vec<Diag>> {
         let sp = self.span();
         // `job Name(T p, ...)`, `queue Name(args, opt = v)` and
@@ -649,6 +805,18 @@ impl Parser {
         if matches!(self.peek(), Tok::Ident(n) if n == "worker") {
             if matches!(self.peek_at(1), Tok::Ident(_)) && matches!(self.peek_at(2), Tok::Sym(Sym::LBrace)) {
                 return self.parse_worker();
+            }
+        }
+        // `every 1h { }`, `every day at "03:00" [timezone "Z"] { }`,
+        // `every monday at "09:00" { }`, `every startup { }`. Anything else
+        // starting with `every` parses as an expression, exactly as before.
+        if matches!(self.peek(), Tok::Ident(n) if n == "every") {
+            match self.peek_at(1) {
+                Tok::Int(_) => return self.parse_every(),
+                Tok::Ident(d) if d == "startup" || sched_weekday(d).is_some() => {
+                    return self.parse_every()
+                }
+                _ => {}
             }
         }
         // `cache users ttl 10m`: declare a cache entry's default TTL. It
@@ -2246,5 +2414,98 @@ mod tests {
         let errs = parse_errs("worker Nope {\n    <- 1\n}\n");
         assert!(!errs.is_empty(), "undeclared job");
         assert!(errs[0].message.contains("undeclared job"), "got {}", errs[0].message);
+    }
+
+    fn sched_of(src: &str) -> (String, SchedKind) {
+        let prog = crate::frontend(src, "t.hard").expect("parses");
+        let sched = prog.stmts.iter().find_map(|s| match s {
+            Stmt::Schedule(d) => Some(d),
+            _ => None,
+        });
+        let sched = sched.expect("a schedule node");
+        (sched.name.clone(), sched.kind.clone())
+    }
+
+    #[test]
+    fn every_interval_parses_seconds() {
+        let (name, kind) = sched_of("every 1h {\n    cleanup()\n}\n");
+        assert_eq!(name, "__sched_0");
+        assert!(matches!(kind, SchedKind::Interval { secs: 3600 }), "got {kind:?}");
+        let (_, kind) = sched_of("every 30s {\n    cleanup()\n}\n");
+        assert!(matches!(kind, SchedKind::Interval { secs: 30 }));
+    }
+
+    #[test]
+    fn every_day_defaults_to_midnight_utc() {
+        let (_, kind) = sched_of("every day at \"03:00\" {\n    backup()\n}\n");
+        match kind {
+            SchedKind::Daily { h, m, s, tz } => {
+                assert_eq!((h, m, s), (3, 0, 0));
+                assert_eq!(tz, None);
+            }
+            other => panic!("expected daily, got {other:?}"),
+        }
+        let (_, kind) = sched_of("every day {\n    backup()\n}\n");
+        assert!(matches!(kind, SchedKind::Daily { h: 0, m: 0, s: 0, .. }), "got {kind:?}");
+    }
+
+    #[test]
+    fn every_weekday_keeps_time_and_zone() {
+        let (_, kind) = sched_of("every monday at \"09:00\" {\n    report()\n}\n");
+        match kind {
+            SchedKind::Weekly { weekday, h, m, s, tz } => {
+                assert_eq!(weekday, 0, "Monday-first");
+                assert_eq!((h, m, s), (9, 0, 0));
+                assert_eq!(tz, None);
+            }
+            other => panic!("expected weekly, got {other:?}"),
+        }
+        let (_, kind) = sched_of("every Fri at \"17:30:15\" timezone \"local\" {\n    report()\n}\n");
+        match kind {
+            SchedKind::Weekly { weekday, h, m, s, tz } => {
+                assert_eq!(weekday, 4);
+                assert_eq!((h, m, s), (17, 30, 15));
+                assert_eq!(tz, Some("local".to_string()));
+            }
+            other => panic!("expected weekly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_startup_parses() {
+        let (name, kind) = sched_of("every startup {\n    boot()\n}\n");
+        assert_eq!(name, "__sched_0");
+        assert!(matches!(kind, SchedKind::Startup));
+    }
+
+    #[test]
+    fn every_rejects_nonsense() {
+        assert!(!parse_errs("every someday at \"03:00\" {\n    x()\n}\n").is_empty(), "bad day");
+        assert!(!parse_errs("every day at \"25:00\" {\n    x()\n}\n").is_empty(), "bad hour");
+        assert!(!parse_errs("every day at 0300 {\n    x()\n}\n").is_empty(), "unquoted time");
+        assert!(!parse_errs("every day at \"03:00\" timezone local {\n    x()\n}\n").is_empty(),
+            "unquoted zone");
+    }
+
+    #[test]
+    fn schedule_body_lowers_to_a_function() {
+        let prog = crate::frontend("every 1h {\n    cleanup()\n}\n", "t.hard").expect("parses");
+        let func = prog.stmts.iter().find_map(|s| match s {
+            Stmt::Func(f) => Some(f),
+            _ => None,
+        });
+        let func = func.expect("a lowered function");
+        assert_eq!(func.name, "__sched_0");
+        assert!(func.params.is_empty(), "schedules take no payload");
+        assert_eq!(func.body.len(), 1);
+    }
+
+    #[test]
+    fn every_without_a_shape_is_not_a_schedule() {
+        // `every` stays an ordinary identifier: a variable read is not a
+        // declaration, the same boundary `cache` keeps.
+        let toks: Vec<Token> = crate::Lexer::new("every\n").tokenize().unwrap();
+        let prog = crate::Parser::new(toks).parse_program().unwrap();
+        assert_eq!(prog.stmts.len(), 1);
     }
 }

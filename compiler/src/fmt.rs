@@ -28,6 +28,18 @@ fn field_attr_at(a: &FieldAttr) -> String {
     }
 }
 
+/// Canonical rendering of a schedule's timezone: omitted for the default.
+fn fmt_tz(tz: &Option<String>) -> String {
+    match tz {
+        Some(t) => format!(" timezone {t:?}"),
+        None => String::new(),
+    }
+}
+
+/// Weekday names for schedule rendering, Monday-first like the parser.
+const WEEKDAYS: [&str; 7] =
+    ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
 /// Canonical rendering of one framework field: `Type`, `Type(args)` and the
 /// trailing `@attr` / `@attr(arg)` list.
 fn field_decl(f: &FieldDef) -> String {
@@ -193,6 +205,28 @@ impl Fmt {
                 let params: Vec<String> =
                     j.params.iter().map(|p| format!("{} {}", p.ty, p.name)).collect();
                 self.line(d, &format!("job {}({})", j.name, params.join(", ")));
+            }
+            Stmt::Schedule(s) => {
+                // The body lives in the paired `__sched_N` function; this
+                // line is the firing spec alone.
+                let head = match &s.kind {
+                    SchedKind::Interval { secs } => format!("every {secs}s"),
+                    SchedKind::Daily { h, m, s: sec, tz } => {
+                        format!("every day at {:02}:{:02}:{:02}{}", h, m, sec, fmt_tz(tz))
+                    }
+                    SchedKind::Weekly { weekday, h, m, s: sec, tz } => {
+                        format!(
+                            "every {} at {:02}:{:02}:{:02}{}",
+                            WEEKDAYS[*weekday as usize],
+                            h,
+                            m,
+                            sec,
+                            fmt_tz(tz)
+                        )
+                    }
+                    SchedKind::Startup => "every startup".to_string(),
+                };
+                self.line(d, &head);
             }
             Stmt::Protect(p) => {
                 let mut opts = vec![format!("secret = {}", p.secret.render())];

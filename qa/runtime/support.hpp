@@ -44,6 +44,8 @@ inline std::string show(const char* s) { return std::string("\"") + s + "\""; }
 inline std::string show(bool b) { return b ? "true" : "false"; }
 inline std::string show(int64_t v) { return std::to_string(v); }
 inline std::string show(uint64_t v) { return std::to_string(v); }
+inline std::string show(long long v) { return std::to_string(v); }
+inline std::string show(unsigned long long v) { return std::to_string(v); }
 inline std::string show(int v) { return std::to_string(v); }
 inline std::string show(double v) {
     char b[40];

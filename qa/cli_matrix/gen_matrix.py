@@ -94,6 +94,7 @@ def setup_readonly(d):
 MAIN_MODELS = F("main_models.hard")
 MAIN_CACHE = F("main_cache.hard")
 MAIN_QUEUE = F("main_queue.hard")
+MAIN_SCHED = F("main_sched.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -122,12 +123,18 @@ def setup_queue(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_sched(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_SCHED)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
-    "db": setup_db, "cache": setup_cache, "queue": setup_queue,
+    "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
 }
 
 # id, argv, expected_rc, setup, note
@@ -209,6 +216,9 @@ CASES = [
     # queue ==================================================================
     ("q001", ["build", "main.hard"], 0, "queue", "build a queue program"),
     ("q002", ["fmt", "main.hard"], 0, "queue", "format job and worker declarations"),
+    # scheduler ==============================================================
+    ("s001", ["build", "main.hard"], 0, "sched", "build a schedule program"),
+    ("s002", ["fmt", "main.hard"], 0, "sched", "format schedule declarations"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

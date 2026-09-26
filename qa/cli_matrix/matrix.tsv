@@ -56,3 +56,5 @@ ch001	build main.hard	0	cache	build a cache program
 ch002	fmt main.hard	0	cache	format a cache declaration
 q001	build main.hard	0	queue	build a queue program
 q002	fmt main.hard	0	queue	format job and worker declarations
+s001	build main.hard	0	sched	build a schedule program
+s002	fmt main.hard	0	sched	format schedule declarations

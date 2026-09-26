@@ -1,0 +1,19 @@
+every 1h {
+    cleanup()
+}
+
+every day at "03:00" {
+    backup()
+}
+
+calc cleanup() {
+    <- 1
+}
+
+calc backup() {
+    <- 1
+}
+
+GET "/" :: {
+    <- { ok: true }
+}

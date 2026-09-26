@@ -300,6 +300,9 @@ impl Codegen {
         let mut job_decls: Vec<(String, Vec<String>)> = Vec::new();
         let mut top_enqueues: Vec<String> = Vec::new();
         let mut worker_regs: Vec<String> = Vec::new();
+        // Top-level `every ...` schedules register in `main` with their
+        // lowered functions.
+        let mut sched_regs: Vec<String> = Vec::new();
 
         for st in &prog.stmts {
             match st {
@@ -335,6 +338,9 @@ impl Codegen {
                 }
                 Stmt::Job(j) => {
                     job_decls.push((j.name.clone(), j.params.iter().map(|p| p.name.clone()).collect()));
+                }
+                Stmt::Schedule(s) => {
+                    sched_regs.push(self.schedule_register_call(s));
                 }
                 // A desugared top-level `queue Name(..)` seeds an initial
                 // job: run it from `main` like the declarations above,
@@ -402,7 +408,31 @@ impl Codegen {
             &job_decls,
             &top_enqueues,
             &worker_regs,
+            &sched_regs,
         );
+    }
+
+    /// `every ...`: register the schedule with its lowered function. The
+    /// function exists because the parser emitted it alongside this node.
+    fn schedule_register_call(&self, s: &crate::ast::SchedDef) -> String {
+        let f = format!("fn_{}", safe_id(&s.name));
+        let name = format!("hs::Val::text({:?})", s.name);
+        match &s.kind {
+            crate::ast::SchedKind::Interval { secs } => {
+                format!("hs::schedule_register_interval({name}, hs::Val::int_({secs}), {f})")
+            }
+            crate::ast::SchedKind::Daily { h, m, s: sec, tz } => {
+                let tz = tz.as_ref().map(|t| format!("hs::Val::text({t:?})")).unwrap_or_else(|| "hs::Val::nil()".to_string());
+                format!("hs::schedule_register_daily({name}, hs::Val::int_({h}), hs::Val::int_({m}), hs::Val::int_({sec}), {tz}, {f})")
+            }
+            crate::ast::SchedKind::Weekly { weekday, h, m, s: sec, tz } => {
+                let tz = tz.as_ref().map(|t| format!("hs::Val::text({t:?})")).unwrap_or_else(|| "hs::Val::nil()".to_string());
+                format!("hs::schedule_register_weekly({name}, hs::Val::int_({weekday}), hs::Val::int_({h}), hs::Val::int_({m}), hs::Val::int_({sec}), {tz}, {f})")
+            }
+            crate::ast::SchedKind::Startup => {
+                format!("hs::schedule_register_startup({name}, {f})")
+            }
+        }
     }
 
     /// `job Name(..)`: declare the type, its payload parameter names, and the
@@ -1024,7 +1054,7 @@ impl Codegen {
 
     fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize,
                  nmodels: usize, cache_decls: &[String], job_decls: &[(String, Vec<String>)],
-                 top_enqueues: &[String], worker_regs: &[String]) {
+                 top_enqueues: &[String], worker_regs: &[String], sched_regs: &[String]) {
         self.wln("int main(int argc, char** argv) {");
         self.ind += 1;
         self.wln("hs::set_args(argc, argv);");
@@ -1045,6 +1075,9 @@ impl Codegen {
                 "hs::queue_register_worker(hs::Val::text({job:?}), hs::Val::int_(4), fn_{});",
                 safe_id(&f)
             ));
+        }
+        for reg in sched_regs {
+            self.wln(&format!("(void)({reg});"));
         }
         for enq in top_enqueues {
             self.wln(&format!("(void)({enq});"));
@@ -1247,6 +1280,10 @@ impl Codegen {
                 let params: Vec<String> = j.params.iter().map(|p| p.name.clone()).collect();
                 let decl = self.declare_job_call(&j.name, &params);
                 self.wln(&format!("(void)({decl});"));
+            }
+            Stmt::Schedule(s) => {
+                let reg = self.schedule_register_call(s);
+                self.wln(&format!("(void)({reg});"));
             }
         }
     }

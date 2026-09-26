@@ -1,0 +1,37 @@
+bring schedule
+
+every 1h {
+    cleanup()
+}
+
+every day at "03:00" {
+    backup()
+}
+
+every monday at "09:00" timezone "local" {
+    report()
+}
+
+every startup {
+    boot()
+}
+
+calc cleanup() {
+    <- 1
+}
+
+calc backup() {
+    <- 1
+}
+
+calc report() {
+    <- 1
+}
+
+calc boot() {
+    <- 1
+}
+
+GET "/" :: {
+    <- { ok: true }
+}

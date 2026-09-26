@@ -1,0 +1,7 @@
+every day at "25:00" {
+    backup()
+}
+
+calc backup() {
+    <- 1
+}

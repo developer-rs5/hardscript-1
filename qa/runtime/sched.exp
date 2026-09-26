@@ -1,0 +1,8 @@
+hs::schedule_register_interval(hs::Val::text("__sched_0"), hs::Val::int_(3600)
+hs::schedule_register_daily(hs::Val::text("__sched_1"), hs::Val::int_(3), hs::Val::int_(0), hs::Val::int_(0)
+hs::schedule_register_weekly(hs::Val::text("__sched_2"), hs::Val::int_(0), hs::Val::int_(9), hs::Val::int_(0), hs::Val::int_(0)
+hs::schedule_register_startup(hs::Val::text("__sched_3")
+static hs::Val fn___sched_0()
+static hs::Val fn___sched_1()
+static hs::Val fn___sched_2()
+static hs::Val fn___sched_3()

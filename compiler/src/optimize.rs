@@ -140,6 +140,7 @@ fn each_block_expr(b: &mut HirBlock, f: &mut impl FnMut(&mut HirExpr)) {
             }
             HirStmt::Expr { expr } => map_expr(expr, f),
             HirStmt::Job { .. } => {}
+            HirStmt::Schedule { .. } => {}
         }
     }
 }
@@ -428,6 +429,7 @@ fn collect_block_uses(b: &HirBlock, uses: &mut HashMap<VarId, usize>) {
             }
             HirStmt::Expr { expr } => collect_expr_uses(expr, uses),
             HirStmt::Job { .. } => {}
+            HirStmt::Schedule { .. } => {}
         }
     }
 }
@@ -802,6 +804,7 @@ fn for_each_expr_ref(b: &HirBlock, f: &mut impl FnMut(&HirExpr)) {
             }
             HirStmt::Expr { expr } => walk_expr_ref(expr, f),
             HirStmt::Job { .. } => {}
+            HirStmt::Schedule { .. } => {}
         }
     }
 }
@@ -1115,6 +1118,7 @@ fn rewrite_block_inline(
                 inline_in_expr(rhs, fns, next, s);
             }
             HirStmt::Job { .. } => {}
+            HirStmt::Schedule { .. } => {}
         }
     }
 }
@@ -1179,6 +1183,7 @@ fn stmt_kind(st: &HirStmt) -> &'static str {
         HirStmt::Expect { .. } => "expect",
         HirStmt::Expr { .. } => "expr",
         HirStmt::Job { .. } => "job",
+        HirStmt::Schedule { .. } => "schedule",
     }
 }
 

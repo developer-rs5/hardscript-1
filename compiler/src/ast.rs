@@ -301,6 +301,26 @@ pub struct JobDef {
     pub span: Span,
 }
 
+/// When a schedule fires: every N seconds, daily or weekly at a wall time in
+/// a zone, or once at startup.
+#[derive(Debug, Clone)]
+pub enum SchedKind {
+    Interval { secs: i64 },
+    Daily { h: u8, m: u8, s: u8, tz: Option<String> },
+    Weekly { weekday: u8, h: u8, m: u8, s: u8, tz: Option<String> },
+    Startup,
+}
+
+/// An `every ... { ... }` schedule. The body lowers to a `__sched_N` function;
+/// this node carries the name both share plus the firing spec, so codegen can
+/// register one with the other in `main`.
+#[derive(Debug, Clone)]
+pub struct SchedDef {
+    pub name: String,
+    pub kind: SchedKind,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnOp {
     Neg,
@@ -495,6 +515,9 @@ pub enum Stmt {
     /// `job SendEmail(User user)` — declare a background job type with its
     /// payload parameters. Registration only; the runtime holds the jobs.
     Job(JobDef),
+    /// `every ...` — a schedule whose body lowered to a `__sched_N` function.
+    /// Registration only; the runtime owns the timers.
+    Schedule(SchedDef),
     If { cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt>, span: Span },
     Loop { var: String, iter: Expr, body: Vec<Stmt>, span: Span },
     Return(Expr, Span),
@@ -517,6 +540,7 @@ impl Stmt {
             Test(t) => t.span,
             Var(v) | Const(v) => v.span,
             Job(j) => j.span,
+            Schedule(s) => s.span,
             If { span: s, .. } | Loop { span: s, .. } | Return(_, s) | Race(_, s)
             | Expect { span: s, .. } => *s,
             ExprStmt(e) => e.span(),

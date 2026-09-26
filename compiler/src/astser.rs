@@ -266,6 +266,47 @@ fn write_stmt(enc: &mut Enc, st: &Stmt, depth: u64) -> Result<(), String> {
             }
             enc.span(j.span);
         }
+        Stmt::Schedule(s) => {
+            enc.u8(19);
+            enc.str(&s.name);
+            match &s.kind {
+                SchedKind::Interval { secs } => {
+                    enc.u8(0);
+                    enc.uv(*secs);
+                }
+                SchedKind::Daily { h, m, s: sec, tz } => {
+                    enc.u8(1);
+                    enc.u8(*h);
+                    enc.u8(*m);
+                    enc.u8(*sec);
+                    match tz {
+                        Some(t) => {
+                            enc.bool(true);
+                            enc.str(t);
+                        }
+                        None => enc.bool(false),
+                    }
+                }
+                SchedKind::Weekly { weekday, h, m, s: sec, tz } => {
+                    enc.u8(2);
+                    enc.u8(*weekday);
+                    enc.u8(*h);
+                    enc.u8(*m);
+                    enc.u8(*sec);
+                    match tz {
+                        Some(t) => {
+                            enc.bool(true);
+                            enc.str(t);
+                        }
+                        None => enc.bool(false),
+                    }
+                }
+                SchedKind::Startup => {
+                    enc.u8(3);
+                }
+            }
+            enc.span(s.span);
+        }
         Stmt::Test(t) => {
             enc.u8(8);
             write_test(enc, t)?;
@@ -780,6 +821,30 @@ fn read_stmt(dec: &mut Dec, depth: u64) -> Result<Stmt, String> {
             }
             let span = dec.span()?;
             Stmt::Job(JobDef { name, params, span })
+        }
+        19 => {
+            let name = dec.str()?;
+            let kind = match dec.byte()? {
+                0 => {
+                    let secs = dec.var()?;
+                    SchedKind::Interval { secs }
+                }
+                1 => {
+                    let (h, m, s) = (dec.byte()?, dec.byte()?, dec.byte()?);
+                    let tz = if dec.bool()? { Some(dec.str()?) } else { None };
+                    SchedKind::Daily { h, m, s, tz }
+                }
+                2 => {
+                    let w = dec.byte()?;
+                    let (h, m, s) = (dec.byte()?, dec.byte()?, dec.byte()?);
+                    let tz = if dec.bool()? { Some(dec.str()?) } else { None };
+                    SchedKind::Weekly { weekday: w, h, m, s, tz }
+                }
+                3 => SchedKind::Startup,
+                other => return Err(format!("unknown schedule kind {other}")),
+            };
+            let span = dec.span()?;
+            Stmt::Schedule(SchedDef { name, kind, span })
         }
         other => return Err(format!("unknown stmt tag {other}")),
     })
