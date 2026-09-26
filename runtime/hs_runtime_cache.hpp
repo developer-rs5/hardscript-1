@@ -353,6 +353,16 @@ class Cache {
         std::lock_guard<std::mutex> lock(s.mu);
         return s.map.size();
     }
+    /// Every live entry, expired ones included until something reads or sweeps
+    /// them: what a box has to hold right now.
+    size_t live_entries() {
+        size_t n = 0;
+        for (uint32_t i = 0; i < SHARDS; i++) {
+            std::lock_guard<std::mutex> lock(shards_[i].mu);
+            n += shards_[i].map.size();
+        }
+        return n;
+    }
 
   private:
     static bool expired(const CacheEntry& e, int64_t now_ms) {

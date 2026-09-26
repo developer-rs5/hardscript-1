@@ -74,6 +74,12 @@ struct LimitVerdict {
 struct LimitShard {
     std::mutex mu;
     std::unordered_map<std::string, LimitBucket> buckets;
+    // Counters live with the shard, not on the limiter: one process-wide
+    // atomic for allowed/denied is a single contended cache line, and a
+    // benchmark on twelve cores found the limiter scaling *down* because of
+    // it. Summing the shards costs 64 loads, once, at scrape time.
+    std::atomic<uint64_t> allowed{0};
+    std::atomic<uint64_t> denied{0};
 };
 
 /// One limiter: an algorithm, a budget per window, and sharded buckets.
@@ -86,6 +92,9 @@ class RateLimiter {
     LimitVerdict check(const std::string& key, int64_t now_ms) {
         LimitShard& s = shard_for(key);
         std::lock_guard<std::mutex> lock(s.mu);
+        // Counted here, on the shard this key already locked: a process-wide
+        // atomic would be one contended cache line, and the benchmark showed
+        // the limiter getting *slower* with more cores because of it.
         // Distinct keys accumulate forever otherwise: past the cap, shed
         // buckets that could not possibly deny (full token buckets, drained
         // windows). An attacker minting keys buys memory up to the cap, not
@@ -108,21 +117,38 @@ class RateLimiter {
             if (b.tokens >= 1.0) {
                 b.tokens -= 1.0;
                 v.allowed = true;
+                s.allowed.fetch_add(1, std::memory_order_relaxed);
                 return v;
             }
             v.retry_after_ms = (int64_t)((1.0 - b.tokens) / rate);
             if (v.retry_after_ms < 0) v.retry_after_ms = 0;
+            s.denied.fetch_add(1, std::memory_order_relaxed);
             return v;
         }
         while (!b.hits.empty() && b.hits.front() <= now_ms - window_ms_) b.hits.pop_front();
         if ((int64_t)b.hits.size() < limit_) {
             b.hits.push_back(now_ms);
             v.allowed = true;
+            s.allowed.fetch_add(1, std::memory_order_relaxed);
             return v;
         }
         v.retry_after_ms = b.hits.front() + window_ms_ - now_ms;
         if (v.retry_after_ms < 0) v.retry_after_ms = 0;
+        s.denied.fetch_add(1, std::memory_order_relaxed);
         return v;
+    }
+
+    /// Totals across the shards, summed on read: 64 relaxed loads, once, when
+    /// somebody scrapes the numbers.
+    uint64_t allowed_total() const {
+        uint64_t n = 0;
+        for (uint32_t i = 0; i < SHARDS; i++) n += shards_[i].allowed.load(std::memory_order_relaxed);
+        return n;
+    }
+    uint64_t denied_total() const {
+        uint64_t n = 0;
+        for (uint32_t i = 0; i < SHARDS; i++) n += shards_[i].denied.load(std::memory_order_relaxed);
+        return n;
     }
 
     void sweep_shard(LimitShard& s, int64_t now_ms) {
@@ -195,21 +221,24 @@ class LimitRegistry {
         return *it->second;
     }
 
-    uint64_t allowed() const { return allowed_.load(std::memory_order_relaxed); }
-    uint64_t denied() const { return denied_.load(std::memory_order_relaxed); }
-    void count(bool ok) {
-        if (ok) {
-            allowed_.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            denied_.fetch_add(1, std::memory_order_relaxed);
-        }
+    /// Totals over every limiter, and inside each over every shard. Read at
+    /// scrape time, so the walk is free where it matters.
+    uint64_t allowed() {
+        std::lock_guard<std::mutex> lock(mu_);
+        uint64_t n = 0;
+        for (const auto& kv : limiters_) n += kv.second->allowed_total();
+        return n;
+    }
+    uint64_t denied() {
+        std::lock_guard<std::mutex> lock(mu_);
+        uint64_t n = 0;
+        for (const auto& kv : limiters_) n += kv.second->denied_total();
+        return n;
     }
 
   private:
     mutable std::mutex mu_;
     std::map<std::string, std::unique_ptr<RateLimiter>> limiters_;
-    std::atomic<uint64_t> allowed_{0};
-    std::atomic<uint64_t> denied_{0};
 };
 
 inline LimitRegistry& limit_registry() {
@@ -246,9 +275,7 @@ inline LimitVerdict limit_check(const std::string& id, int algo, int64_t limit, 
         throw std::runtime_error("limit: unknown algorithm");
     ratelimit_used_flag().store(true, std::memory_order_relaxed);
     RateLimiter& lim = limit_registry().get(id, algo, limit, window_ms);
-    LimitVerdict v = lim.check(key, limit_now_ms());
-    limit_registry().count(v.allowed);
-    return v;
+    return lim.check(key, limit_now_ms());
 }
 
 /// Enforce a limit from generated code: allow, or end the request with 429
