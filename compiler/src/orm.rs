@@ -1319,7 +1319,7 @@ pub fn is_orm_method(name: &str) -> bool {
     terminal_of(name).is_some()
         || matches!(
             name,
-            "where" | "where_like" | "where_in" | "limit" | "offset" | "order_by" | "find"
+            "where" | "where_like" | "where_in" | "limit" | "offset" | "order_by" | "find" | "find_many"
         )
 }
 
@@ -1511,6 +1511,33 @@ pub fn parse_query_from(call: &Expr, base: Option<&str>, schema: &Schema) -> Res
                     kind: WhereKind::Compare,
                 });
             }
+            "find_many" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(*sp, "find_many", 1, args.len()));
+                    continue;
+                }
+                // `find_many` is a lookup by primary key over a list of keys,
+                // so it is sugar for an `IN` comparison against the key
+                // column. Like `find` it fixes the terminal; unlike `find` it
+                // returns every row, in the keys' order.
+                let Some(pk) = table.primary_key_name() else {
+                    diags.push(err(
+                        *sp,
+                        cat::ORM_MISSING_PRIMARY_KEY,
+                        format!("`{model}` has no primary key to find by."),
+                        "Give the model a primary key, or use `where_in` with an explicit column.",
+                    ));
+                    continue;
+                };
+                terminal = Some(Terminal::All);
+                terminal_is_fixed = true;
+                steps.push(QueryStep::Where {
+                    column: pk.to_string(),
+                    op: CompareOp::Eq,
+                    arg: 0,
+                    kind: WhereKind::In,
+                });
+            }
             "where" | "where_like" | "where_in" => {
                 let kind = match name.as_str() {
                     "where_like" => WhereKind::Like,
@@ -1664,6 +1691,13 @@ pub enum WriteOp {
     Upsert(WriteFields),
     /// `User.delete(key)` — remove by key.
     DeleteKey,
+    /// `User.create_many(list)` — insert every record of a list, atomically.
+    CreateMany,
+    /// `User.update_many(list)` — update every record of a list by its key,
+    /// atomically. Every record must carry the key.
+    UpdateMany,
+    /// `User.delete_many(ids)` — remove every row with one of the keys.
+    DeleteMany,
     /// `User.find_or_create_by({..})` — read by attributes, insert if absent.
     FindOrCreate(WriteFields),
     /// `record.save()` — update the row it came from, or insert when it has
@@ -1689,7 +1723,18 @@ pub struct WritePlan {
 /// Is this a write rather than a read? The two are told apart by their
 /// methods, so a chain is classified before it is validated.
 pub fn is_orm_write_method(name: &str) -> bool {
-    matches!(name, "create" | "upsert" | "delete" | "find_or_create_by" | "save" | "touch" | "destroy")
+    matches!(
+        name,
+        "create" | "upsert"
+            | "delete"
+            | "find_or_create_by"
+            | "create_many"
+            | "update_many"
+            | "delete_many"
+            | "save"
+            | "touch"
+            | "destroy"
+    )
 }
 
 pub fn is_orm_write_method_on_record(name: &str) -> bool {
@@ -1772,6 +1817,37 @@ pub fn parse_write(model: &str, method: &str, args: &[Expr], on_record: bool, sc
                 }
                 WriteOp::DeleteKey
             }
+            "create_many" | "update_many" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(span, method, 1, args.len()));
+                } else {
+                    check_batch_records(model, table, method, &args[0], &mut diags);
+                }
+                if method == "create_many" {
+                    WriteOp::CreateMany
+                } else {
+                    WriteOp::UpdateMany
+                }
+            }
+            "delete_many" => {
+                if args.len() != 1 {
+                    diags.push(arity_err(span, method, 1, args.len()));
+                } else {
+                    // A variable or a call result is still a list at runtime;
+                    // only a literal of another shape is certainly wrong here.
+                    match &args[0] {
+                        Expr::List(..) | Expr::Ident(..) | Expr::Member(..) | Expr::Call { .. }
+                        | Expr::Index(..) => {}
+                        _ => diags.push(err(
+                            args[0].span(),
+                            cat::ORM_BAD_QUERY,
+                            format!("`{model}.delete_many` takes a list of keys."),
+                            "Pass the keys in a list, e.g. `User.delete_many([1, 2])`.",
+                        )),
+                    }
+                }
+                WriteOp::DeleteMany
+            }
             other => {
                 diags.push(bad_write(span, other));
                 WriteOp::DeleteKey
@@ -1790,7 +1866,7 @@ fn bad_write(span: Span, name: &str) -> Diag {
         span,
         cat::ORM_BAD_QUERY,
         format!("`{name}` is not a write method."),
-        "Use `create`, `upsert`, `delete` or `find_or_create_by` on a model, or `save`, `touch` and `destroy` on a record.",
+        "Use `create`, `upsert`, `delete`, `find_or_create_by`, `create_many`, `update_many` or `delete_many` on a model, or `save`, `touch` and `destroy` on a record.",
     )
 }
 
@@ -1882,6 +1958,62 @@ fn check_write_fields(
         }
     }
     out
+}
+
+/// Check a batch write's record list. A literal list is checked element by
+/// element, with the same field rules a single write gets; anything else is
+/// left for the runtime, which validates every record it inserts or updates.
+fn check_batch_records(model: &str, table: &TableDef, method: &str, arg: &Expr, diags: &mut Vec<Diag>) {
+    let Expr::List(records, _) = arg else {
+        // A variable or a call result is still a list at runtime; only a
+        // literal of another shape is certainly wrong here.
+        match arg {
+            Expr::Ident(..) | Expr::Member(..) | Expr::Call { .. } | Expr::Index(..) => {}
+            _ => diags.push(err(
+                arg.span(),
+                cat::ORM_BAD_QUERY,
+                format!("`{model}.{method}` takes a list of records."),
+                format!(
+                    "Pass the records in a list, e.g. `{model}.{method}([{{ .. }}, {{ .. }}])`."
+                ),
+            )),
+        }
+        return;
+    };
+    for rec in records {
+        let Expr::Obj(_, _) = rec else {
+            diags.push(err(
+                rec.span(),
+                cat::ORM_BAD_QUERY,
+                format!("`{model}.{method}` takes a list of records, and this element is not one."),
+                "Write each record as an object of column values.",
+            ));
+            continue;
+        };
+        if method == "update_many" {
+            // An update addresses its row by key, so a record without one is
+            // not updatable no matter what else it carries.
+            let has_key = match rec {
+                Expr::Obj(fields, _) => fields.iter().any(|(name, _)| name == table.primary_key_name().unwrap_or("")),
+                _ => false,
+            };
+            if !has_key {
+                diags.push(err(
+                    rec.span(),
+                    cat::ORM_MISSING_FIELD,
+                    format!(
+                        "`{model}.update_many` needs each record to carry `{}`, the key of the row it updates.",
+                        table.primary_key_name().unwrap_or("id")
+                    ),
+                    "Add the key to the record, e.g. `{ id: 1, .. }`.",
+                ));
+                continue;
+            }
+            check_write_fields(model, table, rec, diags, "upsert");
+        } else {
+            check_write_fields(model, table, rec, diags, "create");
+        }
+    }
 }
 
 fn suggest_field(table: &TableDef, name: &str) -> String {
@@ -3350,6 +3482,80 @@ mod tests {
         );
         let c = w("GET \"/\" :: { <- User.find_or_create_by({email: \"a@b.c\"}) }").unwrap_err();
         assert_eq!(c, vec![cat::ORM_MISSING_FIELD], "the create half would fail without name");
+    }
+
+    // ---------------- batch operations (M5.3.7) ----------------
+
+    #[test]
+    fn create_many_takes_a_list_of_complete_records() {
+        let p = w("GET \"/\" :: { <- User.create_many([{email: \"a@b.c\", name: \"Ada\"}]) }").expect("plan");
+        assert!(matches!(p.op, WriteOp::CreateMany));
+        // `age` has a default and `updated` is generated, so the two given
+        // fields are a complete record.
+    }
+
+    #[test]
+    fn create_many_validates_every_record() {
+        // The second record is missing `name`, which has no default.
+        let c = w("GET \"/\" :: { <- User.create_many([{email: \"a@b.c\", name: \"Ada\"}, {email: \"b@c.d\"}]) }")
+            .unwrap_err();
+        assert_eq!(c, vec![cat::ORM_MISSING_FIELD]);
+        // A non-object is not a record, even in a list.
+        let c =
+            w("GET \"/\" :: { <- User.create_many([{email: \"a@b.c\", name: \"Ada\"}, 1]) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+        // And a non-list is not a batch.
+        let c = w("GET \"/\" :: { <- User.create_many({email: \"a@b.c\", name: \"Ada\"}) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn batch_arity_is_checked() {
+        assert_eq!(w("GET \"/\" :: { <- User.create_many() }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(
+            w("GET \"/\" :: { <- User.update_many([{id: 1}], [{id: 2}]) }").unwrap_err(),
+            vec![cat::ORM_BAD_QUERY]
+        );
+        assert_eq!(w("GET \"/\" :: { <- User.delete_many() }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+        assert_eq!(w("GET \"/\" :: { <- User.delete_many(1) }").unwrap_err(), vec![cat::ORM_BAD_QUERY]);
+    }
+
+    #[test]
+    fn update_many_needs_each_record_to_carry_its_key() {
+        let p = w("GET \"/\" :: { <- User.update_many([{id: 1, name: \"Ada\"}]) }").expect("plan");
+        assert!(matches!(p.op, WriteOp::UpdateMany));
+        let c = w("GET \"/\" :: { <- User.update_many([{name: \"Ada\"}]) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_MISSING_FIELD], "no key, no row to update");
+        let c = w("GET \"/\" :: { <- User.update_many([{id: 1, nope: 2}]) }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_UNKNOWN_COLUMN]);
+    }
+
+    #[test]
+    fn delete_many_takes_a_key_list() {
+        let p = w("GET \"/\" :: { <- User.delete_many([1, 2]) }").expect("plan");
+        assert!(matches!(p.op, WriteOp::DeleteMany));
+    }
+
+    #[test]
+    fn find_many_becomes_a_primary_key_in_lookup() {
+        let p = q("GET \"/\" :: { <- User.find_many([7, 8]) }").expect("plan");
+        assert_eq!(
+            p.steps,
+            vec![QueryStep::Where {
+                column: "id".to_string(),
+                op: CompareOp::Eq,
+                arg: 0,
+                kind: WhereKind::In
+            }]
+        );
+        // Many rows, not one.
+        assert_eq!(p.terminal, Terminal::All);
+    }
+
+    #[test]
+    fn find_many_needs_one_argument() {
+        let c = q("GET \"/\" :: { <- User.find_many() }").unwrap_err();
+        assert_eq!(c, vec![cat::ORM_BAD_QUERY]);
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 #include <cctype>
 #include <exception>
+#include <map>
 
 namespace hs {
 
@@ -86,6 +87,22 @@ struct DbBackend {
     virtual DbDialect dialect() const = 0;
     // Run one prepared statement. `params` are bound, never interpolated.
     virtual DbResult run(const std::string& sql, const std::vector<Val>& params) = 0;
+    // Run one statement many times, once per parameter set, preparing (or
+    // parsing) only once. Rows concatenate in order and effects add up. The
+    // default loops `run`; adapters that can reuse the preparation override
+    // it. Either way the caller owns atomicity: wrap the call in a
+    // transaction when the sets belong together.
+    virtual DbResult run_many(const std::string& sql, const std::vector<std::vector<Val>>& sets) {
+        DbResult out;
+        for (const auto& params : sets) {
+            DbResult r = run(sql, params);
+            if (out.columns.empty()) out.columns = r.columns;
+            out.rows.insert(out.rows.end(), r.rows.begin(), r.rows.end());
+            out.affected += r.affected;
+            if (out.last_id == 0) out.last_id = r.last_id;
+        }
+        return out;
+    }
     virtual void begin() = 0;
     virtual void commit() = 0;
     virtual void rollback() = 0;
@@ -302,6 +319,20 @@ inline Val db_decode(const Val& raw, OrmKind k) {
             if (raw.is_num() || raw.is_bool()) return Val::text(raw.to_text_dbg());
             return raw;
     }
+}
+
+/// One result row as an object keyed by column name, decoded through the
+/// model's column kinds. Columns past the names are `col<N>`: a projection
+/// that names nothing is still a row worth handing out.
+inline Val orm_decode_row(const OrmModel* m, const std::vector<std::string>& columns,
+                          const std::vector<Val>& row) {
+    Val o = Val::object({});
+    for (size_t i = 0; i < row.size(); i++) {
+        std::string key = i < columns.size() ? columns[i] : ("col" + std::to_string(i));
+        OrmKind k = m ? m->kind_of(key) : OrmKind::Text;
+        o.set(key, db_decode(row[i], k));
+    }
+    return o;
 }
 
 enum class CondOp : uint8_t { Eq, Ne, Lt, Le, Gt, Ge, Like, In };
@@ -587,15 +618,7 @@ struct OrmQuery {
         DbResult r = run(b, cols);
         std::vector<Val> out;
         out.reserve(r.rows.size());
-        for (const auto& row : r.rows) {
-            Val o = Val::object({});
-            for (size_t i = 0; i < row.size(); i++) {
-                std::string key = i < r.columns.size() ? r.columns[i] : ("col" + std::to_string(i));
-                OrmKind k = m ? m->kind_of(key) : OrmKind::Text;
-                o.set(key, db_decode(row[i], k));
-            }
-            out.push_back(std::move(o));
-        }
+        for (const auto& row : r.rows) out.push_back(orm_decode_row(m, r.columns, row));
         return Val::list(std::move(out));
     }
 
@@ -606,13 +629,7 @@ struct OrmQuery {
         if (q.limit_n < 0) q.limit_n = 1;
         DbResult r = q.run(b, cols);
         if (r.rows.empty()) return Val::nil();
-        Val o = Val::object({});
-        for (size_t i = 0; i < r.rows[0].size(); i++) {
-            std::string key = i < r.columns.size() ? r.columns[i] : ("col" + std::to_string(i));
-            OrmKind k = m ? m->kind_of(key) : OrmKind::Text;
-            o.set(key, db_decode(r.rows[0][i], k));
-        }
-        return o;
+        return orm_decode_row(m, r.columns, r.rows[0]);
     }
 
     /// A `COUNT(*)` over the same predicates, so a count and a page of rows
@@ -752,6 +769,22 @@ inline std::string orm_delete_sql(const OrmModel& m, DbDialect d) {
     return sql;
 }
 
+/// Read the generated key off an insert result and onto the record. A key the
+/// record already carried is the caller's, and is kept: an upsert that
+/// inserts a keyed row has to come back with the key it was given.
+/// A backend answers either by handing the key back (`last_id`, SQLite's
+/// connection state) or by returning the row that has it (`RETURNING`,
+/// PostgreSQL's); both are the same number and either one is enough.
+inline void orm_attach_key(const OrmModel& m, Val& out, const DbResult& r) {
+    if (m.pk.empty() || out.find(m.pk)) return;
+    if (r.last_id > 0) {
+        out.set(m.pk, Val::int_(r.last_id));
+        return;
+    }
+    if (!r.rows.empty() && !r.rows[0].empty() && r.rows[0][0].is_int())
+        out.set(m.pk, r.rows[0][0]);
+}
+
 /// `INSERT` one record. Returns the new row as an object, including the key the
 /// database assigned, so the caller does not have to read it back.
 inline Val orm_create(const OrmModel* mp, DbBackend* b, const Val& obj) {
@@ -763,18 +796,190 @@ inline Val orm_create(const OrmModel* mp, DbBackend* b, const Val& obj) {
     }
     DbResult r = b->run(orm_insert_sql(m, b->dialect(), cols), vals);
     Val out = obj.is_obj() ? obj : Val::object({});
-    // A generated key that was left out is the one number worth reading back.
-    // A key the record already carried is the caller's, and is kept: an upsert
-    // that inserts a keyed row has to come back with the key it was given.
-    // A backend answers either by handing the key back (`last_id`, SQLite's
-    // connection state) or by returning the row that has it (`RETURNING`,
-    // PostgreSQL's); both are the same number and either one is enough.
-    if (!m.pk.empty() && !out.find(m.pk)) {
-        if (r.last_id > 0) out.set(m.pk, Val::int_(r.last_id));
-        else if (!r.rows.empty() && !r.rows[0].empty() && r.rows[0][0].is_int())
-            out.set(m.pk, r.rows[0][0]);
-    }
+    orm_attach_key(m, out, r);
     return out;
+}
+
+// ===========================================================================
+// Batch operations
+// ===========================================================================
+
+/// How many bound values one statement may carry. SQLite historically caps at
+/// 999 and PostgreSQL at 65535; staying below both keeps one code path honest
+/// on every backend.
+inline size_t db_chunk_vars(DbDialect d) {
+    return d == DbDialect::Postgres ? 32000 : 900;
+}
+
+/// Insert every record of a list, in one transaction, and hand back the
+/// created records with their keys. A record that fails validation fails the
+/// whole batch: a half-inserted list is the thing transactions are for.
+/// Generated columns are skipped per record exactly as `create` skips them.
+inline Val orm_create_many(const OrmModel* mp, DbBackend* b, const Val& list) {
+    const OrmModel& m = *mp;
+    if (!list.is_arr()) throw std::runtime_error("orm: " + m.name + ".create_many needs a list of records");
+    if (list.arr.empty()) return Val::list({});
+    TxGuard tx(b);
+    std::vector<Val> out;
+    out.reserve(list.arr.size());
+    size_t n = 0;
+    for (const auto& rec : list.arr) {
+        n++;
+        if (!rec.is_obj())
+            throw std::runtime_error("orm: " + m.name + ".create_many record " + std::to_string(n) +
+                                     " is not an object");
+        std::vector<std::string> cols;
+        std::vector<Val> vals;
+        if (!orm_insert_parts(m, rec, cols, vals)) {
+            throw std::runtime_error("orm: " + m.name + ".create_many record " + std::to_string(n) +
+                                     " is missing a value for a column with no default");
+        }
+        DbResult r = b->run(orm_insert_sql(m, b->dialect(), cols), vals);
+        Val created = rec;
+        orm_attach_key(m, created, r);
+        out.push_back(std::move(created));
+    }
+    return Val::list(std::move(out));
+}
+
+/// Update every record of a list by its key, in one transaction, and hand
+/// back the records. A record without a key cannot be addressed and fails the
+/// batch; a record with nothing but its key is left alone, the way `save`
+/// leaves it. Records that set the same columns share one prepared statement
+/// through `run_many`.
+inline Val orm_update_many(const OrmModel* mp, DbBackend* b, const Val& list) {
+    const OrmModel& m = *mp;
+    if (!list.is_arr()) throw std::runtime_error("orm: " + m.name + ".update_many needs a list of records");
+    if (list.arr.empty()) return Val::list({});
+    TxGuard tx(b);
+    // Group by set-clause so each group shares one statement.
+    std::map<std::string, size_t> groups;
+    std::vector<std::vector<std::string>> group_cols;
+    std::vector<std::vector<std::vector<Val>>> group_sets;
+    std::vector<Val> out;
+    out.reserve(list.arr.size());
+    size_t n = 0;
+    for (const auto& rec : list.arr) {
+        n++;
+        if (!rec.is_obj())
+            throw std::runtime_error("orm: " + m.name + ".update_many record " + std::to_string(n) +
+                                     " is not an object");
+        const Val* k = rec.find(m.pk);
+        if (!k || k->is_nil())
+            throw std::runtime_error("orm: " + m.name + ".update_many record " + std::to_string(n) +
+                                     " has no " + m.pk + " to identify it");
+        std::vector<std::string> cols;
+        std::vector<Val> vals;
+        if (!orm_update_parts(m, rec, cols, vals)) {
+            out.push_back(rec);
+            continue;
+        }
+        std::string gk;
+        for (const auto& c : cols) {
+            gk += c;
+            gk += '\x1f';
+        }
+        auto it = groups.find(gk);
+        size_t gi;
+        if (it == groups.end()) {
+            gi = group_cols.size();
+            groups[gk] = gi;
+            group_cols.push_back(cols);
+            group_sets.emplace_back();
+        } else {
+            gi = it->second;
+        }
+        vals.push_back(*k);
+        group_sets[gi].push_back(std::move(vals));
+        out.push_back(rec);
+    }
+    for (size_t gi = 0; gi < group_cols.size(); gi++) {
+        b->run_many(orm_update_sql(m, b->dialect(), group_cols[gi]), group_sets[gi]);
+    }
+    return Val::list(std::move(out));
+}
+
+/// Delete the rows with the given keys, in one transaction, and report how
+/// many went. Long id lists are cut into chunks that fit the backend's
+/// variable cap, because one statement per thousand keys is still one
+/// transaction.
+inline Val orm_delete_many(const OrmModel* mp, DbBackend* b, const Val& ids) {
+    const OrmModel& m = *mp;
+    if (!ids.is_arr()) throw std::runtime_error("orm: " + m.name + ".delete_many needs a list of keys");
+    if (ids.arr.empty() || m.pk.empty()) return Val::int_(0);
+    TxGuard tx(b);
+    int64_t total = 0;
+    size_t cap = db_chunk_vars(b->dialect());
+    for (size_t i = 0; i < ids.arr.size(); i += cap) {
+        size_t n = std::min(cap, ids.arr.size() - i);
+        std::string sql = "DELETE FROM ";
+        sql += db_quote_ident(m.table);
+        sql += " WHERE ";
+        sql += db_quote_ident(m.pk);
+        sql += " IN (";
+        for (size_t j = 0; j < n; j++) {
+            if (j) sql += ", ";
+            sql += db_placeholder(b->dialect(), (int)j + 1);
+        }
+        sql += ")";
+        std::vector<Val> params(ids.arr.begin() + (int64_t)i, ids.arr.begin() + (int64_t)(i + n));
+        total += b->run(sql, params).affected;
+    }
+    return Val::int_(total);
+}
+
+/// The map key for one id value. Integers and strings with the same text are
+/// different keys on most databases, so the kind travels with the value.
+inline std::string db_key_text(const Val& v) {
+    if (v.is_int()) return "i:" + std::to_string(v.iv);
+    if (v.is_flt()) return "f:" + std::to_string(v.fv);
+    if (v.is_bool()) return v.truthy() ? "b:1" : "b:0";
+    if (v.is_str()) return "s:" + v.sv;
+    return "n:";
+}
+
+/// Read the rows with the given keys, in the keys' order, skipping keys with
+/// no row. `IN` does not promise an order, so the rows are matched back to
+/// the keys that asked for them.
+inline Val orm_find_many(const OrmModel* mp, DbBackend* b, const Val& ids) {
+    const OrmModel& m = *mp;
+    if (!ids.is_arr()) throw std::runtime_error("orm: " + m.name + ".find_many needs a list of keys");
+    if (ids.arr.empty() || m.pk.empty()) return Val::list({});
+    std::vector<std::string> cols;
+    for (const auto& c : m.columns) cols.push_back(c);
+    std::map<std::string, Val> by_key;
+    size_t cap = db_chunk_vars(b->dialect());
+    for (size_t i = 0; i < ids.arr.size(); i += cap) {
+        size_t n = std::min(cap, ids.arr.size() - i);
+        std::string sql = "SELECT ";
+        for (size_t c = 0; c < cols.size(); c++) {
+            if (c) sql += ", ";
+            sql += db_quote_ident(cols[c]);
+        }
+        sql += " FROM ";
+        sql += db_quote_ident(m.table);
+        sql += " WHERE ";
+        sql += db_quote_ident(m.pk);
+        sql += " IN (";
+        for (size_t j = 0; j < n; j++) {
+            if (j) sql += ", ";
+            sql += db_placeholder(b->dialect(), (int)j + 1);
+        }
+        sql += ")";
+        std::vector<Val> params(ids.arr.begin() + (int64_t)i, ids.arr.begin() + (int64_t)(i + n));
+        DbResult r = b->run(sql, params);
+        for (const auto& row : r.rows) {
+            Val rec = orm_decode_row(mp, r.columns, row);
+            const Val* k = rec.find(m.pk);
+            if (k) by_key[db_key_text(*k)] = rec;
+        }
+    }
+    std::vector<Val> out;
+    for (const auto& id : ids.arr) {
+        auto it = by_key.find(db_key_text(id));
+        if (it != by_key.end()) out.push_back(it->second);
+    }
+    return Val::list(std::move(out));
 }
 
 /// The primary key of a loaded record, or a clear failure. A record that came

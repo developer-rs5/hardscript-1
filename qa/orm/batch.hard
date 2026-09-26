@@ -1,0 +1,19 @@
+bring http
+app @3134
+
+model User {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+GET "/batch" :: {
+    users <- User.create_many([{ name: "ann" }, { name: "bo" }])
+    found <- User.find_many([2, 1])
+    n <- User.delete_many([1])
+    <- { ok: true }
+}
+
+GET "/update" :: {
+    users <- User.update_many([{ id: 1, name: "ann" }])
+    <- { ok: true }
+}

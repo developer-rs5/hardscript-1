@@ -33,6 +33,7 @@ struct SqliteApi {
     int (*step)(void* stmt) = nullptr;
     int (*finalize)(void* stmt) = nullptr;
     int (*reset)(void* stmt) = nullptr;
+    int (*clear_bindings)(void* stmt) = nullptr;
     const char* (*errmsg)(void* db) = nullptr;
     int (*errcode)(void* db) = nullptr;
     int (*extended_errcode)(void* db) = nullptr;
@@ -115,6 +116,7 @@ inline SqliteApi& sqlite_api() {
         HS_SQLITE_SYM(step, "sqlite3_step")
         HS_SQLITE_SYM(finalize, "sqlite3_finalize")
         HS_SQLITE_SYM(reset, "sqlite3_reset")
+        HS_SQLITE_SYM(clear_bindings, "sqlite3_clear_bindings")
         HS_SQLITE_SYM(errmsg, "sqlite3_errmsg")
         HS_SQLITE_SYM(errcode, "sqlite3_errcode")
         HS_SQLITE_SYM(extended_errcode, "sqlite3_extended_errcode")
@@ -286,6 +288,57 @@ struct SqliteDb : DbBackend {
         // statement can change, so they are read after the last `step`.
         out.affected = a.changes(db);
         out.last_id = a.last_insert_rowid(db);
+        return out;
+    }
+
+    /// Run one statement against many parameter sets, preparing once. Binding,
+    /// stepping and resetting a prepared statement is the whole point of
+    /// batch writes: parsing the same SQL ten thousand times is not.
+    DbResult run_many(const std::string& sql, const std::vector<std::vector<Val>>& sets) override {
+        SqliteApi& a = sqlite_api();
+        DbResult out;
+        if (sets.empty()) return out;
+        void* stmt = nullptr;
+        const char* tail = nullptr;
+        int rc = a.prepare_v2(db, sql.c_str(), (int)sql.size(), &stmt, &tail);
+        if (rc != SQLITE_OK || !stmt) {
+            out.last_id = 0;
+            std::string why = a.errmsg(db);
+            if (stmt) a.finalize(stmt);
+            throw std::runtime_error("sqlite: " + why + " -- while preparing: " + sql);
+        }
+        int want = a.bind_parameter_count(stmt);
+        int cols = a.column_count(stmt);
+        for (int i = 0; i < cols; i++) out.columns.push_back(a.column_name(stmt, i) ? a.column_name(stmt, i) : "");
+        for (const auto& params : sets) {
+            if (want != (int)params.size()) {
+                a.finalize(stmt);
+                throw std::runtime_error("sqlite: statement wants " + std::to_string(want) + " values but " +
+                                         std::to_string(params.size()) + " were given -- " + sql);
+            }
+            a.reset(stmt);
+            a.clear_bindings(stmt);
+            for (size_t i = 0; i < params.size(); i++) bind(a, stmt, (int)i + 1, params[i]);
+            while (true) {
+                rc = a.step(stmt);
+                if (rc == SQLITE_ROW) {
+                    std::vector<Val> row;
+                    row.reserve((size_t)cols);
+                    for (int i = 0; i < cols; i++) row.push_back(read(a, stmt, i));
+                    out.rows.push_back(std::move(row));
+                    continue;
+                }
+                break;
+            }
+            if (rc != SQLITE_DONE) {
+                std::string why = a.errmsg(db);
+                a.finalize(stmt);
+                throw std::runtime_error("sqlite: " + why + " -- while running: " + sql);
+            }
+            out.affected += a.changes(db);
+            if (out.last_id == 0) out.last_id = a.last_insert_rowid(db);
+        }
+        a.finalize(stmt);
         return out;
     }
 

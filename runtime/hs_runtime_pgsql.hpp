@@ -396,7 +396,7 @@ struct PgDb : DbBackend {
                 "first (the statement that failed was: " + failed_stmt + ")");
         }
 
-        std::string parse, bind, describe, execute;
+        std::string parse, describe, execute;
         pg_put_cstr(parse, "");  // an unnamed statement, so the server keeps no plan for us
         pg_put_cstr(parse, sql);
         // Zero declared parameter types: the server infers each one from where
@@ -405,6 +405,24 @@ struct PgDb : DbBackend {
         pg_put_i16(parse, 0);
         pg_send_msg(fd, 'P', parse);
 
+        pg_send_msg(fd, 'B', build_bind(params, sql));
+
+        pg_put_cstr(describe, "P");
+        pg_send_msg(fd, 'D', describe);
+
+        pg_put_cstr(execute, "");
+        pg_put_i32(execute, 0);  // every row, not a batch of some
+        pg_send_msg(fd, 'E', execute);
+        pg_send_msg(fd, 'S', "");
+
+        read_result(out, sql);
+        return out;
+    }
+
+    /// One Bind message body for a parameter set. Shared by `run` and
+    /// `run_many` so a value is encoded exactly once, in one place.
+    static std::string build_bind(const std::vector<Val>& params, const std::string& sql) {
+        std::string bind;
         pg_put_cstr(bind, "");  // unnamed portal
         pg_put_cstr(bind, "");
         pg_put_i16(bind, 1);
@@ -427,16 +445,38 @@ struct PgDb : DbBackend {
         }
         pg_put_i16(bind, 1);
         pg_put_i16(bind, 0);  // every result in text format
-        pg_send_msg(fd, 'B', bind);
+        return bind;
+    }
 
-        pg_put_cstr(describe, "P");
-        pg_send_msg(fd, 'D', describe);
-
-        pg_put_cstr(execute, "");
-        pg_put_i32(execute, 0);  // every row, not a batch of some
-        pg_send_msg(fd, 'E', execute);
+    /// Run one statement against many parameter sets, parsing once. One
+    /// Parse, then a Bind/Describe/Execute per set, then a single Sync: the
+    /// server plans once and the client round-trips once, which is where the
+    /// batch time goes on this backend.
+    DbResult run_many(const std::string& sql, const std::vector<std::vector<Val>>& sets) override {
+        DbResult out;
+        if (fd < 0) throw std::runtime_error("postgres: the connection is closed");
+        if (sets.empty()) return out;
+        if (aborted && depth > 0 && !is_rollback_sql(sql)) {
+            throw std::runtime_error(
+                "postgres: the transaction is already failed, so this statement cannot run; roll it back "
+                "first (the statement that failed was: " + failed_stmt + ")");
+        }
+        std::string parse;
+        pg_put_cstr(parse, "");
+        pg_put_cstr(parse, sql);
+        pg_put_i16(parse, 0);
+        pg_send_msg(fd, 'P', parse);
+        for (const auto& params : sets) {
+            pg_send_msg(fd, 'B', build_bind(params, sql));
+            std::string describe;
+            pg_put_cstr(describe, "P");
+            pg_send_msg(fd, 'D', describe);
+            std::string execute;
+            pg_put_cstr(execute, "");
+            pg_put_i32(execute, 0);
+            pg_send_msg(fd, 'E', execute);
+        }
         pg_send_msg(fd, 'S', "");
-
         read_result(out, sql);
         return out;
     }
@@ -461,6 +501,11 @@ struct PgDb : DbBackend {
                 PgReader p;
                 p.buf = payload;
                 int16_t n = p.i16();
+                // A fresh description per result group: batched executions
+                // describe the same columns again, and appending would shift
+                // every later row's decoding.
+                oids.clear();
+                out.columns.clear();
                 for (int16_t i = 0; i < n; i++) {
                     out.columns.push_back(p.cstr());
                     p.take(6);      // table oid, column number
@@ -502,7 +547,7 @@ struct PgDb : DbBackend {
                     bool numeric = !n.empty();
                     for (char ch : n)
                         if (ch < '0' || ch > '9') numeric = false;
-                    if (numeric) out.affected = strtoll(n.c_str(), nullptr, 10);
+                    if (numeric) out.affected += strtoll(n.c_str(), nullptr, 10);
                 }
                 inserting = tag.compare(0, 6, "INSERT") == 0;
                 continue;

@@ -1,0 +1,4 @@
+hs::orm_create_many
+hs::orm_find_many
+hs::orm_delete_many
+hs::orm_update_many

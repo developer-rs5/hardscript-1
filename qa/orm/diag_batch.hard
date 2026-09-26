@@ -1,0 +1,17 @@
+bring http
+app @3134
+
+model User {
+    id   : Int @primary @auto_increment
+    name : String
+}
+
+GET "/bad" :: {
+    users <- User.create_many([{ name: "ann" }, 1])
+    <- users
+}
+
+GET "/keyless" :: {
+    users <- User.update_many([{ name: "ann" }])
+    <- users
+}

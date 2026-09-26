@@ -108,6 +108,12 @@ class MockPg {
         std::lock_guard<std::mutex> lock(mu_);
         return seen_;
     }
+    /// One entry per Execute message, in order. `statements()` collapses a
+    /// batch to its Parse; this keeps every bound set.
+    std::vector<PgSeen> executions() {
+        std::lock_guard<std::mutex> lock(mu_);
+        return executions_;
+    }
     std::vector<PgSeen> statements() {
         std::lock_guard<std::mutex> lock(mu_);
         std::vector<PgSeen> out;
@@ -359,6 +365,13 @@ class MockPg {
                     send(fd, 'n', "");
                 }
             } else if (typ == 'E') {
+                {
+                    // One entry per execution, not per parse: batched sets
+                    // share a Parse but bind separately, and the test wants
+                    // to see every set that crossed the socket.
+                    std::lock_guard<std::mutex> lock(mu_);
+                    executions_.push_back(PgSeen{sql, params});
+                }
                 execute(fd, sql, params);
             } else if (typ == 'S') {
                 send(fd, 'Z', std::string(1, ready_));
@@ -540,6 +553,7 @@ class MockPg {
   private:
     std::vector<PgReply> replies_;
     std::vector<PgSeen> seen_;
+    std::vector<PgSeen> executions_;
     std::mutex mu_;
     std::thread worker_;
     int listen_fd_ = -1;
@@ -778,6 +792,74 @@ void postgres_asks_for_the_key_it_just_made() {
     CHECK(st[0].sql.find("RETURNING \"id\"") != std::string::npos,
           "and the statement asked for it rather than guessing afterwards");
     CHECK(st[0].sql.find("'ann'") == std::string::npos, "with no value written into the SQL");
+}
+
+void a_batch_parses_once_and_binds_every_set() {
+    // One Parse for the whole batch, then a Bind per record: the planning
+    // happens once no matter how many rows follow.
+    std::vector<PgReply> replies(1);
+    replies[0].match = "UPDATE";
+    replies[0].tag = "UPDATE 1";
+    MockPg s(replies);
+    hs::PgDb db(s.conninfo());
+    hs::Val a = hs::Val::object({{"id", hs::Val::int_(1)},
+                                 {"name", hs::Val::text("ann")},
+                                 {"age", hs::Val::int_(30)},
+                                 {"active", hs::Val::boolean(true)},
+                                 {"note", hs::Val::nil()}});
+    hs::Val b = hs::Val::object({{"id", hs::Val::int_(2)},
+                                 {"name", hs::Val::text("bo")},
+                                 {"age", hs::Val::int_(17)},
+                                 {"active", hs::Val::boolean(false)},
+                                 {"note", hs::Val::nil()}});
+    (void)hs::orm_update_many(&pg_user_model(), &db, hs::Val::list({a, b}));
+    auto parsed = s.statements();
+    CHECK_EQ(parsed.size(), size_t(1), "one Parse for two records");
+    // Executions include the transaction's own BEGIN and COMMIT; the batch
+    // is the UPDATEs.
+    std::vector<PgSeen> ran;
+    for (auto& e : s.executions())
+        if (e.sql.find("UPDATE") != std::string::npos) ran.push_back(e);
+    CHECK_EQ(ran.size(), size_t(2), "but two executions");
+    CHECK_EQ(ran[0].params[0].text, std::string("ann"), "first record's values");
+    CHECK_EQ(ran[1].params[0].text, std::string("bo"), "second record's values");
+    CHECK(ran[0].params[3].is_null, "a nil note binds NULL, not an empty string");
+    CHECK(ran[0].sql.find("$5") != std::string::npos, "with numbered placeholders");
+}
+
+void a_created_batch_reads_its_keys_off_returning_rows() {
+    std::vector<PgReply> replies(1);
+    replies[0].match = "INSERT INTO";
+    replies[0].columns = {PgColumn("id", 23)};
+    replies[0].rows = {{PgCell("7")}, {PgCell("8")}};
+    replies[0].tag = "INSERT 0 1";
+    MockPg s(replies);
+    hs::PgDb db(s.conninfo());
+    hs::Val created = hs::orm_create_many(
+        &pg_user_model(), &db,
+        hs::Val::list({hs::Val::object({{"name", hs::Val::text("ann")},
+                                        {"age", hs::Val::int_(30)},
+                                        {"active", hs::Val::boolean(true)},
+                                        {"note", hs::Val::nil()}})}));
+    CHECK_EQ(created.arr.size(), size_t(1), "one record");
+    CHECK_EQ(created.arr[0].find("id")->iv, int64_t(7), "with the key the row carried");
+}
+
+void a_found_batch_keeps_key_order_on_postgres_too() {
+    std::vector<PgReply> replies(1);
+    replies[0].match = "IN (";
+    replies[0].columns = {PgColumn("id", 23), PgColumn("name", 25)};
+    // Deliberately out of order: the database answers 1, 2 and the batch
+    // must hand back 2, 1.
+    replies[0].rows = {{PgCell("1"), PgCell("ann")}, {PgCell("2"), PgCell("bo")}};
+    replies[0].tag = "SELECT 2";
+    MockPg s(replies);
+    hs::PgDb db(s.conninfo());
+    hs::Val rows = hs::orm_find_many(&pg_user_model(), &db,
+                                     hs::Val::list({hs::Val::int_(2), hs::Val::int_(1)}));
+    CHECK_EQ(rows.arr.size(), size_t(2), "both rows");
+    CHECK_EQ(rows.arr[0].find("name")->sv, std::string("bo"), "in the keys' order");
+    CHECK_EQ(rows.arr[1].find("name")->sv, std::string("ann"), "in the keys' order");
 }
 
 void a_selected_value_is_not_a_generated_key() {
@@ -1144,6 +1226,9 @@ int main() {
     qa::a_row_of_text_becomes_objects_the_orm_can_hand_out();
     qa::a_command_tag_says_how_many_rows_moved();
     qa::postgres_asks_for_the_key_it_just_made();
+    qa::a_batch_parses_once_and_binds_every_set();
+    qa::a_created_batch_reads_its_keys_off_returning_rows();
+    qa::a_found_batch_keeps_key_order_on_postgres_too();
     qa::a_selected_value_is_not_a_generated_key();
     qa::sqlite_does_not_ask_because_sqlite_remembers();
 

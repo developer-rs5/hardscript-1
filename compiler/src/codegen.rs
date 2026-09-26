@@ -511,6 +511,15 @@ impl Codegen {
             crate::orm::WriteOp::Create(_) => format!("hs::orm_create({m}, hs::db_need(), {arg0})"),
             crate::orm::WriteOp::Upsert(_) => format!("hs::orm_upsert({m}, hs::db_need(), {arg0})"),
             crate::orm::WriteOp::DeleteKey => format!("hs::orm_delete_key({m}, hs::db_need(), {arg0})"),
+            crate::orm::WriteOp::CreateMany => {
+                format!("hs::orm_create_many({m}, hs::db_need(), {arg0})")
+            }
+            crate::orm::WriteOp::UpdateMany => {
+                format!("hs::orm_update_many({m}, hs::db_need(), {arg0})")
+            }
+            crate::orm::WriteOp::DeleteMany => {
+                format!("hs::orm_delete_many({m}, hs::db_need(), {arg0})")
+            }
             _ => format!("hs::orm_find_or_create({m}, hs::db_need(), {arg0})"),
         })
     }
@@ -563,6 +572,24 @@ impl Codegen {
         // A relationship is the chain's first step but not a query step, so it
         // is consumed here; the rest line up with the plan one for one.
         let query_steps = if plan.join.is_some() { &chain[1..] } else { &chain[..] };
+        // `Model.find_many(ids)` on its own reads through a dedicated call:
+        // an `IN` query would return the database's order, while `find_many`
+        // promises the keys' order. With anything else chained the builder
+        // lowering below applies, in database order.
+        if plan.join.is_none()
+            && matches!(
+                plan.steps.as_slice(),
+                [crate::orm::QueryStep::Where { kind: crate::orm::WhereKind::In, .. }]
+            )
+            && query_steps.iter().map(|(name, _, _)| name.as_str()).collect::<Vec<_>>() == ["find_many"]
+        {
+            let args = &query_steps[0].1;
+            let arg = args.first().map(|a| self.expr(a)).unwrap_or_else(|| "hs::Val::list({})".to_string());
+            return Some(format!(
+                "hs::orm_find_many(&{}, hs::db_need(), {arg})",
+                Self::orm_sym(&plan.model)
+            ));
+        }
         let mut builder = query_steps.iter().filter(|(name, _, _)| !crate::orm::is_orm_terminal(name));
         let mut emitted: Vec<String> = Vec::new();
         for step in &plan.steps {
