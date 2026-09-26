@@ -1661,6 +1661,26 @@ impl Codegen {
         }
     }
 
+    /// Exactly `n` arguments, or a source error naming the call. A builtin
+    /// with a fixed shape should say so while the programmer is looking at
+    /// their source, not later as a runtime complaint about a missing value.
+    /// Returns false when it has already pushed a diagnostic.
+    fn arity(&mut self, args: &[Expr], n: usize, what: &str, span: Span) -> bool {
+        if args.len() == n {
+            return true;
+        }
+        self.diags.push(
+            Diag::new(
+                ErrorKind::Type,
+                format!("`{what}` takes {n} argument(s), got {}", args.len()),
+                span,
+                &format!("Write `{what}({})`.", (0..n).map(|_| "...").collect::<Vec<_>>().join(", ")),
+            )
+            .with_code(crate::catalog::WRONG_ARG_COUNT),
+        );
+        false
+    }
+
     fn ttx(&mut self, args: &[Expr], i: usize) -> String {
         let v = self.arg_at(args, i);
         format!("hs::to_text({v}).sv")
@@ -1810,39 +1830,143 @@ impl Codegen {
                     "hs::limit_check_or_abort({id}, (int)({algo}), {rate}, {per}, hs::limit_key_or_ip({key}, req.peer_ip))"
                 ))
             }
+            // cluster / lock / idem (M6.8). Plain values in, plain values out:
+            // the runtime owns the store and the transport behind them.
+            (_, _) if module == "cluster" && name == "node" => {
+                if !self.arity(args, 0, "cluster.node", span) {
+                    return None;
+                }
+                Some("hs::cluster_node_val()".to_string())
+            }
+            (_, _) if module == "cluster" && name == "peers" => {
+                if !self.arity(args, 0, "cluster.peers", span) {
+                    return None;
+                }
+                Some("hs::cluster_peers_val()".to_string())
+            }
+            (_, _) if module == "cluster" && name == "owner" => {
+                if !self.arity(args, 1, "cluster.owner", span) {
+                    return None;
+                }
+                Some(format!("hs::cluster_owner_val({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "cluster" && name == "is_owner" => {
+                if !self.arity(args, 1, "cluster.is_owner", span) {
+                    return None;
+                }
+                Some(format!("hs::cluster_is_owner_val({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "cluster" && name == "call" => {
+                if !self.arity(args, 3, "cluster.call", span) {
+                    return None;
+                }
+                let (a, b, c) = (self.arg_at(args, 0), self.arg_at(args, 1), self.arg_at(args, 2));
+                Some(format!("hs::cluster_call({a}, {b}, {c})"))
+            }
+            (_, _) if module == "lock" && name == "acquire" => {
+                if !self.arity(args, 2, "lock.acquire", span) {
+                    return None;
+                }
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::lock_acquire({a}, {b})"))
+            }
+            (_, _) if module == "lock" && name == "renew" => {
+                if !self.arity(args, 2, "lock.renew", span) {
+                    return None;
+                }
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::lock_renew({a}, {b})"))
+            }
+            (_, _) if module == "lock" && name == "release" => {
+                if !self.arity(args, 1, "lock.release", span) {
+                    return None;
+                }
+                Some(format!("hs::lock_release({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "lock" && name == "held" => {
+                if !self.arity(args, 1, "lock.held", span) {
+                    return None;
+                }
+                Some(format!("hs::lock_held({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "idem" && name == "claim" => {
+                if !self.arity(args, 2, "idem.claim", span) {
+                    return None;
+                }
+                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
+                Some(format!("hs::idem_claim({a}, {b})"))
+            }
+            (_, _) if module == "idem" && name == "record" => {
+                if !self.arity(args, 3, "idem.record", span) {
+                    return None;
+                }
+                let (a, b, c) = (self.arg_at(args, 0), self.arg_at(args, 1), self.arg_at(args, 2));
+                Some(format!("hs::idem_record({a}, {b}, {c})"))
+            }
+            (_, _) if module == "idem" && name == "lookup" => {
+                if !self.arity(args, 1, "idem.lookup", span) {
+                    return None;
+                }
+                Some(format!("hs::idem_lookup({})", self.arg_at(args, 0)))
+            }
             // metrics / health (M6.7). `metrics.scrape` is the only one that
             // reads: everything else records, and the endpoints are installed
             // by `metrics_install` when a program touches this module at all.
             (_, _) if module == "metrics" && name == "incr" => {
                 self.uses_metrics = true;
+                if !self.arity(args, if args.len() == 1 { 1 } else { 2 }, "metrics.incr", span) {
+                    return None;
+                }
                 let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
                 Some(format!("hs::metrics_inc({a}, {b})"))
             }
             (_, _) if module == "metrics" && name == "set" => {
                 self.uses_metrics = true;
+                if !self.arity(args, 2, "metrics.set", span) {
+                    return None;
+                }
                 let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
                 Some(format!("hs::metrics_set({a}, {b})"))
             }
             (_, _) if module == "metrics" && name == "observe" => {
                 self.uses_metrics = true;
+                if !self.arity(args, 2, "metrics.observe", span) {
+                    return None;
+                }
                 let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
                 Some(format!("hs::metrics_observe({a}, {b})"))
             }
             (_, _) if module == "metrics" && name == "value" => {
                 self.uses_metrics = true;
+                if !self.arity(args, 1, "metrics.value", span) {
+                    return None;
+                }
                 Some(format!("hs::metrics_value({})", self.arg_at(args, 0)))
             }
             (_, _) if module == "metrics" && name == "scrape" => {
                 self.uses_metrics = true;
+                if !self.arity(args, 0, "metrics.scrape", span) {
+                    return None;
+                }
                 Some("hs::metrics_snapshot_json()".to_string())
             }
             (_, _) if module == "health" && name == "set" => {
                 self.uses_metrics = true;
-                let (a, b) = (self.arg_at(args, 0), self.arg_at(args, 1));
-                Some(format!("hs::health_set_val({a}, {b})"))
+                // The detail is optional: `health.set("db", ok)` is the common
+                // case, and requiring a reason for every healthy gate would be
+                // noise.
+                if args.len() != 2 && !self.arity(args, 3, "health.set", span) {
+                    return None;
+                }
+                let (a, b, c) =
+                    (self.arg_at(args, 0), self.arg_at(args, 1), self.arg_at(args, 2));
+                Some(format!("hs::health_set_val({a}, {b}, {c})"))
             }
             (_, _) if module == "health" && name == "ready" => {
                 self.uses_metrics = true;
+                if !self.arity(args, 0, "health.ready", span) {
+                    return None;
+                }
                 Some("hs::metrics_ready_json()".to_string())
             }
             (_, _) if module == "email" && name == "send" => {

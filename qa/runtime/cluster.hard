@@ -1,0 +1,14 @@
+GET "/pay" :: {
+    mine <- cluster.is_owner("user:42")
+    got <- lock.acquire("invoice:1", 30)
+    first <- idem.claim("pay:1", 3600)
+    done <- idem.record("pay:1", { charged: true }, 3600)
+    <- { mine: mine, locked: got, first: first, done: done }
+}
+
+GET "/peer" :: {
+    me <- cluster.node()
+    peers <- cluster.peers()
+    who <- cluster.owner("user:42")
+    <- { me: me, who: who, peers: peers }
+}

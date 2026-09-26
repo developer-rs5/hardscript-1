@@ -62,6 +62,11 @@ struct PgReply {
     std::string error_hint;
     /// Transaction status reported with ReadyForQuery after this statement.
     char ready = 'I';
+    /// Answer this statement once, then fall through to the next entry.
+    /// Without it two identical statements get the same answer, which is right
+    /// for a query and wrong for a contended write: the second attempt at a
+    /// lock is the interesting one.
+    bool once = false;
 };
 
 /// One statement as the server received it: the text and the values that came
@@ -79,7 +84,8 @@ struct PgSeen {
 
 class MockPg {
   public:
-    explicit MockPg(const std::vector<PgReply>& replies) : replies_(replies) {
+    explicit MockPg(const std::vector<PgReply>& replies)
+        : replies_(replies), used_(replies.size(), false) {
         int one = 1;
         listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) throw std::runtime_error("mock pg: socket");
@@ -356,7 +362,9 @@ class MockPg {
                 }
                 send(fd, '2', "");
             } else if (typ == 'D') {
-                const PgReply* r = find_reply(sql);
+                // A Describe only needs the row shape, so it must not spend a
+                // one-shot reply: that belongs to the Execute that follows.
+                const PgReply* r = find_reply(sql, /*consume=*/false);
                 if (is_control(sql)) {
                     send(fd, 'n', "");
                     continue;
@@ -447,7 +455,7 @@ class MockPg {
             send(fd, 'C', c);
             return;
         }
-        const PgReply* r = find_reply(sql);
+        const PgReply* r = find_reply(sql, /*consume=*/true);
         // No script matched: a real server would answer this statement, and
         // returning an empty result instead would look like a query that
         // matched nothing, which is a different bug and a silent one.
@@ -511,9 +519,14 @@ class MockPg {
                t.compare(0, 11, "ROLLBACK TO") == 0;
     }
 
-    const PgReply* find_reply(const std::string& sql) {
-        for (const auto& r : replies_)
-            if (r.match.empty() || sql.find(r.match) != std::string::npos) return &r;
+    const PgReply* find_reply(const std::string& sql, bool consume) {
+        for (size_t i = 0; i < replies_.size(); i++) {
+            if (!replies_[i].match.empty() && sql.find(replies_[i].match) == std::string::npos)
+                continue;
+            if (replies_[i].once && used_[i]) continue;  // spent: try the next entry
+            if (consume) used_[i] = true;
+            return &replies_[i];
+        }
         return nullptr;
     }
 
@@ -549,10 +562,10 @@ class MockPg {
 
     void stop() {
         if (stopped_.exchange(true)) return;
-        if (listen_fd_ >= 0) {
-            ::shutdown(listen_fd_, SHUT_RDWR);
-            ::close(listen_fd_);
-            listen_fd_ = -1;
+        int lfd = listen_fd_.exchange(-1);
+        if (lfd >= 0) {
+            ::shutdown(lfd, SHUT_RDWR);
+            ::close(lfd);
         }
         // The same rule as `drop_client`: the reading thread closes.
         int fd = client_fd_.load();
@@ -566,12 +579,16 @@ class MockPg {
 
   private:
     std::vector<PgReply> replies_;
+    std::vector<bool> used_;
     std::vector<PgSeen> seen_;
     std::vector<PgSeen> executions_;
     std::mutex mu_;
     std::thread worker_;
-    int listen_fd_ = -1;
     std::atomic<int> client_fd_{-1};
+    // Atomic because `stop()` clears it from another thread while `serve()` is
+    // blocked in `accept()` on it: a plain int here is a data race, and TSan
+    // says so the first time a test shuts its server down.
+    std::atomic<int> listen_fd_{-1};
     int port_ = 0;
     char ready_ = 'I';
     int auth_requests_ = 0;

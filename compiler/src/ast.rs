@@ -66,6 +66,12 @@ pub enum Module {
     Metrics,
     /// Readiness gates reported by `/readyz` (M6.7).
     Health,
+    /// Node identity, placement and peer calls (M6.8).
+    Cluster,
+    /// Locks shared by every node in a cluster (M6.8).
+    Lock,
+    /// Idempotency keys shared by every node in a cluster (M6.8).
+    Idem,
 }
 
 impl Module {
@@ -93,6 +99,9 @@ impl Module {
         "email",
         "metrics",
         "health",
+        "cluster",
+        "lock",
+        "idem",
     ];
 
     /// Human-readable module list used in diagnostics.
@@ -125,6 +134,9 @@ impl Module {
             Module::Email => "email",
             Module::Metrics => "metrics",
             Module::Health => "health",
+            Module::Cluster => "cluster",
+            Module::Lock => "lock",
+            Module::Idem => "idem",
         }
     }
 
@@ -152,6 +164,9 @@ impl Module {
         Module::Email,
         Module::Metrics,
         Module::Health,
+        Module::Cluster,
+        Module::Lock,
+        Module::Idem,
     ];
 
     /// The allowed-module set as strings (lowercased names), for validation
@@ -181,6 +196,9 @@ impl Module {
             "email" => Some(Module::Email),
             "metrics" => Some(Module::Metrics),
             "health" => Some(Module::Health),
+            "cluster" => Some(Module::Cluster),
+            "lock" => Some(Module::Lock),
+            "idem" => Some(Module::Idem),
             _ => {
                 let _ = span;
                 None

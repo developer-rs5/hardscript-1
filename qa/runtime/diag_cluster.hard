@@ -1,0 +1,4 @@
+GET "/pay" :: {
+    got <- lock.acquire("invoice:1")
+    <- { locked: got }
+}

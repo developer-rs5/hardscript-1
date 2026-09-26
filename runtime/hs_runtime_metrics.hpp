@@ -545,11 +545,18 @@ inline Val metrics_value(const Val& name) {
     return Val::flt(v);
 }
 
-inline Val health_set_val(const Val& name, const Val& ok) {
+/// `health.set("redis", false, "connection refused")`: the detail is what a
+/// readiness probe shows the operator, so it is worth carrying.
+inline Val health_set_val(const Val& name, const Val& ok, const Val& detail = Val::nil()) {
     if (!name.is_str() || name.sv.empty())
         throw std::runtime_error("health: set needs a check name as text");
     if (!ok.is_bool()) throw std::runtime_error("health: set needs true or false");
-    health_set(name.sv, ok.bv);
+    std::string why;
+    if (!detail.is_nil()) {
+        if (!detail.is_str()) throw std::runtime_error("health: the detail must be text");
+        why = detail.sv;
+    }
+    health_set(name.sv, ok.bv, why);
     return ok;
 }
 

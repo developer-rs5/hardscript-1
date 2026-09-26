@@ -23,6 +23,7 @@
 //   hs_runtime_ratelimit.hpp   rate limiter: token bucket + sliding window (M6.5)
 //   hs_runtime_email.hpp       email delivery: SMTP, templates, queue jobs (M6.6)
 //   hs_runtime_metrics.hpp     metrics registry, /metrics, /healthz, /readyz (M6.7)
+//   hs_runtime_cluster.hpp     placement, locks, idempotency keys, peer calls (M6.8)
 //   hs_runtime_sqlite.hpp      SQLite backend, libsqlite3 loaded at run time
 //   hs_runtime_pgsql.hpp       PostgreSQL backend, extended query protocol
 //   hs_runtime_util.hpp      CLI/args helpers + codegen glue (hs_respond, tests)
@@ -50,6 +51,7 @@
 #include "hs_runtime_ratelimit.hpp"
 #include "hs_runtime_email.hpp"
 #include "hs_runtime_metrics.hpp"
+#include "hs_runtime_cluster.hpp"
 #include "hs_runtime_sqlite.hpp"
 #include "hs_runtime_pgsql.hpp"
 #include "hs_runtime_util.hpp"

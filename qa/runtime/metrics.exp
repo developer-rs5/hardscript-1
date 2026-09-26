@@ -2,5 +2,5 @@ hs::metrics_inc(hs::Val::text("orders_total"), hs::Val::nil())
 hs::metrics_observe(hs::Val::text("order_value"), hs::Val::int_(42))
 hs::metrics_value(hs::Val::text("orders_total"))
 hs::metrics_set(hs::Val::text("queue_depth"), hs::Val::int_(3))
-hs::health_set_val(hs::Val::text("redis"), hs::Val::boolean(true))
+hs::health_set_val(hs::Val::text("redis"), hs::Val::boolean(true), hs::Val::text("ping ok"))
 (void)hs::metrics_install(app);

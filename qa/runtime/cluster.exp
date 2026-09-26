@@ -1,0 +1,7 @@
+hs::cluster_is_owner_val(hs::Val::text("user:42"))
+hs::lock_acquire(hs::Val::text("invoice:1"), hs::Val::int_(30))
+hs::idem_claim(hs::Val::text("pay:1"), hs::Val::int_(3600))
+hs::idem_record(hs::Val::text("pay:1"), hs::Val::object({ {"charged", hs::Val::boolean(true)} }), hs::Val::int_(3600))
+hs::cluster_node_val()
+hs::cluster_peers_val()
+hs::cluster_owner_val(hs::Val::text("user:42"))

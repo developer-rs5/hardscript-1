@@ -99,6 +99,7 @@ MAIN_SESSION = F("main_session.hard")
 MAIN_LIMIT = F("main_limit.hard")
 MAIN_EMAIL = F("main_email.hard")
 MAIN_METRICS = F("main_metrics.hard")
+MAIN_CLUSTER = F("main_cluster.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -157,13 +158,19 @@ def setup_metrics(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_cluster(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_CLUSTER)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
-    "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics,
+    "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics, "cluster": setup_cluster,
 }
 
 # id, argv, expected_rc, setup, note
@@ -262,6 +269,10 @@ CASES = [
     ("mt001", ["build", "main.hard"], 0, "metrics", "build a metrics program"),
     ("mt002", ["fmt", "main.hard"], 0, "metrics", "format metric calls"),
     ("mt003", ["docs", "main.hard"], 0, "metrics", "document a metrics program"),
+    # cluster, locks, idempotency =============================================
+    ("cl001", ["build", "main.hard"], 0, "cluster", "build a clustered program"),
+    ("cl002", ["fmt", "main.hard"], 0, "cluster", "format cluster calls"),
+    ("cl003", ["docs", "main.hard"], 0, "cluster", "document a clustered program"),
 ]
 
 for cid, argv, rc, setup, note in CASES:
