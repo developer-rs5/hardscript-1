@@ -72,6 +72,25 @@ fn cstring(s: &str) -> String {
     format!("{:?}", s)
 }
 
+/// A top-level `cache x ttl T` declaration, desugared to
+/// `cache.declare("x", N)`. Only declarations execute at startup; any other
+/// top-level expression statement keeps its old meaning (dropped).
+fn is_cache_declare(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => match callee.as_ref() {
+            Expr::Member(base, name, _) => {
+                matches!(base.as_ref(), Expr::Ident(root, _) if root == "cache")
+                    && name == "declare"
+                    && args.len() == 2
+                    && matches!(&args[0], Expr::Str(..))
+                    && matches!(&args[1], Expr::Int(..))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// C++ double literal for a rule bound (`18` -> `18.0`).
 fn cdbl(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 9.0e15 {
@@ -253,6 +272,11 @@ impl Codegen {
         let mut sockets: Vec<&SocketDef> = Vec::new();
         let mut tests: Vec<&TestDef> = Vec::new();
         let mut models: Vec<&ModelDef> = Vec::new();
+        // Top-level `cache x ttl T` declarations run once at startup. They
+        // desugar to `cache.declare(..)` calls, which look like any other
+        // top-level expression statement — except these must execute, so
+        // they are collected for `main` instead of dropped with the rest.
+        let mut cache_decls: Vec<String> = Vec::new();
 
         for st in &prog.stmts {
             match st {
@@ -283,6 +307,9 @@ impl Codegen {
                     ),
                     None => protect = Some(d),
                 },
+                Stmt::ExprStmt(e) if is_cache_declare(e) => {
+                    cache_decls.push(self.expr(e));
+                }
                 _ => {}
             }
         }
@@ -333,6 +360,7 @@ impl Codegen {
             sockets.len(),
             tests.len(),
             models.len(),
+            &cache_decls,
         );
     }
 
@@ -943,10 +971,14 @@ impl Codegen {
     }
 
     fn emit_main(&mut self, port: i64, routes: &[&RouteDef], nmw: usize, nws: usize, ntests: usize,
-                 nmodels: usize) {
+                 nmodels: usize, cache_decls: &[String]) {
         self.wln("int main(int argc, char** argv) {");
         self.ind += 1;
         self.wln("hs::set_args(argc, argv);");
+        // Declared caches exist before the first request can ask for them.
+        for decl in cache_decls {
+            self.wln(&format!("(void)({decl});"));
+        }
         self.wln("hs::Server app;");
         self.wln("hs::hs_set_server(&app);");
         for i in 0..nmw {
@@ -1507,6 +1539,44 @@ impl Codegen {
             // json
             (_, _) if module == "json" && name == "parse" => {
                 Some(format!("hs::parse_json({})", self.ttx(args, 0)))
+            }
+            // cache (M6.1): one call per operation against the ambient cache.
+            // Names and values are plain expressions; the runtime validates
+            // shapes and reports misuse with a runtime error, not SQL.
+            (_, _) if module == "cache" && name == "declare" => {
+                let a = self.arg_at(args, 0);
+                let b = self.arg_at(args, 1);
+                Some(format!("hs::cache_declare({a}, {b})"))
+            }
+            (_, _) if module == "cache" && name == "get" => {
+                Some(format!("hs::cache_get({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "cache" && name == "set" => {
+                let (a, b, c) = (self.arg_at(args, 0), self.arg_at(args, 1), self.arg_at(args, 2));
+                Some(format!("hs::cache_set({a}, {b}, {c})"))
+            }
+            (_, _) if module == "cache" && name == "delete" => {
+                Some(format!("hs::cache_delete({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "cache" && name == "exists" => {
+                Some(format!("hs::cache_exists({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "cache" && (name == "increment" || name == "decrement") => {
+                let a = self.arg_at(args, 0);
+                // A missing step counts by one: `tin` on nil would count by
+                // zero, which is a different operation wearing the same name.
+                let b = if args.len() > 1 { self.tin(args, 1) } else { "1".to_string() };
+                Some(format!("hs::cache_{name}({a}, hs::Val::int_({b}))"))
+            }
+            (_, _) if module == "cache" && name == "clear" => Some("hs::cache_clear()".to_string()),
+            (_, _) if module == "cache" && name == "keys" => Some("hs::cache_keys()".to_string()),
+            (_, _) if module == "cache" && name == "ttl" => {
+                Some(format!("hs::cache_ttl({})", self.arg_at(args, 0)))
+            }
+            (_, _) if module == "cache" && name == "expire" => {
+                let a = self.arg_at(args, 0);
+                let b = self.arg_at(args, 1);
+                Some(format!("hs::cache_expire({a}, {b})"))
             }
             (_, _) if module == "json" && name == "stringify" => {
                 Some(format!("hs::Val::text(hs::to_json({}))", self.arg_at(args, 0)))

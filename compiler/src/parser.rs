@@ -382,8 +382,105 @@ impl Parser {
         }
     }
 
+    /// A duration after `ttl`: a number and a unit (`10m`, `1h`, `30s`, `7d`).
+    /// The lexer sees `10m` as two tokens, which is what makes the units
+    /// table here instead of a new literal.
+    fn parse_duration(&mut self, ctx: &str) -> Result<i64, Vec<Diag>> {
+        let sp = self.span();
+        let n = match self.peek() {
+            Tok::Int(n) => {
+                let n = *n;
+                self.advance();
+                n
+            }
+            other => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("expected a number {ctx}, found {other}"),
+                    sp,
+                    "Write a duration like `10m`, `1h`, `30s` or `7d`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        };
+        if n < 0 {
+            return Err(vec![Diag::new(
+                ErrorKind::Parse,
+                format!("a duration {ctx} cannot be negative"),
+                sp,
+                "Write a duration like `10m`, `1h`, `30s` or `7d`.",
+            )
+            .with_code(cat::EXPECTED_TOKEN)]);
+        }
+        let unit = match self.peek() {
+            Tok::Ident(u) => {
+                let u = u.clone();
+                self.advance();
+                u.to_lowercase()
+            }
+            other => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("expected a duration unit {ctx}, found {other}"),
+                    self.span(),
+                    "Use `s`, `m`, `h` or `d`: `10m`, `1h`, `30s`, `7d`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        };
+        let mult: i64 = match unit.as_str() {
+            "s" | "sec" | "secs" | "second" | "seconds" => 1,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60,
+            "h" | "hour" | "hours" => 3600,
+            "d" | "day" | "days" => 86400,
+            _ => {
+                return Err(vec![Diag::new(
+                    ErrorKind::Parse,
+                    format!("unknown duration unit `{unit}`"),
+                    self.span(),
+                    "Use `s`, `m`, `h` or `d`: `10m`, `1h`, `30s`, `7d`.",
+                )
+                .with_code(cat::EXPECTED_TOKEN)])
+            }
+        };
+        n.checked_mul(mult).ok_or_else(|| {
+            vec![Diag::new(
+                ErrorKind::Parse,
+                "duration too large".to_string(),
+                sp,
+                "Use a smaller number of seconds, minutes, hours or days.",
+            )
+            .with_code(cat::EXPECTED_TOKEN)]
+        })
+    }
+
     fn parse_block_stmt(&mut self) -> Result<Stmt, Vec<Diag>> {
         let sp = self.span();
+        // `cache users ttl 10m`: declare a cache entry's default TTL. It
+        // desugars to an ordinary `cache.declare("users", 600)` call, so the
+        // rest of the pipeline never learns a new statement form. The four
+        // token lookahead keeps it unambiguous: anything else starting with
+        // `cache` parses as an expression, exactly as before.
+        if matches!(self.peek(), Tok::Ident(n) if n == "cache") {
+            if let Tok::Ident(name) = self.peek_at(1).clone() {
+                if matches!(self.peek_at(2), Tok::Ident(t) if t == "ttl") {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    let secs = self.parse_duration("for a cache TTL")?;
+                    let callee = Expr::Member(
+                        Box::new(Expr::Ident("cache".to_string(), sp)),
+                        "declare".to_string(),
+                        sp,
+                    );
+                    return Ok(Stmt::ExprStmt(Expr::Call {
+                        callee: Box::new(callee),
+                        args: vec![Expr::Str(name, sp), Expr::Int(secs, sp)],
+                        span: sp,
+                    }));
+                }
+            }
+        }
         // `?(cond) { } :{ }` or `?(cond) { }`
         if *self.peek() == Tok::Sym(Sym::Q) && *self.peek_at(1) == Tok::Sym(Sym::LParen) {
             self.advance();
@@ -1794,5 +1891,56 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    fn cache_decl(src: &str) -> (String, i64) {
+        match parse_one(src) {
+            Stmt::ExprStmt(Expr::Call { callee, args, .. }) => {
+                let (base, name) = match callee.as_ref() {
+                    Expr::Member(b, n, _) => (b.as_ref(), n.clone()),
+                    other => panic!("expected a cache.declare call, got {other:?}"),
+                };
+                assert!(matches!(base, Expr::Ident(n, _) if n == "cache"), "root is cache");
+                assert_eq!(name, "declare");
+                assert_eq!(args.len(), 2);
+                let key = match &args[0] {
+                    Expr::Str(s, _) => s.clone(),
+                    other => panic!("expected a name string, got {other:?}"),
+                };
+                let secs = match &args[1] {
+                    Expr::Int(n, _) => *n,
+                    other => panic!("expected seconds, got {other:?}"),
+                };
+                (key, secs)
+            }
+            other => panic!("expected a desugared declare call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_declaration_desugars_with_units() {
+        assert_eq!(cache_decl("cache users ttl 10m\n"), ("users".to_string(), 600));
+        assert_eq!(cache_decl("cache users ttl 30s\n"), ("users".to_string(), 30));
+        assert_eq!(cache_decl("cache users ttl 2h\n"), ("users".to_string(), 7200));
+        assert_eq!(cache_decl("cache users ttl 7d\n"), ("users".to_string(), 604800));
+        assert_eq!(cache_decl("cache users ttl 1 minute\n"), ("users".to_string(), 60));
+        assert_eq!(cache_decl("cache users ttl 3 HOURS\n"), ("users".to_string(), 10800));
+    }
+
+    #[test]
+    fn cache_declaration_rejects_bad_durations() {
+        assert!(!parse_errs("cache users ttl 10x\n").is_empty(), "unknown unit");
+        assert!(!parse_errs("cache users ttl m\n").is_empty(), "missing number");
+        assert!(!parse_errs("cache users ttl\n").is_empty(), "missing duration");
+        assert!(!parse_errs("cache users ttl 10\n").is_empty(), "missing unit");
+    }
+
+    #[test]
+    fn cache_without_ttl_is_not_a_declaration() {
+        // `cache` stays an ordinary identifier: a variable read followed by
+        // another statement must not become a declaration.
+        let toks: Vec<Token> = crate::Lexer::new("cache\nusers\n").tokenize().unwrap();
+        let prog = crate::Parser::new(toks).parse_program().unwrap();
+        assert_eq!(prog.stmts.len(), 2, "two expression statements, not a declaration");
     }
 }

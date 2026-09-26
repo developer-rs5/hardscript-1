@@ -92,6 +92,7 @@ def setup_readonly(d):
 
 
 MAIN_MODELS = F("main_models.hard")
+MAIN_CACHE = F("main_cache.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -108,12 +109,18 @@ def setup_db(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_cache(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_CACHE)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 SETUPS = {
     "ok": setup_ok, "unfmt": setup_unfmt, "synerr": setup_synerr,
     "testfail": setup_testfail, "missing": setup_missing,
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
-    "db": setup_db,
+    "db": setup_db, "cache": setup_cache,
 }
 
 # id, argv, expected_rc, setup, note
@@ -189,6 +196,9 @@ CASES = [
     ("mg005", ["migrate", "down"], 1, "db", "down with nothing applied"),
     ("mg006", ["migrate", "diff", "--dialect", "mysql"], 1, "db", "diff with an unknown dialect"),
     ("mg007", ["seed"], 2, "db", "seed with no seed files"),
+    # cache ==================================================================
+    ("ch001", ["build", "main.hard"], 0, "cache", "build a cache program"),
+    ("ch002", ["fmt", "main.hard"], 0, "cache", "format a cache declaration"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

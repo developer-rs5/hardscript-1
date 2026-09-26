@@ -1,0 +1,7 @@
+bring cache
+
+cache users ttl 10x
+
+GET "/users" :: {
+    <- cache.get("users")
+}

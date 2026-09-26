@@ -1,0 +1,12 @@
+hs::cache_declare(hs::Val::text("users"), hs::Val::int_(600))
+hs::cache_declare(hs::Val::text("hits"), hs::Val::int_(3600))
+hs::cache_get(
+hs::cache_exists(
+hs::cache_set(
+hs::cache_increment(
+hs::cache_decrement(
+hs::cache_ttl(
+hs::cache_keys()
+hs::cache_expire(
+hs::cache_delete(
+hs::cache_clear()

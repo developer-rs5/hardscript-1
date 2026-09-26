@@ -1,0 +1,21 @@
+bring cache
+
+cache users ttl 10m
+cache hits ttl 1h
+
+GET "/users" :: {
+    ?(cache.exists("users")) {
+        <- cache.get("users")
+    }
+    users <- [{ name: "ann" }, { name: "bo" }]
+    cache.set("users", users)
+    n <- cache.increment("hits")
+    m <- cache.increment("hits", 5)
+    d <- cache.decrement("hits")
+    t <- cache.ttl("users")
+    k <- cache.keys()
+    cache.expire("users", 60)
+    cache.delete("stale")
+    cache.clear()
+    <- users
+}

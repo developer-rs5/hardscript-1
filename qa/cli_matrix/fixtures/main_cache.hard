@@ -1,0 +1,10 @@
+bring cache
+
+cache users ttl 10m
+
+GET "/" :: {
+    ?(cache.exists("users")) {
+        <- cache.get("users")
+    }
+    <- { hello: "cache" }
+}

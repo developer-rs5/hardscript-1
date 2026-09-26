@@ -52,3 +52,5 @@ mg004	migrate up	0	db	up with nothing pending
 mg005	migrate down	1	db	down with nothing applied
 mg006	migrate diff --dialect mysql	1	db	diff with an unknown dialect
 mg007	seed	2	db	seed with no seed files
+ch001	build main.hard	0	cache	build a cache program
+ch002	fmt main.hard	0	cache	format a cache declaration
