@@ -604,6 +604,14 @@ inline std::string orm_insert_sql(const OrmModel& m, DbDialect d, const std::vec
         sql += db_placeholder(d, (int)i + 1);
     }
     sql += ")";
+    // SQLite remembers the key it assigned and hands it back afterwards.
+    // PostgreSQL keeps no such record, so the statement asks for the key it
+    // just made and the row is the answer. Same insert, one extra clause, and
+    // no second round trip to find out what the id was.
+    if (d == DbDialect::Postgres && !m.pk.empty() && m.is_generated(m.pk)) {
+        sql += " RETURNING ";
+        sql += db_quote_ident(m.pk);
+    }
     return sql;
 }
 
@@ -666,7 +674,14 @@ inline Val orm_create(const OrmModel* mp, DbBackend* b, const Val& obj) {
     // A generated key that was left out is the one number worth reading back.
     // A key the record already carried is the caller's, and is kept: an upsert
     // that inserts a keyed row has to come back with the key it was given.
-    if (!m.pk.empty() && r.last_id > 0 && !out.find(m.pk)) out.set(m.pk, Val::int_(r.last_id));
+    // A backend answers either by handing the key back (`last_id`, SQLite's
+    // connection state) or by returning the row that has it (`RETURNING`,
+    // PostgreSQL's); both are the same number and either one is enough.
+    if (!m.pk.empty() && !out.find(m.pk)) {
+        if (r.last_id > 0) out.set(m.pk, Val::int_(r.last_id));
+        else if (!r.rows.empty() && !r.rows[0].empty() && r.rows[0][0].is_int())
+            out.set(m.pk, r.rows[0][0]);
+    }
     return out;
 }
 

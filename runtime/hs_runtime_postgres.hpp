@@ -20,48 +20,72 @@ static void pg_write_all(int fd, const std::string& data) {
     send_all(fd, data);
 }
 
-inline int pg_connect(std::string conninfo) {
-    std::map<std::string, std::string> cfg;
-    // parse key=value pairs (postgres-like) or URL
-    size_t i = 0;
-    std::string host = "127.0.0.1", user = getenv("USER") ? getenv("USER") : "postgres", dbname = user;
+/// A connection's parts, parsed from either spelling: a `postgresql://` URL
+/// or `key=value` pairs separated by spaces.
+struct PgConnInfo {
+    std::string host = "127.0.0.1";
     int port = 5432;
+    std::string user = getenv("USER") ? getenv("USER") : "postgres";
+    std::string dbname;
     std::string password;
+};
+
+inline PgConnInfo pg_parse_conninfo(const std::string& conninfo) {
+    PgConnInfo c;
+    const char* env_user = getenv("USER");
+    if (env_user) c.user = env_user;
+    c.dbname = c.user;
+    if (conninfo.empty()) return c;
     auto set = [&](const std::string& k, const std::string& v) {
-        if (k == "host") host = v;
-        else if (k == "port") port = atoi(v.c_str());
-        else if (k == "user") user = v;
-        else if (k == "password") password = v;
-        else if (k == "dbname") dbname = v;
+        if (k == "host") c.host = v;
+        else if (k == "port") c.port = atoi(v.c_str());
+        else if (k == "user") c.user = v;
+        else if (k == "password") c.password = v;
+        else if (k == "dbname") c.dbname = v;
+        // A key nobody asked for is ignored rather than fatal: libpq ignores
+        // them too, and a connection string carries settings for many tools.
     };
-    // crude url parse
     if (conninfo.find("://") != std::string::npos) {
-        size_t at = conninfo.rfind('@');
-        size_t slash = conninfo.find('/', conninfo.find("://") + 3);
-        std::string hostport = at == std::string::npos ? conninfo.substr(conninfo.find("://") + 3, slash == std::string::npos ? std::string::npos : slash - (conninfo.find("://") + 3)) : conninfo.substr(at + 1, slash == std::string::npos ? std::string::npos : slash - (at + 1));
-        size_t colon = std::string::npos;
-        for (size_t k = 0; k < hostport.size(); k++) if (hostport[k] == ':') { colon = k; break; }
-        if (colon != std::string::npos) { host = hostport.substr(0, colon); port = atoi(hostport.substr(colon + 1).c_str()); }
-        else host = hostport;
-        if (at != std::string::npos) {
-            std::string up = conninfo.substr(conninfo.find("://") + 3, at - (conninfo.find("://") + 3));
-            size_t uc = up.find(':');
-            user = uc == std::string::npos ? up : up.substr(0, uc);
-            if (uc != std::string::npos) password = up.substr(uc + 1);
+        size_t scheme = conninfo.find("://");
+        size_t after = scheme + 3;
+        size_t at = conninfo.rfind('@', conninfo.find('/', after) == std::string::npos
+                                               ? conninfo.size()
+                                               : conninfo.find('/', after));
+        if (at != std::string::npos && at >= after) {
+            std::string up = conninfo.substr(after, at - after);
+            size_t colon = up.find(':');
+            c.user = colon == std::string::npos ? up : up.substr(0, colon);
+            if (colon != std::string::npos) c.password = up.substr(colon + 1);
         }
-        if (slash != std::string::npos) dbname = conninfo.substr(slash + 1);
-    } else {
-        std::string rest = conninfo;
-        while (!rest.empty()) {
-            size_t sp = rest.find(' ');
-            std::string tok = rest.substr(0, sp == std::string::npos ? rest.size() : sp);
-            size_t eq = tok.find('=');
-            if (eq != std::string::npos) set(tok.substr(0, eq), tok.substr(eq + 1));
-            if (sp == std::string::npos) break;
-            rest = rest.substr(sp + 1);
+        size_t slash = conninfo.find('/', after);
+        std::string hostpart = conninfo.substr(after, (slash == std::string::npos ? conninfo.size() : slash) - after);
+        if (at != std::string::npos && at >= after) hostpart = conninfo.substr(at + 1, (slash == std::string::npos ? conninfo.size() : slash) - (at + 1));
+        size_t colon = hostpart.find(':');
+        if (colon != std::string::npos) {
+            c.host = hostpart.substr(0, colon);
+            c.port = atoi(hostpart.c_str() + colon + 1);
+        } else {
+            c.host = hostpart;
         }
+        if (slash != std::string::npos) c.dbname = conninfo.substr(slash + 1);
+        return c;
     }
-    (void)cfg;
+    std::string rest = conninfo;
+    while (!rest.empty()) {
+        size_t sp = rest.find(' ');
+        std::string tok = rest.substr(0, sp == std::string::npos ? rest.size() : sp);
+        size_t eq = tok.find('=');
+        if (eq != std::string::npos) set(tok.substr(0, eq), tok.substr(eq + 1));
+        if (sp == std::string::npos) break;
+        rest = rest.substr(sp + 1);
+    }
+    return c;
+}
+
+inline int pg_connect(std::string conninfo) {
+    PgConnInfo info = pg_parse_conninfo(conninfo);
+    std::string host = info.host, user = info.user, dbname = info.dbname, password = info.password;
+    int port = info.port;
     Pg c;
     c.fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a;
@@ -147,8 +171,6 @@ inline int pg_connect(std::string conninfo) {
             break;
         }
     }
-    printf("HardScript postgres connected\n");
-    fflush(stdout);
     return c.fd;
 }
 

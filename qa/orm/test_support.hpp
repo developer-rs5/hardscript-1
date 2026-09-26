@@ -6,6 +6,7 @@
 // program exits non-zero with the file, line, and both texts. The runner only
 // has to look at the exit status.
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -24,23 +25,70 @@ inline void fail(const char* file, int line, const std::string& what, const std:
 }
 
 /// A check that reports and keeps going, so one run shows every breakage.
-#define CHECK(cond, what)                                                 \
-    do {                                                                  \
-        qa::g_checks++;                                                   \
-        if (!(cond)) qa::fail(__FILE__, __LINE__, (what), #cond, "true"); \
+#define CHECK(qa_cond_, qa_what_)                                          \
+    do {                                                                   \
+        qa::g_checks++;                                                    \
+        if (!(qa_cond_))                                                   \
+            qa::fail(__FILE__, __LINE__, (qa_what_), #qa_cond_, "true");    \
     } while (0)
 
-#define CHECK_EQ(got, want, what)                                                     \
-    do {                                                                             \
-        qa::g_checks++;                                                               \
-        auto g_ = (got);                                                              \
-        auto w_ = (want);                                                             \
-        if (!(g_ == w_)) qa::fail(__FILE__, __LINE__, (what), qa::show(g_), qa::show(w_)); \
+#define CHECK_EQ(qa_got_, qa_want_, qa_what_)                                          \
+    do {                                                                              \
+        qa::g_checks++;                                                                \
+        auto g_ = (qa_got_);                                                           \
+        auto w_ = (qa_want_);                                                          \
+        if (!(g_ == w_))                                                               \
+            qa::fail(__FILE__, __LINE__, (qa_what_), qa::show(g_), qa::show(w_));      \
+    } while (0)
+
+/// A check that some code throws, and that what it says contains `needle`.
+///
+/// The message is half of what is being tested. An error that says "failed" is
+/// not a diagnostic: a person reading it learns nothing about which of ten
+/// things went wrong, and neither does the next person to read the log.
+#define CHECK_THROWS_MSG(qa_stmt_, qa_needle_, qa_what_)                                    \
+    do {                                                                                    \
+        qa::g_checks++;                                                                      \
+        std::string qa_msg_;                                                                 \
+        bool qa_threw_ = false;                                                              \
+        try {                                                                                \
+            qa_stmt_;                                                                        \
+        } catch (const std::exception& qa_err_) {                                           \
+            qa_threw_ = true;                                                                \
+            qa_msg_ = qa_err_.what();                                                        \
+        }                                                                                    \
+        if (!qa_threw_)                                                                      \
+            qa::fail(__FILE__, __LINE__, (qa_what_), "no error",                           \
+                     std::string(qa_needle_) + " in a message");                             \
+        else if (qa_msg_.find(qa_needle_) == std::string::npos)                              \
+            qa::fail(__FILE__, __LINE__, (qa_what_), qa::show(qa_msg_),                     \
+                     std::string("a message containing \"") + (qa_needle_) + "\"");        \
+    } while (0)
+
+/// A check that some code throws, whatever it says.
+#define CHECK_THROWS(qa_stmt_, qa_what_)                                           \
+    do {                                                                           \
+        qa::g_checks++;                                                            \
+        bool qa_threw_ = false;                                                    \
+        try {                                                                      \
+            qa_stmt_;                                                              \
+        } catch (const std::exception&) {                                         \
+            qa_threw_ = true;                                                      \
+        }                                                                          \
+        if (!qa_threw_)                                                            \
+            qa::fail(__FILE__, __LINE__, (qa_what_), "no error", "an error");      \
     } while (0)
 
 inline std::string show(const std::string& s) { return "\"" + s + "\""; }
 inline std::string show(const char* s) { return std::string("\"") + s + "\""; }
 inline std::string show(bool b) { return b ? "true" : "false"; }
+inline std::string show(double v) {
+    // Enough digits to tell two doubles apart in a failure message, which is
+    // the only job this has.
+    char b[40];
+    snprintf(b, sizeof b, "%.17g", v);
+    return b;
+}
 inline std::string show(int64_t v) { return std::to_string(v); }
 inline std::string show(size_t v) { return std::to_string(v); }
 inline std::string show(int v) { return std::to_string(v); }

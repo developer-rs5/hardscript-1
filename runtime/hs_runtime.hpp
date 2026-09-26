@@ -16,6 +16,7 @@
 //   hs_runtime_auth.hpp        JWT auth, route guard, password hashing (M5.2)
 //   hs_runtime_orm.hpp         model metadata, query builder, backend seam (M5.3)
 //   hs_runtime_sqlite.hpp      SQLite backend, libsqlite3 loaded at run time
+//   hs_runtime_pgsql.hpp       PostgreSQL backend, extended query protocol
 //   hs_runtime_util.hpp      CLI/args helpers + codegen glue (hs_respond, tests)
 //
 // The generated code calls into these helpers (see compiler/src/codegen.rs).
@@ -34,6 +35,7 @@
 #include "hs_runtime_auth.hpp"
 #include "hs_runtime_orm.hpp"
 #include "hs_runtime_sqlite.hpp"
+#include "hs_runtime_pgsql.hpp"
 #include "hs_runtime_util.hpp"
 
 #endif // HS_RUNTIME_HPP
