@@ -60,6 +60,12 @@ impl TomlValue {
             _ => None,
         }
     }
+    pub fn as_array_mut(&mut self) -> Option<&mut Vec<TomlValue>> {
+        match self {
+            TomlValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
 }
 
 /// A diagnostic with a source location and an optional suggestion.
@@ -85,6 +91,33 @@ impl TomlDoc {
     pub fn table(&self, key: &str) -> Option<&BTreeMap<String, TomlValue>> {
         self.get(key).and_then(TomlValue::as_table)
     }
+    /// The array of tables at `path`, e.g. `["registry", "mirror"]`.
+    ///
+    /// Arrays of tables are how a manifest lists repeated blocks:
+    /// `[[registry.mirror]] url = "..."`.
+    pub fn tables(&self, path: &[&str]) -> Vec<&BTreeMap<String, TomlValue>> {
+        let mut cur: Option<&TomlValue> = None;
+        for seg in path {
+            cur = match cur {
+                Some(v) => v.as_table().and_then(|t| t.get(*seg)),
+                None => self.get(seg),
+            };
+            if cur.is_none() {
+                return Vec::new();
+            }
+        }
+        cur.and_then(TomlValue::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_table())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+    /// The first table at `path`, if there is one.
+    pub fn first_table(&self, path: &[&str]) -> Option<&BTreeMap<String, TomlValue>> {
+        self.tables(path).into_iter().next()
+    }
 }
 
 /// Parse a TOML document. On error, returns every diagnostic found (the
@@ -97,6 +130,8 @@ pub fn parse(src: &str) -> Result<TomlDoc, Vec<TomlDiag>> {
         col: 1,
         root: BTreeMap::new(),
         cur_table: Vec::new(),
+        cur_array: None,
+        array_elem_started: false,
         diags: Vec::new(),
     };
     parser.parse_document();
@@ -116,6 +151,12 @@ struct Parser<'a> {
     col: usize,
     root: BTreeMap<String, TomlValue>,
     cur_table: Vec<String>,
+    /// The `[[a.b]]` path currently being filled, if any. Each header starts a
+    /// fresh element, which is what makes `[[registry.mirror]]` repeatable.
+    cur_array: Option<Vec<String>>,
+    /// Whether the current `[[a.b]]` element has been created. Each *header*
+    /// starts one element, not each key inside it.
+    array_elem_started: bool,
     diags: Vec<TomlDiag>,
 }
 
@@ -200,12 +241,32 @@ impl<'a> Parser<'a> {
         let start_line = self.line;
         let start_col = self.col;
         let mut segs: Vec<String> = Vec::new();
+        // `[[a.b]]` ends at the *second* bracket, so the first one must not be
+        // mistaken for the end of the header.
+        let mut closed_double = false;
         // The segment being accumulated; a '.' commits it and starts a new
         // one, a quoted segment replaces it wholesale.
         let mut seg = String::new();
         loop {
             self.skip_ws_comments();
             match self.peek() {
+                Some(']') if is_array && self.src[self.pos..].starts_with("]]") => {
+                    self.bump();
+                    self.bump();
+                    closed_double = true;
+                    break;
+                }
+                Some(']') if is_array => {
+                    // `[[a]` is a typo for `[[a]]`, and silently reading it as
+                    // an array-of-tables header would change the file's shape.
+                    self.err(
+                        "unterminated array-of-tables header",
+                        Some("close the header with ']]'"),
+                    );
+                    self.bump();
+                    closed_double = true;
+                    break;
+                }
                 Some(']') => break,
                 Some('"') => {
                     // A quoted segment may contain '.', which is what a
@@ -269,11 +330,20 @@ impl<'a> Parser<'a> {
                     }
                 }
                 None => {
-                    self.err("unterminated table header", Some("close the header with ']'"));
+                    self.err(
+                        "unterminated table header",
+                        Some(if is_array {
+                            "close the header with ']]'"
+                        } else {
+                            "close the header with ']'"
+                        }),
+                    );
                     if !seg.is_empty() {
                         segs.push(seg);
                     }
-                    self.cur_table = segs;
+                    self.cur_table = segs.clone();
+                    self.cur_array = if is_array { Some(segs) } else { None };
+                    self.array_elem_started = false;
                     return true;
                 }
             }
@@ -281,16 +351,54 @@ impl<'a> Parser<'a> {
         if !seg.is_empty() {
             segs.push(seg);
         }
-        self.bump();
+        if !closed_double {
+            self.bump();
+        }
         let _ = (start_line, start_col);
         if segs.is_empty() {
-            self.err("empty table header", Some("write a name, e.g. [compiler]"));
+            self.err(
+                "empty table header",
+                Some("write a name, e.g. [compiler]"),
+            );
         }
-        self.cur_table = segs;
-        if is_array {
-            self.cur_table.push("__arr__".to_string());
+        self.cur_table = segs.clone();
+        // `[[a.b]]` starts a *new* element of the array at a.b, even when no
+        // keys follow it.
+        self.cur_array = if is_array { Some(segs) } else { None };
+        self.array_elem_started = false;
+        if self.cur_array.is_some() {
+            self.open_array_element();
         }
         true
+    }
+
+    /// Create the array element the current `[[a.b]]` header names.
+    ///
+    /// A conflict (`[a.b]` earlier in the file) is left to `assign` to report,
+    /// so the user gets one diagnostic pointing at the key they wrote.
+    fn open_array_element(&mut self) {
+        let Some(path) = self.cur_array.clone() else {
+            return;
+        };
+        let Some((last, parents)) = path.split_last() else {
+            return;
+        };
+        let mut table = &mut self.root;
+        for seg in parents {
+            table = table
+                .entry(seg.clone())
+                .or_insert_with(|| TomlValue::Table(BTreeMap::new()))
+                .as_table_mut()
+                .unwrap();
+        }
+        let entry = table
+            .entry(last.clone())
+            .or_insert_with(|| TomlValue::Array(Vec::new()));
+        let Some(arr) = entry.as_array_mut() else {
+            return;
+        };
+        arr.push(TomlValue::Table(BTreeMap::new()));
+        self.array_elem_started = true;
     }
 
     fn parse_key_value(&mut self) {
@@ -384,12 +492,44 @@ impl<'a> Parser<'a> {
 
     fn assign(&mut self, key: &[String], value: TomlValue) {
         let mut table = &mut self.root;
-        for seg in self.cur_table.iter() {
-            table = table
-                .entry(seg.clone())
-                .or_insert_with(|| TomlValue::Table(BTreeMap::new()))
-                .as_table_mut()
-                .unwrap();
+        if let Some(path) = self.cur_array.clone() {
+            let Some((last, parents)) = path.split_last() else {
+                return;
+            };
+            for seg in parents {
+                table = table
+                    .entry(seg.clone())
+                    .or_insert_with(|| TomlValue::Table(BTreeMap::new()))
+                    .as_table_mut()
+                    .unwrap();
+            }
+            let entry = table
+                .entry(last.clone())
+                .or_insert_with(|| TomlValue::Array(Vec::new()));
+            if !matches!(entry, TomlValue::Array(_)) {
+                // e.g. `[registry.mirror]` followed by `[[registry.mirror]]`
+                self.err(
+                    &format!("'{last}' is already a table, not an array of tables"),
+                    Some("remove the single-bracket header, or move the other one"),
+                );
+                return;
+            }
+            let arr = entry.as_array_mut().unwrap();
+            let Some(elem) = arr.last_mut().and_then(|v| v.as_table_mut()) else {
+                return;
+            };
+            table = elem;
+        }
+        // Inside `[[a.b]]` the path above already landed in the new element, so
+        // walking `cur_table` again would nest the keys a second time.
+        if self.cur_array.is_none() {
+            for seg in self.cur_table.iter() {
+                table = table
+                    .entry(seg.clone())
+                    .or_insert_with(|| TomlValue::Table(BTreeMap::new()))
+                    .as_table_mut()
+                    .unwrap();
+            }
         }
         if key.is_empty() {
             return;
@@ -691,6 +831,46 @@ fn is_bare_key_char(c: char) -> bool {
 fn is_float_chars(text: &str) -> bool {
     text.contains('.')
 }
+
+    #[test]
+    fn arrays_of_tables_repeat() {
+        let src = "schema = 1\n\n[registry]\ndefault = \"https://a\"\n\n[[registry.mirror]]\nurl = \"https://b\"\npriority = 1\n\n[[registry.mirror]]\nurl = \"https://c\"\n";
+        let d = parse(src).unwrap();
+        assert_eq!(
+            d.table("registry").unwrap().get("default").unwrap().as_str(),
+            Some("https://a")
+        );
+        let mirrors = d.tables(&["registry", "mirror"]);
+        assert_eq!(mirrors.len(), 2);
+        assert_eq!(mirrors[0].get("url").unwrap().as_str(), Some("https://b"));
+        assert_eq!(mirrors[0].get("priority").unwrap().as_int(), Some(1));
+        assert_eq!(mirrors[1].get("url").unwrap().as_str(), Some("https://c"));
+        assert!(mirrors[1].get("priority").is_none(), "keys do not leak between elements");
+        assert_eq!(d.first_table(&["registry", "mirror"]).unwrap().get("url").unwrap().as_str(), Some("https://b"));
+    }
+
+    #[test]
+    fn a_table_and_an_array_of_tables_cannot_share_a_name() {
+        let err = parse("[registry.mirror]\nurl = \"x\"\n\n[[registry.mirror]]\nurl = \"y\"\n").unwrap_err();
+        assert!(err.iter().any(|d| d.message.contains("not an array of tables")), "{err:?}");
+    }
+
+    #[test]
+    fn a_missing_table_path_is_empty_not_an_error() {
+        let d = parse("x = 1\n").unwrap();
+        assert!(d.tables(&["registry", "mirror"]).is_empty());
+        assert!(d.first_table(&["nope"]).is_none());
+        assert!(d.tables(&["x", "y", "z"]).is_empty());
+    }
+
+    #[test]
+    fn an_unterminated_array_header_is_reported() {
+        let err = parse("[[registry.mirror]\nurl = \"x\"\n").unwrap_err();
+        assert!(!err.is_empty());
+        let err2 = parse("[[a.b]]\n").unwrap();
+        assert!(err2.tables(&["a", "b"]).len() == 1, "an empty element is still an element");
+    }
+
 #[cfg(test)]
 mod tests {
     use super::*;

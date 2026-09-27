@@ -374,7 +374,10 @@ pub fn search_cache(cache: &crate::cache::Cache, query: &SearchQuery) -> SearchR
     }
     let index = cache.root.join("index");
     let Ok(rd) = std::fs::read_dir(&index) else {
-        out.error = Some("the cache has no package index to search".to_string());
+        out.error = Some(
+            "the cache has no package index to search (run `hard install` or `hard registry sync` first)"
+                .to_string(),
+        );
         return out;
     };
     let mut candidates: Vec<SearchHit> = Vec::new();
@@ -569,13 +572,36 @@ pub fn search_with_fallback(
     cache: &crate::cache::Cache,
     query: &SearchQuery,
 ) -> SearchResults {
-    let live = search(registry, query);
+    fallback_to_cache(search(registry, query), cache, query)
+}
+
+/// Answer from the cache when a live search could not.
+///
+/// Shared with the mirror-aware path in [`crate::mirror`]: both produce the
+/// same degraded answer, whichever registry was being asked.
+pub fn fallback_to_cache(
+    live: SearchResults,
+    cache: &crate::cache::Cache,
+    query: &SearchQuery,
+) -> SearchResults {
     if live.error.is_none() {
         return live;
     }
     let cached = search_cache(cache, query);
-    if cached.error.is_some() {
-        // Nothing to answer with: the caller deserves the real error.
+    if let Some(cache_error) = &cached.error {
+        // The registry was never even contacted (offline mode), so telling the
+        // user the registry is disabled is a dead end: what they can act on is
+        // the empty cache.
+        if live
+            .error
+            .as_deref()
+            .map(|e| e.contains("offline"))
+            .unwrap_or(false)
+        {
+            return cached;
+        }
+        // Otherwise the transport error is the real one.
+        let _ = cache_error;
         return live;
     }
     // The cache was searched, so an empty answer is an answer: "not in the
@@ -907,6 +933,27 @@ mod tests {
         assert_eq!(r.hits[0].downloads, 9);
         assert!(r.summary().contains("answered from the cache"), "{}", r.summary());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_offline_search_with_no_cache_blames_the_cache() {
+        let dir = std::env::temp_dir().join(format!("hard-search-offline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = crate::cache::Cache::at(dir.clone());
+        let registry = Registry::new(RegistryConfig::local("http://127.0.0.1:1"));
+        let mut cfg_offline = RegistryConfig::local("http://127.0.0.1:1");
+        cfg_offline.offline = true;
+        let offline_registry = Registry::new(cfg_offline);
+        let r = search_with_fallback(&offline_registry, &cache, &SearchQuery::new("jwt"));
+        assert!(r.error.is_some());
+        assert!(
+            r.error.unwrap().contains("no package index"),
+            "the message must point at the cache, not at the disabled registry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // an online registry that is simply unreachable keeps its own error
+        let r2 = search_with_fallback(&registry, &cache, &SearchQuery::new("jwt"));
+        assert!(r2.error.unwrap().contains("127.0.0.1"));
     }
 
     #[test]

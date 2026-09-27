@@ -21,7 +21,7 @@
 //!   benchmarks and the cache hit-rate report are computed from.
 
 use crate::cache::Cache;
-use crate::registry::{HttpResponse, Method, Registry};
+use crate::registry::{HttpResponse, Method, Registry, RegistryConfig};
 use crate::semver::Version;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -210,6 +210,10 @@ pub struct Downloader {
     pub registry: Registry,
     pub cache: Cache,
     pub config: DownloadConfig,
+    /// Mirrors to fall back to, in priority order. A download that fails to
+    /// *reach* the default registry is retried here; a 404 is not, because a
+    /// mirror would answer the same.
+    pub mirrors: Vec<RegistryConfig>,
 }
 
 impl Downloader {
@@ -218,7 +222,14 @@ impl Downloader {
             registry,
             cache,
             config,
+            mirrors: Vec::new(),
         }
+    }
+
+    /// A downloader that falls back to `mirrors`.
+    pub fn with_mirrors(mut self, mirrors: Vec<RegistryConfig>) -> Downloader {
+        self.mirrors = mirrors.into_iter().filter(|m| m.url != self.registry.config.url).collect();
+        self
     }
 
     /// One package. Returns where the bytes came from.
@@ -330,16 +341,42 @@ impl Downloader {
             crate::publish::urlencode(name),
             version
         );
-        let resp = self
-            .registry
-            .request(
+        // Default first, then each mirror. Only transport failures and 5xx
+        // move on: a 404 means this version is not published anywhere, and
+        // asking every mirror would just multiply the latency of that answer.
+        let mut last: Option<String> = None;
+        let mut resp: Option<HttpResponse> = None;
+        let mut tried = 0usize;
+        for config in std::iter::once(self.registry.config.clone())
+            .chain(self.mirrors.iter().cloned())
+        {
+            tried += 1;
+            match Registry::new(config.clone()).request(
                 Method::Get,
                 &path,
                 Vec::new(),
                 &headers,
                 None,
-            )
-            .map_err(|e| DownloadError::new(format!("cannot download {name}@{version}: {e}")))?;
+            ) {
+                Ok(r) if (200..=299).contains(&r.status) || r.status == 206 => {
+                    resp = Some(r);
+                    break;
+                }
+                Ok(r) if r.status == 404 || (400..500).contains(&r.status) => {
+                    last = Some(format!("{} returned HTTP {}", config.url, r.status));
+                    break;
+                }
+                Ok(r) => last = Some(format!("{} returned HTTP {}", config.url, r.status)),
+                Err(e) => last = Some(format!("{}: {}", config.url, e.message)),
+            }
+        }
+        let _ = tried;
+        let resp = resp.ok_or_else(|| {
+            DownloadError::new(format!(
+                "cannot download {name}@{version}: {}",
+                last.unwrap_or_else(|| "no registry answered".to_string())
+            ))
+        })?;
 
         if have > 0 && resp.status == 206 {
             // the server honoured the range: keep what we already have

@@ -199,12 +199,25 @@ impl Router {
     }
 
     fn health(&self) -> Response {
-        let ok = self.app.store.stats().is_ok();
+        let stats = self.app.store.stats();
+        let ok = stats.is_ok();
+        // A mirror client needs to know what it is talking to before it syncs
+        // anything: whether the registry holds anything yet, which change
+        // sequence it is on, and whether it signs with the reproducible test
+        // key that anybody can regenerate.
+        let (packages, seq) = match &stats {
+            Ok(st) => (st.packages as i64, self.app.seq().unwrap_or(0)),
+            Err(_) => (0, 0),
+        };
         let j = Json::obj(vec![
             ("status", Json::str(if ok { "ok" } else { "degraded" })),
             ("backend", Json::str(self.app.store.backend())),
             ("version", Json::str(App::version())),
             ("at", Json::num(now_secs())),
+            ("packages", Json::num(packages)),
+            ("seq", Json::num(seq)),
+            ("key_id", Json::str(self.app.key.key_id())),
+            ("test_key", Json::Bool(self.app.key.is_test_key())),
         ]);
         Response::json(if ok { 200 } else { 503 }, &j)
     }

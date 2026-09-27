@@ -39,7 +39,12 @@ pub struct Manifest {
     pub description: Option<String>,
     pub authors: Vec<String>,
     pub license: Option<String>,
+    /// The legacy `registry = "url"` form. Kept because manifests written
+    /// before mirrors existed use it, and because a project with no mirrors
+    /// should keep writing the short form.
     pub registry: Option<String>,
+    /// The `[registry]` table: a default plus ordered mirrors.
+    pub registries: RegistrySettings,
     pub compiler: CompilerConfig,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -47,6 +52,121 @@ pub struct Manifest {
     pub dependencies: BTreeMap<String, String>,
     pub dev_dependencies: BTreeMap<String, String>,
     pub workspace: Vec<String>,
+}
+
+/// The `[registry]` table: which registry to use, and which mirrors to fall
+/// back to.
+///
+/// ```toml
+/// [registry]
+/// default = "https://registry.hardscript.org"
+///
+/// [[registry.mirror]]
+/// url = "https://registry.eu.hardscript.org"
+/// priority = 1
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RegistrySettings {
+    /// Overrides the built-in default registry.
+    pub default: Option<String>,
+    /// Mirrors in priority order: lower `priority` is tried first.
+    pub mirrors: Vec<MirrorSettings>,
+}
+
+/// One `[[registry.mirror]]` entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorSettings {
+    pub url: String,
+    /// Lower is preferred. Mirrors without one keep their listed order.
+    pub priority: Option<i64>,
+    /// An optional label, purely for `hard registry list`.
+    pub name: Option<String>,
+    /// Skip this mirror entirely.
+    pub disabled: bool,
+}
+
+impl RegistrySettings {
+    /// Read the table, tolerating the legacy top-level `registry` string.
+    pub fn parse(
+        doc: &crate::toml::TomlDoc,
+        legacy: Option<&str>,
+        errors: &mut Vec<ManifestError>,
+    ) -> RegistrySettings {
+        let mut out = RegistrySettings {
+            default: doc
+                .table("registry")
+                .and_then(|t| t.get("default"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| legacy.map(String::from)),
+            mirrors: Vec::new(),
+        };
+        for (i, t) in doc.tables(&["registry", "mirror"]).iter().enumerate() {
+            let Some(url) = t.get("url").and_then(|v| v.as_str()) else {
+                errors.push(manifest_err(
+                    "registry.mirror",
+                    "each [[registry.mirror]] needs a url",
+                ));
+                continue;
+            };
+            let url = url.trim().trim_end_matches('/').to_string();
+            if url.is_empty() {
+                errors.push(manifest_err("registry.mirror", "a mirror url cannot be empty"));
+                continue;
+            }
+            if out.mirrors.iter().any(|m| m.url == url) {
+                // A repeated mirror is a copy-paste slip, not a second copy.
+                continue;
+            }
+            out.mirrors.push(MirrorSettings {
+                url,
+                priority: t.get("priority").and_then(|v| v.as_int()),
+                name: t.get("name").and_then(|v| v.as_str()).map(String::from),
+                disabled: matches!(t.get("disabled"), Some(TomlValue::Bool(true))),
+            });
+            let _ = i;
+        }
+        out.sort_by_priority();
+        out
+    }
+
+    /// Sort mirrors by priority, keeping the listed order for ties.
+    pub fn sort_by_priority(&mut self) {
+        // A stable sort keeps `[[a]]` before `[[b]]` when neither has a
+        // priority, which is the order the author wrote them in.
+        self.mirrors.sort_by_key(|m| m.priority.unwrap_or(i64::MAX));
+    }
+
+    /// Is anything configured at all?
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.mirrors.is_empty()
+    }
+
+    /// The renderable form: mirrors as `[[registry.mirror]]` blocks.
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        if self.is_empty() {
+            return s;
+        }
+        s.push_str("\n[registry]\n");
+        if let Some(d) = &self.default {
+            s.push_str(&format!("default = {}\n", toml_quote(d)));
+        }
+        for m in &self.mirrors {
+            s.push_str("\n[[registry.mirror]]\n");
+            s.push_str(&format!("url = {}\n", toml_quote(&m.url)));
+            if let Some(p) = m.priority {
+                s.push_str(&format!("priority = {p}\n"));
+            }
+            if let Some(n) = &m.name {
+                s.push_str(&format!("name = {}\n", toml_quote(n)));
+            }
+            if m.disabled {
+                s.push_str("disabled = true\n");
+            }
+        }
+        s
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +305,7 @@ pub fn parse(src: &str, mode: ManifestMode) -> Result<ParseResult, Vec<ManifestE
     res.manifest.description = get_str(&doc, "description");
     res.manifest.license = get_str(&doc, "license");
     res.manifest.registry = get_str(&doc, "registry");
+    res.manifest.registries = RegistrySettings::parse(&doc, res.manifest.registry.as_deref(), &mut errors);
 
     if let Some(v) = doc.get("authors") {
         match v {
@@ -592,15 +713,21 @@ impl Manifest {
         if let Some(l) = &self.license {
             s.push_str(&format!("license = {}\n", toml_quote(l)));
         }
-        if let Some(r) = &self.registry {
-            s.push_str(&format!("registry = {}\n", toml_quote(r)));
+        // A manifest with mirrors needs the table form; a manifest without
+        // them keeps the one-line form so old files round-trip unchanged.
+        if self.registries.mirrors.is_empty() {
+            if let Some(r) = &self.registry {
+                s.push_str(&format!("registry = {}\n", toml_quote(r)));
+            }
         }
         if !self.workspace.is_empty() {
             let members: Vec<String> = self.workspace.iter().map(|m| toml_quote(m)).collect();
             s.push_str(&format!("workspace = [{}]\n", members.join(", ")));
         }
         s.push('\n');
-
+        // A table has to come after every top-level key, or the keys that
+        // follow it would belong to the table instead of the document.
+        s.push_str(&self.registries.render());
         s.push_str("[compiler]\n");
         s.push_str(&format!("opt = {}\n", self.compiler.opt));
         s.push_str(&format!("warnings = {}\n", self.compiler.warnings));
@@ -960,5 +1087,118 @@ publish-as = "stable"
         assert_eq!(base.dependencies.len(), 2);
         // merge_dependencies merges only [dependencies], not dev-dependencies
         assert!(base.dev_dependencies.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    fn parse(src: &str) -> (Manifest, Vec<ManifestError>) {
+        match super::parse(src, ManifestMode::Strict) {
+            Ok(r) => (r.manifest, Vec::new()),
+            Err(e) => (Manifest::default(), e),
+        }
+    }
+
+    #[test]
+    fn mirrors_are_read_in_priority_order() {
+        let (m, errs) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[registry]\ndefault = \"https://primary\"\n\n[[registry.mirror]]\nurl = \"https://slow/\"\npriority = 5\n\n[[registry.mirror]]\nurl = \"https://fast\"\npriority = 1\n",
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(m.registries.default.as_deref(), Some("https://primary"));
+        assert_eq!(m.registries.mirrors.len(), 2);
+        assert_eq!(m.registries.mirrors[0].url, "https://fast");
+        assert_eq!(m.registries.mirrors[1].url, "https://slow", "a trailing slash is trimmed");
+    }
+
+    #[test]
+    fn mirrors_without_a_priority_keep_their_written_order() {
+        let (m, _) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[[registry.mirror]]\nurl = \"https://a\"\n\n[[registry.mirror]]\nurl = \"https://b\"\n",
+        );
+        assert_eq!(m.registries.mirrors[0].url, "https://a");
+        assert_eq!(m.registries.mirrors[1].url, "https://b");
+    }
+
+    #[test]
+    fn a_priority_sorts_before_unprioritised_mirrors() {
+        let (m, _) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[[registry.mirror]]\nurl = \"https://plain\"\n\n[[registry.mirror]]\nurl = \"https://pinned\"\npriority = 0\n",
+        );
+        assert_eq!(m.registries.mirrors[0].url, "https://pinned");
+        assert_eq!(m.registries.mirrors[1].url, "https://plain");
+    }
+
+    #[test]
+    fn a_mirror_needs_a_url() {
+        let (_, errs) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[[registry.mirror]]\npriority = 1\n",
+        );
+        assert!(errs.iter().any(|e| e.message.contains("needs a url")), "{errs:?}");
+    }
+
+    #[test]
+    fn an_empty_mirror_url_is_rejected() {
+        let (_, errs) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[[registry.mirror]]\nurl = \"  \"\n",
+        );
+        assert!(!errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn a_repeated_mirror_is_recorded_once() {
+        let (m, errs) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[[registry.mirror]]\nurl = \"https://a\"\n\n[[registry.mirror]]\nurl = \"https://a/\"\n",
+        );
+        assert!(errs.is_empty());
+        assert_eq!(m.registries.mirrors.len(), 1);
+    }
+
+    #[test]
+    fn a_disabled_mirror_is_kept_but_marked() {
+        let (m, _) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[[registry.mirror]]\nurl = \"https://a\"\ndisabled = true\n",
+        );
+        assert!(m.registries.mirrors[0].disabled);
+    }
+
+    #[test]
+    fn the_legacy_registry_string_still_works() {
+        let (m, errs) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\nregistry = \"https://legacy\"\n",
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(m.registry.as_deref(), Some("https://legacy"));
+        assert_eq!(m.registries.default.as_deref(), Some("https://legacy"));
+        assert!(m.registries.mirrors.is_empty());
+        assert!(m.render().contains("registry = \"https://legacy\""), "{}", m.render());
+    }
+
+    #[test]
+    fn the_table_form_and_mirrors_round_trip() {
+        let (m, _) = parse(
+            "schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n\n[registry]\ndefault = \"https://primary\"\n\n[[registry.mirror]]\nurl = \"https://eu\"\npriority = 2\nname = \"europe\"\n",
+        );
+        let text = m.render();
+        assert!(text.contains("[registry]"), "{text}");
+        assert!(text.contains("default = \"https://primary\""), "{text}");
+        assert!(text.contains("[[registry.mirror]]"), "{text}");
+        assert!(text.contains("url = \"https://eu\""), "{text}");
+        assert!(text.contains("priority = 2"), "{text}");
+        assert!(text.contains("name = \"europe\""), "{text}");
+        assert!(!text.contains("\nregistry = "), "the legacy form must not clash: {text}");
+        let (back, errs) = parse(&text);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(back.registries, m.registries);
+    }
+
+    #[test]
+    fn a_manifest_with_no_registry_section_is_untouched() {
+        let (m, _) = parse("schema = 1\nname = \"app\"\nversion = \"1.0.0\"\n");
+        assert!(m.registries.is_empty());
+        assert!(m.registries.render().is_empty());
+        assert!(!m.render().contains("[registry]"));
     }
 }

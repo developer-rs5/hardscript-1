@@ -193,6 +193,11 @@ pub struct SearchResult {
 #[derive(Clone, Debug)]
 pub struct RegistryError {
     pub message: String,
+    /// The HTTP status, when the failure was a response rather than a
+    /// transport error. Callers use it to tell "no such package" (404) from
+    /// "this host is unwell" (5xx), which decides whether a mirror is worth
+    /// asking next.
+    pub status: Option<u16>,
 }
 
 impl RegistryError {
@@ -202,9 +207,18 @@ impl RegistryError {
         RegistryError::new(message)
     }
 
+    /// The same error, tagged with the status that produced it.
+    pub fn with_status(message: impl Into<String>, status: u16) -> RegistryError {
+        RegistryError {
+            message: message.into(),
+            status: Some(status),
+        }
+    }
+
     fn new(message: impl Into<String>) -> RegistryError {
         RegistryError {
             message: message.into(),
+            status: None,
         }
     }
 }
@@ -457,6 +471,19 @@ fn curl_request(
                 .unwrap_or(0);
             let body = std::fs::read(&body_file).unwrap_or_default();
             let _ = std::fs::remove_file(&body_file);
+            if code == 0 {
+                // curl could not complete the exchange (DNS, connect, TLS,
+                // timeout) and wrote 000. There is no HTTP response here, so
+                // reporting `Ok` with status 0 would look like a reply to every
+                // caller and, worse, would hide the failure from mirror
+                // fallback, which only triggers on an error.
+                let detail = String::from_utf8_lossy(&prog.stderr).trim().to_string();
+                return Some(Err(RegistryError::new(if detail.is_empty() {
+                    format!("no response from {}", req.url)
+                } else {
+                    detail
+                })));
+            }
             Some(Ok(HttpResponse {
                 status: code,
                 body,
@@ -650,10 +677,10 @@ impl Registry {
 
     fn parse_json(&self, resp: &HttpResponse, what: &str) -> Result<hs_compiler::json::Json, RegistryError> {
         if !(200..=299).contains(&resp.status) {
-            return Err(RegistryError::new(format!(
-                "{what}: registry returned HTTP {}",
-                resp.status
-            )));
+            return Err(RegistryError::with_status(
+                format!("{what}: registry returned HTTP {}", resp.status),
+                resp.status,
+            ));
         }
         let text = String::from_utf8_lossy(&resp.body);
         hs_compiler::json::parse(&text).ok_or_else(|| {

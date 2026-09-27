@@ -156,6 +156,7 @@ fn main() {
         "whoami" => cmd_whoami(rest),
         "token" => cmd_token(rest),
         "verify" => cmd_verify(rest),
+        "registry" => cmd_registry(rest),
         "keys" => cmd_keys(rest),
         "remove" | "rm" => cmd_remove(rest),
         "install" => cmd_install(rest),
@@ -1368,6 +1369,251 @@ fn cmd_yank(args: &[String]) {
 }
 
 /// The value of `--name <value>` or `--name=<value>`.
+/// `hard registry <list|add|remove|health|sync|mirror>` — mirrors and syncing.
+fn cmd_registry(args: &[String]) {
+    use hs_pm::mirror::{self, MirrorSet, SyncState};
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+    let project_root = PathBuf::from(".");
+    let (mut manifest, _) = load_manifest_or_default(&project_root);
+    let mut settings = manifest.registries.clone();
+    let json_out = rest.iter().any(|a| a == "--json");
+    let offline = rest.iter().any(|a| a == "--offline" || a == "-o");
+
+    match sub {
+        "list" => {
+            let set = MirrorSet::from_settings(&settings, offline);
+            if json_out {
+                let items: Vec<hs_compiler::json::Json> = set
+                    .configs()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        hs_compiler::json::Json::obj(vec![
+                            ("url", hs_compiler::json::Json::str(&c.url)),
+                            (
+                                "role",
+                                hs_compiler::json::Json::str(if i == 0 { "default" } else { "mirror" }),
+                            ),
+                            ("offline", hs_compiler::json::Json::Bool(c.offline)),
+                        ])
+                    })
+                    .collect();
+                let j = hs_compiler::json::Json::obj(vec![
+                    (
+                        "default",
+                        hs_compiler::json::Json::str(set.primary().url.clone()),
+                    ),
+                    ("mirrors", hs_compiler::json::Json::num(set.mirror_count() as i64)),
+                    ("registries", hs_compiler::json::Json::arr(items)),
+                ]);
+                println!("{}", j.to_string());
+                return;
+            }
+            if settings.is_empty() && set.primary().url == hs_pm::registry::DEFAULT_REGISTRY {
+                println!("no [registry] section in hard.toml; using the built-in default");
+                println!("  default  {}", set.primary().url);
+            } else {
+                println!("  default  {}", set.primary().url);
+            }
+            for m in &settings.mirrors {
+                println!(
+                    "  mirror   {}{}{}",
+                    m.url,
+                    m.priority.map(|p| format!("  (priority {p})")).unwrap_or_default(),
+                    if m.disabled { "  [disabled]" } else { "" }
+                );
+            }
+            if settings.mirrors.is_empty() {
+                println!("\nno mirrors configured; add one with: hard registry add <url>");
+            }
+        }
+        "add" => {
+            let Some(url) = rest.iter().find(|a| !a.starts_with('-')) else {
+                eprintln!("hard registry add: missing a url");
+                std::process::exit(2);
+            };
+            let url = url.trim().trim_end_matches('/').to_string();
+            if url.is_empty() || !url.starts_with("http") {
+                die(&format!("'{url}' is not a registry url"));
+            }
+            if settings.mirrors.iter().any(|m| m.url == url) {
+                println!("{url} is already a mirror");
+                return;
+            }
+            let priority = flag_value(&rest, "--priority").and_then(|p| p.parse().ok());
+            settings.mirrors.push(hs_pm::manifest::MirrorSettings {
+                url: url.clone(),
+                priority,
+                name: flag_value(&rest, "--name"),
+                disabled: false,
+            });
+            settings.sort_by_priority();
+            manifest.registries = settings;
+            write(&project_root.join("hard.toml"), &manifest.render());
+            println!("added mirror {url}");
+        }
+        "remove" | "rm" => {
+            let Some(url) = rest.iter().find(|a| !a.starts_with('-')) else {
+                eprintln!("hard registry remove: missing a url");
+                std::process::exit(2);
+            };
+            let before = settings.mirrors.len();
+            settings.mirrors.retain(|m| m.url != url.trim_end_matches('/'));
+            if settings.mirrors.len() == before {
+                die(&format!("{url} is not a configured mirror"));
+            }
+            manifest.registries = settings;
+            write(&project_root.join("hard.toml"), &manifest.render());
+            println!("removed mirror {url}");
+        }
+        "health" => {
+            let set = MirrorSet::from_settings(&settings, offline);
+            let reports = mirror::probe_all(&set);
+            if json_out {
+                let items: Vec<hs_compiler::json::Json> = reports
+                    .iter()
+                    .map(|h| {
+                        hs_compiler::json::Json::obj(vec![
+                            ("url", hs_compiler::json::Json::str(&h.url)),
+                            ("reachable", hs_compiler::json::Json::Bool(h.reachable)),
+                            ("latency_ms", hs_compiler::json::Json::num(h.latency_ms as i64)),
+                            ("seq", hs_compiler::json::Json::num(h.seq)),
+                            (
+                                "packages",
+                                hs_compiler::json::Json::num(h.packages.unwrap_or(0)),
+                            ),
+                            ("test_key", hs_compiler::json::Json::Bool(h.test_key)),
+                            (
+                                "error",
+                                hs_compiler::json::Json::str(h.error.clone().unwrap_or_default()),
+                            ),
+                        ])
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    hs_compiler::json::Json::arr(items).to_string()
+                );
+            } else {
+                for h in &reports {
+                    println!("{}", h.render());
+                }
+            }
+            if reports.iter().all(|h| !h.reachable) {
+                std::process::exit(1);
+            }
+        }
+        "sync" => {
+            let set = MirrorSet::from_settings(&settings, offline);
+            let cache = Cache::new();
+            let path = SyncState::path();
+            let mut state = SyncState::load(&path);
+            let full = rest.iter().any(|a| a == "--full") || state.seq.is_empty();
+            // A mirror that is down is a warning, not a failure: the point of a
+            // sync is to refresh the cache, and the default registry doing that
+            // is a success. Failing only when nothing could be reached keeps
+            // the exit code meaningful in a cron job.
+            let configs = set.configs();
+            let primary = configs[0].url.clone();
+            let mut ok_count = 0usize;
+            let mut primary_failed = false;
+            for config in &configs {
+                let report = mirror::sync(config, &cache, &mut state, full);
+                if report.ok() {
+                    ok_count += 1;
+                    println!("{}", report.render());
+                } else if config.url == primary {
+                    primary_failed = true;
+                    eprintln!("{}", report.render());
+                } else {
+                    eprintln!("warning: mirror {} did not sync: {}", config.url, report.error.clone().unwrap_or_default());
+                }
+            }
+            if let Err(e) = state.save(&path) {
+                eprintln!("warning: {e}");
+            } else {
+                println!("sync state -> {}", path.display());
+            }
+            if primary_failed || ok_count == 0 {
+                std::process::exit(1);
+            }
+        }
+        "mirror" => {
+            let action = rest.first().map(String::as_str).unwrap_or("");
+            let set = MirrorSet::from_settings(&settings, offline);
+            match action {
+                "verify" => {
+                    let target = rest
+                        .iter()
+                        .skip(1)
+                        .find(|a| !a.starts_with('-'))
+                        .cloned()
+                        .or_else(|| flag_value(&rest, "--url"));
+                    let Some(target) = target else {
+                        eprintln!("hard registry mirror verify: missing a mirror url");
+                        eprintln!("usage: hard registry mirror verify <url>");
+                        std::process::exit(2);
+                    };
+                    let mirror_cfg = hs_pm::registry::RegistryConfig::local(&target);
+                    let verifier = hs_pm::verify::Verifier::new(verify_policy(&rest).unwrap_or_default());
+                    let limit = flag_value(&rest, "--limit")
+                        .and_then(|l| l.parse::<usize>().ok())
+                        .unwrap_or(200);
+                    let check = mirror::verify_mirror(
+                        &set.primary(),
+                        &mirror_cfg,
+                        &verifier,
+                        limit,
+                    );
+                    if json_out {
+                        let j = hs_compiler::json::Json::obj(vec![
+                            ("mirror", hs_compiler::json::Json::str(&check.mirror)),
+                            ("clean", hs_compiler::json::Json::Bool(check.is_clean())),
+                            ("checked", hs_compiler::json::Json::num(check.checked as i64)),
+                            ("verified", hs_compiler::json::Json::num(check.verified as i64)),
+                            (
+                                "missing",
+                                hs_compiler::json::Json::arr(
+                                    check.missing.iter().map(hs_compiler::json::Json::str).collect(),
+                                ),
+                            ),
+                            (
+                                "divergent",
+                                hs_compiler::json::Json::arr(
+                                    check.divergent.iter().map(hs_compiler::json::Json::str).collect(),
+                                ),
+                            ),
+                            (
+                                "unverified",
+                                hs_compiler::json::Json::arr(
+                                    check.unverified.iter().map(hs_compiler::json::Json::str).collect(),
+                                ),
+                            ),
+                        ]);
+                        println!("{}", j.to_string());
+                    } else {
+                        println!("{}", check.render());
+                    }
+                    if !check.is_clean() {
+                        std::process::exit(1);
+                    }
+                }
+                other => {
+                    eprintln!("hard registry mirror: unknown action '{other}'");
+                    eprintln!("usage: hard registry mirror verify <url>");
+                    std::process::exit(2);
+                }
+            }
+        }
+        other => {
+            eprintln!("hard registry: unknown subcommand '{other}'");
+            eprintln!("usage: hard registry <list|add|remove|health|sync|mirror verify>");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// `hard verify <target>` — check a package's signature.
 ///
 /// The target is either a local `.hspkg` file (verified against its `.sig`
@@ -1382,7 +1628,7 @@ fn cmd_verify(args: &[String]) {
     let json_out = args.iter().any(|a| a == "--json");
     let policy = verify_policy(args).unwrap_or_default();
     let verifier = hs_pm::verify::Verifier::with_store(policy, verify::TrustStore::load_default());
-    let registry = Registry::new(RegistryConfig::resolve(flag_value(args, "--registry").as_deref(), false));
+    let mut set = registry_set(args, false);
 
     // A path on disk is verified offline against its sidecar.
     let as_path = PathBuf::from(target);
@@ -1396,7 +1642,7 @@ fn cmd_verify(args: &[String]) {
         let version = match version {
             Some(v) => v,
             None => {
-                let meta = match registry.metadata(&name) {
+                let meta = match set.metadata(&name) {
                     Ok(m) => m,
                     Err(e) => die(&format!("cannot read metadata for '{name}': {e}")),
                 };
@@ -1408,7 +1654,21 @@ fn cmd_verify(args: &[String]) {
                     .unwrap_or_else(|| die(&format!("'{name}' has no published versions")))
             }
         };
-        (verifier.verify_remote(&registry, &name, &version), None)
+        (
+            match set.signature(&name, &version) {
+                Ok(rec) => verifier.verify(&rec),
+                Err(e) => verify::Outcome {
+                    name: name.clone(),
+                    version: version.clone(),
+                    status: verify::Status::Unsigned,
+                    key_id: String::new(),
+                    integrity: String::new(),
+                    payload_hash: String::new(),
+                    detail: format!("no signature available: {e}"),
+                },
+            },
+            None,
+        )
     };
 
     if let Some(p) = flag_value(args, "--write-sidecar") {
@@ -1778,12 +2038,13 @@ fn cmd_search(args: &[String]) {
         eprintln!("usage: hard search <text> [--tag <t>] [--limit <n>] [--offset <n>]");
         std::process::exit(2);
     }
-    let registry = Registry::new(RegistryConfig::resolve(
-        flag_value(args, "--registry").as_deref(),
-        offline,
-    ));
+    // The same registry set an install would use: the manifest's default plus
+    // its mirrors, so a search cannot succeed against a host that a build could
+    // not resolve against (or the other way round).
+    let mut set = registry_set(args, offline);
     let cache = Cache::new();
-    let results = hs_pm::search::search_with_fallback(&registry, &cache, &query);
+    let results = hs_pm::mirror::search_with_fallback(&mut set, &cache, &query);
+    let served_by = set.served_by().map(String::from);
     if let Some(e) = &results.error {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -1844,6 +2105,12 @@ fn cmd_search(args: &[String]) {
         return;
     }
     print!("{}", hs_pm::search::render_table(&results));
+    if let Some(url) = served_by {
+        let note = set.provenance();
+        if !note.is_empty() {
+            println!("{note} ({url})");
+        }
+    }
     if args.iter().any(|a| a == "--explain") {
         for h in &results.hits {
             println!("  {} score {}", h.name, h.score);
@@ -1924,16 +2191,34 @@ fn cmd_cache(args: &[String]) {
             }
         }
         "verify" => {
+            // `--repair` deletes what does not verify. A corrupt archive is
+            // worse than a missing one — it would install bytes nobody can
+            // account for — so repair is a removal, and the next install
+            // fetches and re-verifies from the registry.
+            let repair = args.iter().any(|a| a == "--repair");
             let cache = Cache::new();
             let bad = cache.verify_all();
             if bad.is_empty() {
                 println!("cache ok ({} packages verified)", count_packages(&cache));
-            } else {
-                for e in &bad {
-                    eprintln!("corrupt: {e}");
-                }
-                std::process::exit(1);
+                return;
             }
+            for e in &bad {
+                eprintln!("corrupt: {e}");
+            }
+            if repair {
+                match hs_pm::mirror::repair_cache(&cache) {
+                    Ok(fixed) => {
+                        println!("repaired {} corrupt entry/entries", fixed.len());
+                        for f in &fixed {
+                            println!("  removed {}@{} ({})", f.name, f.version, f.reason);
+                        }
+                        return;
+                    }
+                    Err(e) => die(&format!("cannot repair the cache: {e}")),
+                }
+            }
+            eprintln!("run `hard cache verify --repair` to remove these");
+            std::process::exit(1);
         }
         "clean" => {
             let cache = Cache::new();
@@ -2031,6 +2316,28 @@ fn load_manifest_or_default(project_root: &Path) -> (Manifest, bool) {
     }
 }
 
+/// The registry set for a command: the manifest's `[registry]` table (default
+/// plus mirrors), `--registry` overriding the default, and the environment as
+/// the last word.
+fn registry_set(args: &[String], offline: bool) -> hs_pm::mirror::MirrorSet {
+    let (manifest, _) = load_manifest_or_default(&PathBuf::from("."));
+    let set = hs_pm::mirror::MirrorSet::from_manifest(Some(&manifest), offline);
+    if let Some(url) = flag_value(args, "--registry") {
+        // An explicit --registry replaces the default but keeps the mirrors:
+        // a script that points at a local registry still wants the fallback
+        // chain from the manifest.
+        let mut single = hs_pm::mirror::MirrorSet::single(RegistryConfig::local(&url));
+        single.add_mirrors(
+            set.configs()
+                .into_iter()
+                .skip(1)
+                .collect(),
+        );
+        return single;
+    }
+    set
+}
+
 /// The signature policy for a command: `--verify=<mode>`, else `HARD_VERIFY`.
 ///
 /// A bad value is fatal. Someone who typed `--verify=strict` must never end up
@@ -2059,6 +2366,14 @@ fn base_config_for(manifest: Manifest, project_root: PathBuf, args: &[String]) -
         verify_policy(args),
     );
     cfg.offline = args.iter().any(|a| a == "--offline" || a == "-o");
+    // Mirrors come from the manifest's `[registry]` table, minus the default
+    // (which is already the primary) and any that are switched off.
+    let set = hs_pm::mirror::MirrorSet::from_manifest(Some(&cfg.manifest), cfg.offline);
+    cfg.mirrors = set
+        .configs()
+        .into_iter()
+        .skip(1)
+        .collect();
     cfg
 }
 

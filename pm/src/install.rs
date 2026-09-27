@@ -34,6 +34,9 @@ pub struct InstallConfig {
     pub update: bool,
     /// How many packages may download at once.
     pub parallel: usize,
+    /// Mirrors to fall back to, in priority order. Empty means "the default
+    /// registry only", which is what a manifest without `[registry]` gets.
+    pub mirrors: Vec<crate::registry::RegistryConfig>,
     /// How to treat packages whose signature does not verify.
     ///
     /// `None` means "not specified", which resolves to
@@ -395,7 +398,7 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
             max_bytes: 0,
         },
     );
-    let batch = downloader.fetch_all(&wanted);
+    let batch = downloader.with_mirrors(cfg.mirrors.clone()).fetch_all(&wanted);
     for f in &batch.fetched {
         match f.source {
             crate::download::Source::Cache => report.reused.push((f.name.clone(), f.version.clone())),
@@ -444,6 +447,15 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
     report
 }
 
+/// The registry set an install may talk to: the configured registry plus any
+/// mirrors, so a download from a mirror and a signature check from the default
+/// agree about what was published.
+pub fn mirror_set(cfg: &InstallConfig) -> crate::mirror::MirrorSet {
+    let mut set = crate::mirror::MirrorSet::single(cfg.registry.config.clone());
+    set.add_mirrors(cfg.mirrors.clone());
+    set
+}
+
 /// The verifier for an install: the configured policy plus the trust store.
 fn verifier_for(cfg: &InstallConfig) -> Verifier {
     let policy = cfg.verify.unwrap_or_default();
@@ -487,7 +499,9 @@ fn verify_resolution(
         let record = if offline {
             cached_signature(cfg, &name, &version)
         } else {
-            SignatureRecord::fetch(&cfg.registry, &name, &version).ok()
+            mirror_set(cfg)
+                .signature(&name, &version)
+                .ok()
         };
         let outcome = match record.as_ref() {
             Some(rec) => {
@@ -821,5 +835,8 @@ pub fn base_config(
         update: false,
         parallel,
         verify,
+        // base_config has no manifest to read mirrors from; `hard` sets them
+        // from `manifest.registries` right after calling it.
+        mirrors: Vec::new(),
     }
 }

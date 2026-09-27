@@ -39,6 +39,31 @@ pub fn cache_root() -> PathBuf {
     hard_home().join("cache")
 }
 
+/// One cached archive that does not match its recorded digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheIssue {
+    pub name: String,
+    pub version: String,
+    /// Why it failed: a digest mismatch, a missing metadata file, an archive
+    /// that is not a valid `.hspkg`.
+    pub reason: String,
+    /// The archive on disk, so a repair removes exactly this file.
+    pub archive: PathBuf,
+}
+
+impl std::fmt::Display for CacheIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}: {}", self.name, self.version, self.reason)
+    }
+}
+
+impl CacheIssue {
+    /// The line `hard cache verify` prints.
+    pub fn message(&self) -> String {
+        self.to_string()
+    }
+}
+
 /// Serialized metadata for one cached version of a package.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CachedMeta {
@@ -383,29 +408,82 @@ impl Cache {
 
     /// Verify every cached archive; returns corrupt entries.
     pub fn verify_all(&self) -> Vec<String> {
-        let mut corrupt = Vec::new();
+        self.audit().into_iter().map(|i| i.message()).collect()
+    }
+
+    /// Every cached archive that does not match its recorded digest.
+    ///
+    /// Structured rather than a list of strings, because `hard cache verify
+    /// --repair` has to know *which* files to remove; recovering a name and a
+    /// version out of a formatted message is how a repair ends up deleting the
+    /// wrong path.
+    pub fn audit(&self) -> Vec<CacheIssue> {
+        let mut out = Vec::new();
         for (path, _) in walk_files(&self.root) {
-            if path.extension().map(|e| e == "hspkg").unwrap_or(false) {
-                let name = path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let version = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-                    .unwrap_or_default();
-                let version = version
-                    .strip_prefix(&format!("{}-", sanitize(&name)))
-                    .unwrap_or(&version)
+            if !path.extension().map(|e| e == "hspkg").unwrap_or(false) {
+                continue;
+            }
+            let name = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+                .unwrap_or_default();
+            let version = stem
+                .strip_prefix(&format!("{}-", sanitize(&name)))
+                .unwrap_or(&stem)
+                .to_string();
+            if let Err(reason) = self.verify_version(&name, &version) {
+                // `verify_version` prefixes some of its messages with the
+                // entry; strip it so `CacheIssue` is not "demo@1.0.0:
+                // mismatch for demo@1.0.0".
+                let prefix = format!("{name}@{version}: ");
+                let reason = reason
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&reason)
                     .to_string();
-                if let Err(e) = self.verify_version(&name, &version) {
-                    corrupt.push(e);
-                }
+                out.push(CacheIssue {
+                    name,
+                    version,
+                    reason,
+                    archive: path,
+                });
             }
         }
-        corrupt
+        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
+        out
+    }
+
+    /// Delete the archives (and their recorded metadata) that fail the audit.
+    ///
+    /// A corrupt archive is worse than a missing one: it would install bytes
+    /// nobody can account for. Removal is the whole repair — the next install
+    /// fetches the package again and verifies it afresh.
+    pub fn repair(&self) -> Result<Vec<CacheIssue>, String> {
+        let issues = self.audit();
+        for issue in &issues {
+            if issue.archive.exists() {
+                std::fs::remove_file(&issue.archive).map_err(|e| {
+                    format!("cannot remove {}: {e}", issue.archive.display())
+                })?;
+            }
+            let meta = self.meta_path_for(&issue.name, &issue.version);
+            if meta.exists() {
+                let _ = std::fs::remove_file(&meta);
+            }
+            let sig = self.root.join("signatures").join(format!(
+                "{}@{}.json",
+                issue.name, issue.version
+            ));
+            if sig.exists() {
+                let _ = std::fs::remove_file(&sig);
+            }
+        }
+        Ok(issues)
     }
 
     /// Remove every cached package (keeps the cache directory itself).
@@ -543,5 +621,117 @@ mod tests {
         let err = cache.put("demo", &v, b"not an archive", None, None).unwrap_err();
         assert!(err.contains("refusing to cache"), "message: {err}");
         let _ = std::fs::remove_dir_all(cache.root);
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    fn temp_cache(tag: &str) -> Cache {
+        let dir = std::env::temp_dir().join(format!(
+            "hs-cache-audit-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Cache::at(dir)
+    }
+
+    fn archive(src: &str) -> Vec<u8> {
+        crate::pkgfmt::pack(&[crate::pkgfmt::FileRecord {
+            rel_path: "main.hard".to_string(),
+            data: src.as_bytes().to_vec(),
+        }])
+        .unwrap()
+    }
+
+    fn seed(cache: &Cache) {
+        let v = Version::parse("1.0.0").unwrap();
+        let bytes = archive("calc x() => Int { <- 1 }\n");
+        cache
+            .put("demo", &v, &bytes, None, None)
+            .expect("seed the cache");
+    }
+
+    #[test]
+    fn a_healthy_cache_audits_clean() {
+        let cache = temp_cache("clean");
+        seed(&cache);
+        assert!(cache.audit().is_empty());
+        assert!(cache.verify_all().is_empty());
+        assert!(cache.repair().unwrap().is_empty());
+        assert!(cache.archive_path("demo", "1.0.0").exists(), "repair must not touch a good entry");
+    }
+
+    #[test]
+    fn an_audit_names_the_entry_and_keeps_the_path() {
+        let cache = temp_cache("bad");
+        seed(&cache);
+        let path = cache.archive_path("demo", "1.0.0");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(b'x');
+        std::fs::write(&path, &bytes).unwrap();
+        let issues = cache.audit();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].name, "demo");
+        assert_eq!(issues[0].version, "1.0.0");
+        assert_eq!(issues[0].archive, path);
+        assert!(issues[0].reason.contains("mismatch"), "{}", issues[0].reason);
+        assert!(issues[0].message().starts_with("demo@1.0.0: "));
+    }
+
+    #[test]
+    fn a_repair_removes_exactly_the_corrupt_archive() {
+        let cache = temp_cache("repair");
+        seed(&cache);
+        let good = cache.archive_path("good", "1.0.0");
+        let v = Version::parse("1.0.0").unwrap();
+        cache.put("good", &v, &archive("calc y() => Int { <- 2 }\n"), None, None).unwrap();
+        assert!(good.exists());
+        let bad = cache.archive_path("demo", "1.0.0");
+        let mut bytes = std::fs::read(&bad).unwrap();
+        bytes.push(b'x');
+        std::fs::write(&bad, &bytes).unwrap();
+
+        let fixed = cache.repair().unwrap();
+        assert_eq!(fixed.len(), 1);
+        assert_eq!(fixed[0].name, "demo");
+        assert!(!bad.exists(), "the corrupt archive is gone");
+        assert!(good.exists(), "the healthy archive is untouched");
+        assert!(cache.audit().is_empty(), "and the cache is clean again");
+        assert!(!cache.meta_path_for("demo", "1.0.0").exists(), "its metadata goes too");
+    }
+
+    #[test]
+    fn an_archive_with_no_metadata_is_checked_structurally() {
+        // Deliberately lenient: a hand-seeded cache entry has no recorded
+        // digest, so the only thing left to check is that it parses.
+        let cache = temp_cache("nometa");
+        seed(&cache);
+        std::fs::remove_file(cache.meta_path_for("demo", "1.0.0")).unwrap();
+        assert!(cache.audit().is_empty(), "a valid archive with no digest is kept");
+
+        let path = cache.archive_path("demo", "1.0.0");
+        std::fs::write(&path, b"not an archive").unwrap();
+        let issues = cache.audit();
+        assert_eq!(issues.len(), 1);
+        assert!(!issues[0].reason.is_empty());
+        assert!(!issues[0].message().contains("demo@1.0.0: demo@1.0.0"), "{}", issues[0].message());
+    }
+
+    #[test]
+    fn a_repair_is_idempotent() {
+        let cache = temp_cache("idem");
+        seed(&cache);
+        let bad = cache.archive_path("demo", "1.0.0");
+        let mut bytes = std::fs::read(&bad).unwrap();
+        bytes.push(b'x');
+        std::fs::write(&bad, &bytes).unwrap();
+        assert_eq!(cache.repair().unwrap().len(), 1);
+        assert!(cache.repair().unwrap().is_empty(), "a second repair finds nothing to do");
     }
 }
