@@ -71,3 +71,6 @@ mt003	docs main.hard	0	metrics	document a metrics program
 cl001	build main.hard	0	cluster	build a clustered program
 cl002	fmt main.hard	0	cluster	format cluster calls
 cl003	docs main.hard	0	cluster	document a clustered program
+dk001	build --docker main.hard	0	docker	generate a Dockerfile
+dk002	build --docker --print main.hard	0	docker	print a Dockerfile
+dk003	build --docker missing.hard	1	docker	a Dockerfile for a missing source fails

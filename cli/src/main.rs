@@ -8,6 +8,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod dockerfile;
 mod migrate;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -307,6 +308,9 @@ fn cmd_build(rest: &[String]) {
         Ok(p) => p,
         Err(e) => die(&e),
     };
+    if rest.iter().any(|a| a == "--docker") {
+        return cmd_build_docker(&rest);
+    }
     let (target, _) = find_target(&rest);
     if std::env::var("HARD_ESCAPE_REPORT").is_ok() {
         match report_escape(target.as_path()) {
@@ -328,6 +332,95 @@ fn cmd_build(rest: &[String]) {
             Err(diags) => report(&diags),
         }
     }
+}
+
+/// `hard build --docker`: write a Dockerfile for this project.
+///
+/// The image is built from what the compiler already produced -- the generated
+/// translation unit and the runtime headers -- so the builder stage is a C++
+/// compiler and nothing else, and the runtime stage is plain Alpine.
+fn cmd_build_docker(rest: &[String]) {
+    let (target, _) = find_target(rest);
+    let print_only = rest.iter().any(|a| a == "--print");
+    let out = PathBuf::from("Dockerfile");
+
+    // The project needs a build first: the Dockerfile compiles what the
+    // compiler emits, so a Dockerfile for a project that has never been built
+    // would be a Dockerfile that cannot work.
+    let opts = build_options(false, 1);
+    match incremental_build(&target, &opts, &hs_compiler::warn::WarningPolicy::default()) {
+        Ok(_) => {}
+        Err(diags) => report(&diags),
+    }
+    let cpp_name = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "main".to_string());
+
+    let mut cfg = dockerfile::DockerConfig {
+        app_name: std::env::current_dir()
+            .ok()
+            .and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "app".to_string()),
+        cpp_name: cpp_name.clone(),
+        ..dockerfile::DockerConfig::default()
+    };
+    // A manifest, when there is one, names the image and the port.
+    if let Ok(Some(man)) = Manifest::load(Path::new("hard.toml")) {
+        if !man.name.is_empty() {
+            cfg.app_name = man.name.clone();
+        }
+        if let Some(port) = man.server.port {
+            cfg.port = port;
+        }
+    }
+    // A health path only makes sense if the program has one. A project using
+    // the metrics module gets /healthz from the runtime; anything else is
+    // probed at the TCP level rather than answering a 404 as "healthy".
+    if let Ok(src) = std::fs::read_to_string(&target) {
+        if let Ok(prog) = frontend(&src, target.to_string_lossy().into_owned()) {
+            if !program_has_healthz(&prog) {
+                cfg.health_path = None;
+            }
+        }
+    }
+    if std::env::var("HS_ALPINE").ok().filter(|v| !v.is_empty()).is_some() {
+        let image = std::env::var("HS_ALPINE").unwrap();
+        cfg.builder_image = image.clone();
+        cfg.runtime_image = image;
+    }
+    if std::env::var("HS_DOCKER_HEALTH_PATH").ok().filter(|v| !v.is_empty()).is_some() {
+        cfg.health_path = Some(std::env::var("HS_DOCKER_HEALTH_PATH").unwrap());
+    }
+
+    let dockerfile = dockerfile::render_dockerfile(&cfg);
+    if print_only {
+        print!("{dockerfile}");
+        return;
+    }
+    write(&out, &dockerfile);
+    // Without this the build context is the whole project, Rust build cache
+    // included, and a small image takes a long time to arrive.
+    write(&PathBuf::from(".dockerignore"), &dockerfile::render_dockerignore(&cfg));
+    println!("wrote {}", out.display());
+    println!("wrote .dockerignore");
+    println!("build: docker build -t {} .", cfg.image_tag());
+    println!("run:   docker run --rm -p {}:{} {}", cfg.port, cfg.port, cfg.image_tag());
+}
+
+/// Whether a program answers `GET /healthz`. Only the metrics module installs
+/// that route, and a health check that requests it from a program without it
+/// would report a perfectly healthy server as unhealthy.
+fn program_has_healthz(prog: &hs_compiler::ast::Program) -> bool {
+    use hs_compiler::ast::*;
+    for st in &prog.stmts {
+        if let Stmt::Route(r) = st {
+            if r.method == "GET" && r.path == "/healthz" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Extract `--warnings <spec>` / `--deny <spec>` (and `=` forms) from the

@@ -1,0 +1,9 @@
+bring http
+bring metrics
+
+app @3000
+
+GET "/" :: {
+    metrics.incr("hits")
+    <- { hello: "world" }
+}

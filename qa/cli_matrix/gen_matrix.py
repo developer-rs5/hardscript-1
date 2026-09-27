@@ -100,6 +100,7 @@ MAIN_LIMIT = F("main_limit.hard")
 MAIN_EMAIL = F("main_email.hard")
 MAIN_METRICS = F("main_metrics.hard")
 MAIN_CLUSTER = F("main_cluster.hard")
+MAIN_DOCKER = F("main_docker.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -158,6 +159,12 @@ def setup_metrics(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+def setup_docker(d):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_DOCKER)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
 def setup_cluster(d):
     d.mkdir(parents=True, exist_ok=True)
     (d / "main.hard").write_text(MAIN_CLUSTER)
@@ -170,7 +177,7 @@ SETUPS = {
     "nested": setup_nested, "sub": setup_sub, "deep3": setup_deep3,
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
-    "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics, "cluster": setup_cluster,
+    "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics, "cluster": setup_cluster, "docker": setup_docker,
 }
 
 # id, argv, expected_rc, setup, note
@@ -273,6 +280,10 @@ CASES = [
     ("cl001", ["build", "main.hard"], 0, "cluster", "build a clustered program"),
     ("cl002", ["fmt", "main.hard"], 0, "cluster", "format cluster calls"),
     ("cl003", ["docs", "main.hard"], 0, "cluster", "document a clustered program"),
+    # docker generation =======================================================
+    ("dk001", ["build", "--docker", "main.hard"], 0, "docker", "generate a Dockerfile"),
+    ("dk002", ["build", "--docker", "--print", "main.hard"], 0, "docker", "print a Dockerfile"),
+    ("dk003", ["build", "--docker", "missing.hard"], 1, "docker", "a Dockerfile for a missing source fails"),
 ]
 
 for cid, argv, rc, setup, note in CASES:
