@@ -201,11 +201,13 @@ t_integrity_mismatch_rejected() {
 }
 t_unsatisfiable_conflict() {
     case_begin unsatisfiable
-    manifest $'app = "^1.0.0"\nlib = "^1.0.0"'
+    # no published lib satisfies ^9.0.0, so nothing can be resolved
+    manifest $'app = "^1.0.0"\nlib = "^9.0.0"'
     out=$("$HARD" install 2>&1)
     got=$?
-    [ "$got" = "1" ] || { echo "case unsatisfiable: rc $got want 1"; exit 1; }
+    [ "$got" = "1" ] || { echo "case unsatisfiable: rc $got want 1: $out"; exit 1; }
     echo "$out" | grep -q 'lib' || { echo "case unsatisfiable: $out"; exit 1; }
+    echo "$out" | grep -q 'available versions' || { echo "case unsatisfiable: no version list: $out"; exit 1; }
 }
 t_unknown_package_fails() {
     case_begin unknown-package

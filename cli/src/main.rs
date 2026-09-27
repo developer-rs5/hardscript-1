@@ -1131,7 +1131,9 @@ fn cmd_update(_args: &[String]) {
     if created {
         write(&project_root.join("hard.toml"), &manifest.render());
     }
-    let cfg = base_config_for(manifest, project_root);
+    let mut cfg = base_config_for(manifest, project_root);
+    // `update` is the one install that must not prefer locked versions.
+    cfg.update = true;
     let report = install::install(&cfg);
     if report.succeeded() {
         println!("updated to newest matching versions");

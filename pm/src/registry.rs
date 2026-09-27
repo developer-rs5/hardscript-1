@@ -145,8 +145,33 @@ impl RegistryConfig {
 pub struct RegistryVersion {
     pub version: Version,
     pub dependencies: BTreeMap<String, String>,
+    /// Which kind each dependency edge is (`normal`, `dev`, `build`).
+    ///
+    /// This matters: a consumer resolves a package's runtime and build
+    /// dependencies, not the test-only ones it declares for its own suite.
+    /// A registry that does not report kinds is treated as all-normal.
+    pub kinds: BTreeMap<String, String>,
     pub integrity: Option<String>,
     pub description: Option<String>,
+}
+
+impl RegistryVersion {
+    /// `name -> kind` for the resolver, defaulting to `normal`.
+    pub fn dependency_kinds(&self) -> BTreeMap<String, crate::resolver::DepKind> {
+        self.kinds
+            .iter()
+            .map(|(n, k)| {
+                (
+                    n.clone(),
+                    match k.as_str() {
+                        "dev" => crate::resolver::DepKind::Dev,
+                        "build" => crate::resolver::DepKind::Build,
+                        _ => crate::resolver::DepKind::Normal,
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 /// Package metadata as served by the registry.
@@ -650,11 +675,20 @@ impl Registry {
                     RegistryError::new(format!("registry served bad version '{version_str}': {e}"))
                 })?;
                 let mut deps = BTreeMap::new();
+                let mut kinds = BTreeMap::new();
                 if let Some(d) = v.get("dependencies").and_then(|x| x.as_arr()) {
                     for item in d {
                         let dn = item.get("name").and_then(|x| x.as_str());
                         let dr = item.get("req").and_then(|x| x.as_str());
                         if let (Some(dn), Some(dr)) = (dn, dr) {
+                            // a registry that predates kinds omits the field:
+                            // everything is then a normal dependency
+                            let kind = item
+                                .get("kind")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("normal")
+                                .to_string();
+                            kinds.insert(dn.to_string(), kind);
                             deps.insert(dn.to_string(), dr.to_string());
                         }
                     }
@@ -662,6 +696,7 @@ impl Registry {
                 versions.push(RegistryVersion {
                     version,
                     dependencies: deps,
+                    kinds,
                     integrity: v.get("integrity").and_then(|x| x.as_str()).map(String::from),
                     description: v.get("description").and_then(|x| x.as_str()).map(String::from),
                 });

@@ -9,7 +9,9 @@ use crate::download::{BatchReport, DownloadConfig, Downloader};
 use crate::lockfile::{Lockfile, LOCKFILE_SCHEMA};
 use crate::manifest::Manifest;
 use crate::registry::{Registry, RegistryConfig};
-use crate::resolver::{self, Index, IndexEntry, ResolveError, Resolution, ResolvedPackage, SourceKind};
+use crate::resolver::{
+    self, DepKind, Index, IndexEntry, Resolution, ResolveError, ResolvedPackage, SourceKind,
+};
 use crate::semver::{Version, VersionReq};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -27,6 +29,8 @@ pub struct InstallConfig {
     pub cache: Cache,
     /// Resolve only against the cache; never touch the registry.
     pub frozen: bool,
+    /// Ignore the lockfile when choosing versions (`hard update`).
+    pub update: bool,
     /// How many packages may download at once.
     pub parallel: usize,
 }
@@ -118,7 +122,14 @@ fn build_index(cfg: &InstallConfig) -> Result<Index, Vec<String>> {
             }
         };
         for e in &entries {
-            for dep in e.deps.keys() {
+            // Only follow the edges a consumer of the package must also
+            // resolve. A dependency's dev-dependencies belong to its own test
+            // suite, and fetching metadata for them used to be why installing
+            // a perfectly good package could fail.
+            for (dep, _, kind) in e.all_deps() {
+                if !kind.transitive() {
+                    continue;
+                }
                 if !seen.contains(dep) {
                     queue.push(dep.clone());
                 }
@@ -127,6 +138,23 @@ fn build_index(cfg: &InstallConfig) -> Result<Index, Vec<String>> {
         index.insert(name.clone(), entries);
     }
     Ok(index)
+}
+
+/// Registry `kind` strings mapped onto resolver kinds.
+fn cached_kinds(kinds: &BTreeMap<String, String>) -> BTreeMap<String, DepKind> {
+    kinds
+        .iter()
+        .map(|(n, k)| {
+            (
+                n.clone(),
+                match k.as_str() {
+                    "dev" => DepKind::Dev,
+                    "build" => DepKind::Build,
+                    _ => DepKind::Normal,
+                },
+            )
+        })
+        .collect()
 }
 
 fn cached_index_entries(cache: &Cache, name: &str) -> Vec<IndexEntry> {
@@ -142,18 +170,27 @@ fn cached_index_entries(cache: &Cache, name: &str) -> Vec<IndexEntry> {
                         continue;
                     };
                     let mut deps = BTreeMap::new();
+                    let mut kinds = BTreeMap::new();
                     if let Some(d) = v.get("dependencies").and_then(|x| x.as_arr()) {
                         for item in d {
                             if let (Some(dn), Some(dr)) = (
                                 item.get("name").and_then(|x| x.as_str()),
                                 item.get("req").and_then(|x| x.as_str()),
                             ) {
+                                kinds.insert(
+                                    dn.to_string(),
+                                    item.get("kind")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("normal")
+                                        .to_string(),
+                                );
                                 deps.insert(dn.to_string(), dr.to_string());
                             }
                         }
                     }
                     out.push(IndexEntry {
                         version: ver,
+                        kinds: cached_kinds(&kinds),
                         deps,
                         integrity: v.get("integrity").and_then(|x| x.as_str()).map(String::from),
                         description: v.get("description").and_then(|x| x.as_str()).map(String::from),
@@ -171,6 +208,7 @@ fn registry_entries(name: &str, meta: &crate::registry::PackageMeta) -> Vec<Inde
         .iter()
         .map(|v| IndexEntry {
             version: v.version.clone(),
+            kinds: v.dependency_kinds(),
             deps: v.dependencies.clone(),
             integrity: v.integrity.clone(),
             description: v.description.clone(),
@@ -287,8 +325,9 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
         Err(_) => Lockfile::parse(&empty_lockfile(cfg)).unwrap_or_else(|_| Lockfile::default()),
     };
 
+    let preferred = locked_versions(&lock);
     let resolution: Resolution = if !cfg.offline || lock.packages.is_empty() {
-        match fresh_resolve(cfg) {
+        match fresh_resolve(cfg, preferred) {
             Ok(r) => r,
             Err(errors) => {
                 report.errors = errors;
@@ -298,7 +337,7 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
     } else if let Some(r) = locked_resolution(&cfg.manifest, &lock) {
         r
     } else {
-        match fresh_resolve(cfg) {
+        match fresh_resolve(cfg, preferred) {
             Ok(r) => r,
             Err(errors) => {
                 report.errors = errors;
@@ -377,12 +416,29 @@ fn empty_lockfile(cfg: &InstallConfig) -> String {
 }
 
 /// Resolve from scratch (registry + cache). Errors carry resolver details.
-fn fresh_resolve(cfg: &InstallConfig) -> Result<Resolution, Vec<String>> {
+///
+/// The previous lockfile is passed to the resolver as a *preference*: locked
+/// versions are tried first, so re-resolving an unchanged project
+/// reproduces the same lockfile, and adding one dependency does not bump
+/// everything else.
+fn fresh_resolve(cfg: &InstallConfig, preferred: BTreeMap<String, Version>) -> Result<Resolution, Vec<String>> {
     let index = build_index(cfg)?;
     let mut roots: BTreeMap<String, String> = BTreeMap::new();
     roots.extend(cfg.manifest.dependencies.clone());
     roots.extend(cfg.manifest.dev_dependencies.clone());
-    resolver::resolve(&index, &roots, "hard.toml").map_err(resolver_errors)
+    // `hard update` deliberately ignores the lockfile: its whole job is to
+    // move off the locked versions.
+    let options = if cfg.update {
+        resolver::ResolveOptions::default()
+    } else {
+        resolver::ResolveOptions::default().with_lock(preferred)
+    };
+    resolver::resolve_with(&index, &roots, &options).map_err(resolver_errors)
+}
+
+/// The `name -> version` map an existing lockfile pins.
+fn locked_versions(lock: &Lockfile) -> BTreeMap<String, Version> {
+    lock.as_map()
 }
 
 fn resolver_errors(e: ResolveError) -> Vec<String> {
@@ -585,6 +641,7 @@ pub fn base_config(
         registry: Registry::new(reg_cfg),
         cache: Cache::new(),
         frozen: false,
+        update: false,
         parallel,
     }
 }
