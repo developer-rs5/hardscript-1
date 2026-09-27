@@ -388,6 +388,13 @@ CASES = [
     ("op004", ["deploy", "releases"], 2, "deploy", "releases with no host is a usage error"),
     ("op005", ["deploy", "restart"], 2, "deploy", "restart with no host is a usage error"),
     ("op006", ["deploy", "logs", "--env", "nope", "root@example.com"], 1, "deploy", "an environment that does not exist fails any deploy command"),
+    # rollback and prune ======================================================
+    ("rb001", ["deploy", "rollback"], 2, "deploy", "rollback with no host is a usage error"),
+    ("rb002", ["deploy", "rollback", "--nope", "root@example.com"], 2, "deploy", "an unknown rollback flag is a usage error"),
+    ("rb003", ["deploy", "rollback", "--to", "1.0.0", "--nope", "root@example.com"], 2, "deploy", "a flag that takes a value is parsed as one"),
+    ("rb004", ["deploy", "prune", "--keep", "abc", "root@example.com"], 2, "deploy", "a keep count that is not a number is a usage error"),
+    ("rb005", ["deploy", "prune", "--keep"], 2, "deploy", "a keep count with no value is a usage error"),
+    ("rb006", ["deploy", "prune", "--yes", "root@nonexistent.invalid"], 1, "deploy", "prune on a host it cannot reach says so"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

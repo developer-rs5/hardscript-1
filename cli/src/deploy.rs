@@ -26,6 +26,8 @@ pub fn cmd_deploy(args: &[String]) {
         "logs" => crate::operations::cmd_logs(rest),
         "status" => crate::operations::cmd_status(rest),
         "releases" => crate::operations::cmd_releases(rest),
+        "rollback" => crate::rollback::cmd_rollback(rest),
+        "prune" => crate::rollback::cmd_prune(rest),
         "start" | "stop" | "restart" => crate::operations::cmd_lifecycle(sub, rest),
         "help" | "-h" | "--help" => help(),
         other => {
@@ -48,6 +50,8 @@ fn help() {
          \x20 hard deploy status [host]        What is live, what is running, what is kept\n\
          \x20 hard deploy start|stop|restart   Run the service\n\
          \x20 hard deploy releases [host]      The releases on the host, newest first\n\
+         \x20 hard deploy rollback [host]      Go back to the previous release\n\
+         \x20 hard deploy prune [host]         Remove old releases (--keep N --yes)\n\
          \x20 hard deploy help                 Show this help"
     );
 }

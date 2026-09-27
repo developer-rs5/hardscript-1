@@ -12,6 +12,7 @@ mod compose;
 mod environments;
 mod operations;
 mod production;
+mod rollback;
 mod deploy;
 mod dockerfile;
 mod migrate;

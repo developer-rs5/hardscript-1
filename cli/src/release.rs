@@ -285,6 +285,12 @@ impl RemoteLayout {
     pub fn read_current(&self) -> String {
         format!("readlink -f {}", sh_quote(&self.current()))
     }
+
+    /// What `previous` points at. Empty on a host that has never had two
+    /// releases, which is not an error.
+    pub fn read_current_previous(&self) -> String {
+        format!("readlink -f {} 2>/dev/null || true", sh_quote(&self.previous()))
+    }
 }
 
 /// Single-quote a path for `sh`. Everything interpolated into a remote command
