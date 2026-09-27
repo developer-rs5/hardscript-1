@@ -373,6 +373,14 @@ CASES = [
     ("ev011", ["deploy", "ssh", "--print", "--no-build", "--env", "production"], 0, "deploy", "an environment can name the host"),
     ("ev012", ["deploy", "ssh", "--print", "--no-build", "--env", "nope"], 1, "deploy", "an environment that does not exist fails a deploy"),
     ("ev013", ["deploy", "ssh", "--print", "--no-build", "--env", "broken"], 1, "badenv", "a bad environment fails a deploy before it connects"),
+    # production configuration =================================================
+    ("pc001", ["deploy", "config"], 2, "deploy", "config with no subcommand is a usage error"),
+    ("pc002", ["deploy", "config", "nonsense"], 2, "deploy", "an unknown config subcommand is a usage error"),
+    ("pc003", ["deploy", "config", "unit"], 0, "deploy", "write the unit"),
+    ("pc004", ["deploy", "config", "unit", "--env", "production"], 0, "deploy", "write the unit for an environment"),
+    ("pc005", ["deploy", "config", "check"], 2, "deploy", "check with no host is a usage error"),
+    ("pc006", ["deploy", "ssh", "--print", "--no-build", "--no-health", "--unit", "root@example.com"], 0, "deploy", "a deploy that installs the unit says so"),
+    ("pc007", ["deploy", "ssh", "--print", "--no-build", "--no-health", "root@example.com"], 0, "deploy", "and one that does not, leaves it alone"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

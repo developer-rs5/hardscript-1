@@ -37,6 +37,17 @@ check() {
     if eval "$2"; then pass "$1"; else fail "$1"; fi
 }
 
+# The first plan step whose first line matches $1, up to and including the line
+# that ends it. A `sed` range is not enough: it starts again at the next match,
+# so with two heredoc steps in one plan it captures the rest of the plan too.
+step_command() {
+    awk -v first="$1" -v last="$2" '
+        $0 ~ first { inside = 1 }
+        inside { print }
+        inside && $0 ~ last { exit }
+    ' "$3"
+}
+
 if [ ! -x "$HARD" ]; then
     echo "deploy: no hard binary at $HARD (cargo build --release)"
     exit 1
@@ -274,7 +285,7 @@ else
 fi
 
 # The write step, for real, against the scratch root.
-sed -n '/^config    umask/,/^chmod 0644/p' "$ENV_PLAN" | sed 's/^config    //' > "$TMP/envwrite.sh"
+step_command '^config    umask' '^chmod 0644' "$ENV_PLAN" | sed 's/^config    //' > "$TMP/envwrite.sh"
 if sh -e "$TMP/envwrite.sh" 2>"$TMP/err"; then
     pass "the env write step runs as sh"
 else
@@ -324,6 +335,73 @@ if printf '%s' "$SECHECK" | sh -e 2>"$TMP/err"; then
     pass "and passes once the host has them"
 else
     fail "and passes once the host has them ($(head -2 "$TMP/err" | tr '\n' ' '))"
+fi
+
+# ---- the unit file -----------------------------------------------------------
+# systemd is the only authority that matters about a unit, so where it is
+# installed, ask it.
+UNIT_OUT="$TMP/unit.txt"
+"$HARD" deploy config unit --env production > "$UNIT_OUT" 2>"$TMP/err"
+if grep -q "^ExecStart=$SRV/current/server$" "$UNIT_OUT"; then
+    pass "the unit runs the current release, not a release directory"
+else
+    fail "the unit runs the current release, not a release directory"
+fi
+if grep -q "^EnvironmentFile=$SRV/shared/env$" "$UNIT_OUT" \
+    && grep -q "^EnvironmentFile=-$SRV/shared/env.secrets$" "$UNIT_OUT"; then
+    pass "the unit reads both env files, and the secrets one is optional"
+else
+    fail "the unit reads both env files, and the secrets one is optional"
+fi
+if grep -q "^User=root$" "$UNIT_OUT"; then
+    fail "the service does not run as root"
+else
+    pass "the service does not run as root"
+fi
+if [ "$($HARD deploy config unit --env production | md5sum)" \
+    = "$($HARD deploy config unit --env production | md5sum)" ]; then
+    pass "the unit is byte-for-byte deterministic"
+else
+    fail "the unit is byte-for-byte deterministic"
+fi
+if command -v systemd-analyze >/dev/null 2>&1; then
+    mkdir -p "$TMP/etc"
+    cp "$UNIT_OUT" "$TMP/etc/smoke.service"
+    if out=$(systemd-analyze verify "$TMP/etc/smoke.service" 2>&1); then
+        pass "systemd-analyze verify accepts the unit"
+    elif printf '%s' "$out" | grep -qi "failed to parse\|syntax error\|unexpected token"; then
+        fail "systemd could not parse the unit: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+    else
+        # It complains that ExecStart does not exist, which is what a deploy is for.
+        pass "systemd-analyze verify only objects to the missing binary"
+    fi
+else
+    echo "deploy: skip systemd-analyze (not installed)"
+fi
+
+# The install step, for real, against a scratch /etc.
+if command -v systemd-analyze >/dev/null 2>&1; then
+    "$HARD" deploy ssh --print --no-build --no-health --unit --env production \
+        > "$TMP/unitplan.txt" 2>/dev/null
+    step_command '^config    umask' 'daemon-reload' "$TMP/unitplan.txt" \
+        | sed 's/^config    //' > "$TMP/unit-install.sh"
+    # /etc/systemd/system exists on a host; in a scratch root it has to be made.
+    mkdir -p "$TMP/etc/systemd/system"
+    # The daemon-reload is dropped: it needs a systemd and an account with
+    # NOPASSWD sudo, and what this suite is checking is the file.
+    sed -e "s|/etc/systemd/system/|$TMP/etc/systemd/system/|g" \
+        -e "s|; sudo -n systemctl daemon-reload||" \
+        -e "s|; systemctl daemon-reload||" "$TMP/unit-install.sh" > "$TMP/unit-install2.sh"
+    if sh "$TMP/unit-install2.sh" 2>"$TMP/err"; then
+        pass "the unit install step runs as sh"
+    else
+        fail "the unit install step ($(head -2 "$TMP/err" | tr '\n' ' '))"
+    fi
+    if cmp -s "$TMP/etc/smoke.service" "$TMP/etc/systemd/system/smoke.service"; then
+        pass "and wrote the same unit systemd will read"
+    else
+        fail "and wrote the same unit systemd will read"
+    fi
 fi
 
 # ---- the shell the tool generates is the shell that runs ---------------------

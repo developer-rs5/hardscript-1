@@ -368,6 +368,10 @@ pub struct DeployConfig {
     /// contain. Empty means this deploy has nothing to configure.
     pub env_body: Option<String>,
     pub secrets: Vec<String>,
+    /// The systemd unit to install, when the deploy owns it. `None` leaves the
+    /// unit alone, which is the default: overwriting a unit somebody edited by
+    /// hand is not something a deploy should do unless it was asked.
+    pub unit_body: Option<String>,
 }
 
 impl Default for DeployConfig {
@@ -391,6 +395,7 @@ impl Default for DeployConfig {
             restart_command: None,
             env_body: None,
             secrets: Vec::new(),
+            unit_body: None,
         }
     }
 }
@@ -517,6 +522,14 @@ impl DeployPlan {
 
         // Configuration before migrations: a migration that reads a variable
         // the release has not been given yet fails for the wrong reason.
+        if let Some(unit) = &cfg.unit_body {
+            steps.push(DeployStep {
+                kind: StepKind::Config,
+                detail: format!("install {} and reload systemd", cfg.layout.service),
+                command: unit.clone(),
+                upload: None,
+            });
+        }
         if let Some(body) = &cfg.env_body {
             steps.push(DeployStep {
                 kind: StepKind::Config,

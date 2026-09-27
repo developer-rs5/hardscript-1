@@ -10,6 +10,7 @@ use std::process::Command;
 
 mod compose;
 mod environments;
+mod production;
 mod deploy;
 mod dockerfile;
 mod migrate;

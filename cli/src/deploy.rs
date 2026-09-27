@@ -22,6 +22,7 @@ pub fn cmd_deploy(args: &[String]) {
         "compose" => cmd_compose(rest),
         "ssh" => cmd_ssh(rest),
         "env" => environments::cmd_env(rest),
+        "config" => crate::production::cmd_config(rest),
         "help" | "-h" | "--help" => help(),
         other => {
             eprintln!("hard deploy: unknown subcommand '{other}'");
@@ -38,6 +39,7 @@ fn help() {
          \x20 hard deploy compose [file]        Write docker-compose.yml for this project\n\
          \x20 hard deploy ssh <host>            Build, upload, and restart this service\n\
          \x20 hard deploy env <sub>            List, show, render, or check environments\n\
+         \x20 hard deploy config <sub>         Write the systemd unit, or check a host\n\
          \x20 hard deploy help                 Show this help"
     );
 }
@@ -212,6 +214,8 @@ pub struct SshArgs {
     pub restart: Option<String>,
     /// The named environment from `hard.toml` to deploy as.
     pub env: Option<String>,
+    /// Install the generated systemd unit as part of the deploy.
+    pub unit: bool,
     /// Print the plan and stop.
     pub print: bool,
 }
@@ -234,6 +238,7 @@ impl Default for SshArgs {
             health_timeout_set: false,
             restart: None,
             env: None,
+            unit: false,
             print: false,
         }
     }
@@ -325,6 +330,10 @@ pub fn parse_ssh_args(args: &[String]) -> Result<SshArgs, String> {
             }
             "--no-health" => {
                 out.health = false;
+                i += 1;
+            }
+            "--unit" => {
+                out.unit = true;
                 i += 1;
             }
             "--tcp" => {
@@ -469,6 +478,9 @@ pub fn project_deploy_config(
         // it is filled in once the id is known.
         env_body: None,
         secrets: env.as_ref().map(|e| e.secrets.clone()).unwrap_or_default(),
+        // Installed only when asked: a deploy does not overwrite a unit
+        // somebody edited by hand.
+        unit_body: None,
     })
 }
 
@@ -621,6 +633,12 @@ fn cmd_ssh(args: &[String]) {
     // is known.
     if let Some(env) = &env {
         cfg.env_body = Some(environments::render_env_file(env, &id.to_string()));
+    }
+    if parsed.unit {
+        // A deploy that owns the unit writes it; one that does not, leaves the
+        // file alone even if it is wrong, because somebody may have edited it.
+        let unit = crate::production::UnitConfig::new(&cfg.app, &cfg.layout, Some(cfg.user.clone()));
+        cfg.unit_body = Some(unit.install_command());
     }
     let plan = DeployPlan::build(&cfg, &id);
 
