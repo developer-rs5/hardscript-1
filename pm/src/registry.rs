@@ -392,10 +392,39 @@ fn request(
                         req.url
                     )));
                 }
+                if is_definitive(&e) {
+                    // Nothing is listening, or the name does not resolve. That
+                    // will not change in 200ms, and with mirrors configured the
+                    // right move is to fail over now rather than sleep through
+                    // the whole backoff first. A benchmark caught this costing
+                    // 600ms of pure sleeping before every fallback.
+                    return Err(RegistryError::new(format!(
+                        "{} {} failed: {e}",
+                        req.method.as_str(),
+                        req.url
+                    )));
+                }
                 std::thread::sleep(Duration::from_millis(200 * attempt as u64));
             }
         }
     }
+}
+
+/// True when a transport error is definitive rather than transient.
+///
+/// The strings come from `std::io::Error` messages, which is the only thing the
+/// raw HTTP path carries; a typed error would be nicer, and this is where to
+/// change it if the transport grows one.
+fn is_definitive(message: &str) -> bool {
+    const DEFINITIVE: &[&str] = &[
+        "Connection refused",
+        "No route to host",
+        "Network is unreachable",
+        "Name or service not known",
+        "cannot resolve",
+        "no address for",
+    ];
+    DEFINITIVE.iter().any(|d| message.contains(d))
 }
 
 fn headers_status(headers: &[(String, String)]) -> u16 {
@@ -899,4 +928,25 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+#[cfg(test)]
+mod definitive_tests {
+    use super::is_definitive;
+
+    #[test]
+    fn a_refused_connection_is_definitive() {
+        assert!(is_definitive(
+            "connect 127.0.0.1:1: Connection refused (os error 111)"
+        ));
+        assert!(is_definitive("cannot resolve nope.invalid: Name or service not known"));
+        assert!(is_definitive("no address for nowhere"));
+    }
+
+    #[test]
+    fn a_timeout_or_reset_is_worth_retrying() {
+        assert!(!is_definitive("read response: Connection reset by peer (os error 104)"));
+        assert!(!is_definitive("read response: Operation timed out"));
+        assert!(!is_definitive("send request: Broken pipe (os error 32)"));
+        assert!(!is_definitive(""));
+    }
 }

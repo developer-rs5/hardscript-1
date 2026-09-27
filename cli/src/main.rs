@@ -2366,14 +2366,20 @@ fn base_config_for(manifest: Manifest, project_root: PathBuf, args: &[String]) -
         verify_policy(args),
     );
     cfg.offline = args.iter().any(|a| a == "--offline" || a == "-o");
-    // Mirrors come from the manifest's `[registry]` table, minus the default
-    // (which is already the primary) and any that are switched off.
-    let set = hs_pm::mirror::MirrorSet::from_manifest(Some(&cfg.manifest), cfg.offline);
-    cfg.mirrors = set
-        .configs()
-        .into_iter()
-        .skip(1)
-        .collect();
+    // One registry set, used for everything: the default the manifest names
+    // (or HARD_REGISTRY, or the built-in) plus its mirrors, in priority order.
+    // Deriving the primary from the same list an install reads is what stops
+    // `hard install` and `hard search` from disagreeing about where a package
+    // comes from.
+    let mut set = hs_pm::mirror::MirrorSet::from_manifest(Some(&cfg.manifest), cfg.offline);
+    if flag_value(args, "--registry").is_some() {
+        set = registry_set(args, cfg.offline);
+    }
+    let mut configs = set.configs();
+    if let Some(primary) = configs.first().cloned() {
+        cfg.registry = Registry::new(primary);
+    }
+    cfg.mirrors = configs.split_off(1);
     cfg
 }
 

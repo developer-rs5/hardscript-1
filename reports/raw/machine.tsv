@@ -1,0 +1,8 @@
+cpu_model	AMD Ryzen 7 7445HS w/ Radeon 740M Graphics
+cpu_count	12
+memory_kb	15619132
+kernel	Linux 7.1.5+kali-amd64
+os	Kali GNU/Linux Rolling
+filesystem	ext4
+rustc	rustc 1.97.1 (8bab26f4f 2026-07-14)
+build_profile	release
