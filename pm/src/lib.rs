@@ -8,6 +8,7 @@
 //! - [`lockfile`] — deterministic `hard.lock`
 //! - [`pkgfmt`] — the `.hspkg` package archive format
 //! - [`cache`] — the shared `~/.hard/cache/` store (offline installs)
+//! - [`download`] — the download client: cache-first, resumable, parallel
 //! - [`registry`] — registry HTTP/1.1 client (read, publish, auth)
 //! - [`install`] — install/remove/update/list/outdated orchestration
 //! - [`publish`] — `hard publish`: `.hspkg` building and upload
@@ -16,6 +17,7 @@
 //! - [`report`] — automatic milestone reports
 
 pub mod cache;
+pub mod download;
 pub mod install;
 pub mod lockfile;
 pub mod manifest;

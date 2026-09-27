@@ -347,18 +347,19 @@ impl Router {
         }
         // Ranged requests answer 206 with a slice and do not count as a
         // download: a resumed transfer must not inflate the counters.
-        if let Some(range) = req.header("range").and_then(parse_range) {
-            let (start, end) = range;
+        if let Some((start, end)) = req.header("range").and_then(parse_range) {
             if start >= v.size {
                 return Response::error(416, "range_not_satisfiable", "range starts past the end");
             }
+            // An open-ended range runs to the last byte.
+            let last = end.unwrap_or(v.size.saturating_sub(1)).min(v.size.saturating_sub(1));
             // HTTP byte ranges are inclusive on both ends; the archive store
             // takes an exclusive end, hence the +1.
-            return match self.app.download_range(name, version, start, end + 1) {
+            return match self.app.download_range(name, version, start, last + 1) {
                 Ok(bytes) => {
                     let mut r = Response::with_body(206, bytes);
                     r.set_header("Content-Type", "application/vnd.hardscript.package");
-                    r.set_header("Content-Range", &format!("bytes {start}-{end}/{}", v.size));
+                    r.set_header("Content-Range", &format!("bytes {start}-{last}/{}", v.size));
                     r.set_header("X-Hard-Integrity", &v.integrity);
                     r
                 }
@@ -848,15 +849,24 @@ fn method_not_allowed(method: &str, seg: &[String]) -> Response {
     )
 }
 
-/// Parse `bytes=start-end` (open-ended and suffix forms are rejected: a
-/// resumed package download always knows its start).
-pub fn parse_range(raw: &str) -> Option<(u64, u64)> {
-    let spec = raw.trim().strip_prefix("bytes=")?;
+/// Parse a `Range` header into `(start, end)`.
+///
+/// Both `bytes=N-M` and the open-ended `bytes=N-` are accepted — the second
+/// is what a resumed download sends, so refusing it would silently turn every
+/// resume into a full restart. The suffix form (`bytes=-N`) is rejected: the
+/// package manager always knows its start offset.
+pub fn parse_range(raw: &str) -> Option<(u64, Option<u64>)> {
+    let spec = raw.trim().strip_prefix("bytes=")?.trim();
     let (a, b) = spec.split_once('-')?;
     let start: u64 = a.trim().parse().ok()?;
-    let end: u64 = b.trim().parse().ok()?;
-    if end < start {
-        return None;
+    let end = match b.trim() {
+        "" => None,
+        text => Some(text.parse::<u64>().ok()?),
+    };
+    if let Some(e) = end {
+        if e < start {
+            return None;
+        }
     }
     Some((start, end))
 }
@@ -1152,13 +1162,16 @@ mod tests {
 
     #[test]
     fn range_parsing_rules() {
-        assert_eq!(parse_range("bytes=0-10"), Some((0, 10)));
-        assert_eq!(parse_range("bytes= 5 - 6 "), Some((5, 6)));
-        assert_eq!(parse_range("bytes=0-0"), Some((0, 0)));
+        assert_eq!(parse_range("bytes=0-10"), Some((0, Some(10))));
+        assert_eq!(parse_range("bytes= 5 - 6 "), Some((5, Some(6))));
+        assert_eq!(parse_range("bytes=0-0"), Some((0, Some(0))));
+        // the open-ended form is what a resumed download sends
+        assert_eq!(parse_range("bytes=20-"), Some((20, None)));
         assert_eq!(parse_range("bytes=10-5"), None);
         assert_eq!(parse_range("bytes=-5"), None);
         assert_eq!(parse_range("items=0-5"), None);
         assert_eq!(parse_range("bytes=abc-def"), None);
+        assert_eq!(parse_range("bytes=-"), None);
     }
 
     #[test]

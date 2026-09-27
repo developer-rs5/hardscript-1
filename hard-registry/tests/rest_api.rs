@@ -412,3 +412,35 @@ fn percent_encoded_package_names_round_trip() {
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(jstr(&r.json().unwrap(), "name").as_deref(), Some("acme/http"));
 }
+
+#[test]
+fn an_open_ended_range_resumes_to_the_end() {
+    let h = Harness::open("range-open");
+    h.seed("jwt", "1.0.0", "a");
+    let full = h.get("/packages/jwt/1.0.0");
+    let size = full.bytes().len() as u64;
+    let r = h.request("GET", "/packages/jwt/1.0.0", b"", &[("Range", "bytes=7-")]);
+    assert_eq!(r.status, 206, "an open-ended Range must be honoured");
+    assert_eq!(r.bytes().len() as u64, size - 7);
+    assert_eq!(r.header("Content-Range"), Some(format!("bytes 7-{}/{}", size - 1, size).as_str()));
+    assert_eq!(
+        r.bytes(),
+        &full.bytes()[7..],
+        "a resumed download must continue, not restart"
+    );
+}
+
+#[test]
+fn a_range_past_the_end_is_refused_but_a_full_tail_works() {
+    let h = Harness::open("range-tail");
+    h.seed("jwt", "1.0.0", "a");
+    let size = h.get("/packages/jwt/1.0.0").bytes().len() as u64;
+    assert_eq!(
+        h.request("GET", "/packages/jwt/1.0.0", b"", &[("Range", &format!("bytes={size}-"))]).status,
+        416
+    );
+    // an end past the last byte is clamped rather than refused
+    let r = h.request("GET", "/packages/jwt/1.0.0", b"", &[("Range", &format!("bytes=0-{}", size + 100))]);
+    assert_eq!(r.status, 206);
+    assert_eq!(r.bytes().len() as u64, size);
+}

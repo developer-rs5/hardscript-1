@@ -139,6 +139,7 @@ fn main() {
         "add" => cmd_add(rest),
         "publish" => cmd_publish(rest),
         "yank" => cmd_yank(rest),
+        "download" => cmd_download(rest),
         "remove" | "rm" => cmd_remove(rest),
         "install" => cmd_install(rest),
         "update" => cmd_update(rest),
@@ -180,6 +181,7 @@ fn help() {
          \x20 hard add <pkg>[@req]          Add a dependency and install it\n\
          \x20 hard publish                  Build a .hspkg and publish it to the registry\n\
          \x20 hard yank <pkg>[@<ver>]       Retract a published version\n\
+         \x20 hard download <pkg>[@<ver>]    Download a .hspkg archive to disk\n\
          \x20 hard remove <pkg>            Remove a dependency\n\
          \x20 hard install                 Resolve and lock all dependencies\n\
          \x20 hard update [pkg]            Update locked packages to newest match\n\
@@ -826,6 +828,57 @@ fn cmd_add(args: &[String]) {
     }
 }
 
+/// `hard download <pkg>[@<ver>]` — save a package's archive to disk.
+fn cmd_download(args: &[String]) {
+    let out_dir = flag_value(args, "--out").map(PathBuf::from);
+    let offline = args.iter().any(|a| a == "--offline" || a == "-o");
+    let spec = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("hard download: missing package name");
+            std::process::exit(2);
+        }
+    };
+    let (name, version) = install::parse_add_spec(&spec);
+    let registry_override = flag_value(args, "--registry");
+    let registry = Registry::new(RegistryConfig::resolve(registry_override.as_deref(), offline));
+    let meta = match registry.metadata(&name) {
+        Ok(m) => m,
+        Err(e) => die(&format!("{e}")),
+    };
+    let version = match version {
+        Some(v) => hs_pm::semver::Version::parse(&v)
+            .unwrap_or_else(|e| die(&format!("bad version '{v}': {e}"))),
+        None => match meta.versions.iter().max_by_key(|v| v.version.clone()) {
+            Some(v) => v.version.clone(),
+            None => die(&format!("{name} has no published versions")),
+        },
+    };
+    let integrity = meta
+        .versions
+        .iter()
+        .find(|v| v.version == version)
+        .and_then(|v| v.integrity.clone());
+    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("."));
+    let downloader = hs_pm::download::Downloader::new(
+        registry,
+        Cache::new(),
+        hs_pm::download::DownloadConfig {
+            offline,
+            parallel: 1,
+            verbose: true,
+            max_bytes: 0,
+        },
+    );
+    match downloader.save_to(&name, &version, integrity.as_deref(), &out_dir) {
+        Ok(f) => {
+            println!("wrote {}", out_dir.join(format!("{name}-{version}.hspkg")).display());
+            println!("  {}", f.summary());
+        }
+        Err(e) => die(&e.message),
+    }
+}
+
 /// `hard publish` — build a `.hspkg` from the project and upload it.
 fn cmd_publish(args: &[String]) {
     let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -1057,6 +1110,9 @@ fn cmd_install(args: &[String]) {
         for (pname, pver) in &report.reused {
             println!("reused {pname}@{pver} (cached)");
         }
+        if !report.downloads.fetched.is_empty() {
+            println!("{}", report.downloads.summary());
+        }
         if report.lock_written {
             println!("locked -> {}", report.lock_path.display());
         }
@@ -1192,6 +1248,32 @@ fn cmd_cache(args: &[String]) {
             println!("cache root: {}", cache.root.display());
             println!("packages: {count}");
             println!("size: {}", human_bytes(bytes));
+            let staged = cache.staged_count();
+            if staged > 0 {
+                println!("partial downloads: {staged} (resume with `hard install`)");
+            }
+            // list every package with its cached versions, sorted
+            let mut names: Vec<String> = std::fs::read_dir(cache.root.join("packages"))
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().is_dir())
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            for name in names {
+                let versions: Vec<String> = cache
+                    .cached_versions(&name)
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect();
+                if versions.is_empty() {
+                    println!("  {name} (no complete archive)");
+                } else {
+                    println!("  {name} {}", versions.join(", "));
+                }
+            }
         }
         "verify" => {
             let cache = Cache::new();

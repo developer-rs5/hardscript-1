@@ -13,6 +13,7 @@
 //!   cache/
 //!     index/<name>.json                 registry metadata cache
 //!     packages/<name>/<version>.hspkg   package archive
+//!     packages/<name>/<version>.hspkg.part  download in progress (resumable)
 //!     packages/<name>/<version>/        extracted sources
 //! ```
 
@@ -75,11 +76,88 @@ impl Cache {
             .join(format!("{}-{version}.hspkg", sanitize(name)))
     }
 
+    /// Where an in-progress download is staged. A `.part` file is only ever
+    /// renamed onto the real archive after its digest verifies, so a
+    /// half-written download can never be mistaken for a cached package.
+    pub fn part_path(&self, name: &str, version: &str) -> PathBuf {
+        let safe = sanitize(name);
+        self.root
+            .join("packages")
+            .join(name)
+            .join(format!("{safe}-{version}.hspkg.part"))
+    }
+
+    /// Bytes already staged for an interrupted download (0 if none).
+    pub fn staged_size(&self, name: &str, version: &str) -> u64 {
+        std::fs::metadata(self.part_path(name, version))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// Move a verified `.part` file into place. Fails if the staged bytes do
+    /// not hash to `integrity`.
+    pub fn finalize_part(
+        &self,
+        name: &str,
+        version: &str,
+        integrity: &str,
+    ) -> Result<(), String> {
+        let part = self.part_path(name, version);
+        let bytes = std::fs::read(&part)
+            .map_err(|e| format!("cannot read {}: {e}", part.display()))?;
+        let got = pkgfmt::sha256_hex(&bytes);
+        let want = integrity.strip_prefix("sha256:").unwrap_or(integrity);
+        if got != want {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!(
+                "integrity mismatch for {name}@{version}: got {got}, want {want}"
+            ));
+        }
+        let dest = self.archive_path(name, version);
+        std::fs::rename(&part, &dest).map_err(|e| {
+            format!(
+                "cannot move {} to {}: {e}",
+                part.display(),
+                dest.display()
+            )
+        })
+    }
+
+    /// Throw away a staged download.
+    pub fn drop_part(&self, name: &str, version: &str) {
+        let _ = std::fs::remove_file(self.part_path(name, version));
+    }
+
+    /// How many versions have an interrupted download.
+    pub fn staged_count(&self) -> usize {
+        let mut n = 0;
+        let Ok(rd) = std::fs::read_dir(self.root.join("packages")) else {
+            return 0;
+        };
+        for e in rd.flatten() {
+            let Ok(inner) = std::fs::read_dir(e.path()) else {
+                continue;
+            };
+            for f in inner.flatten() {
+                if f.file_name().to_string_lossy().ends_with(".hspkg.part") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     pub fn source_dir(&self, name: &str, version: &str) -> PathBuf {
         self.root
             .join("packages")
             .join(name)
             .join(format!("{}-{version}.src", sanitize(name)))
+    }
+
+    /// The metadata sidecar path (public so the downloader can drop a bad
+    /// entry together with its archive).
+    pub fn meta_path_for(&self, name: &str, version: &str) -> PathBuf {
+        self.meta_path(name, version)
     }
 
     fn meta_path(&self, name: &str, version: &str) -> PathBuf {
@@ -97,8 +175,12 @@ impl Cache {
 
     /// Is this exact version present in the cache?
     pub fn has(&self, name: &str, version: &Version) -> bool {
-        self.archive_path(name, &version.to_string()).exists()
-            && self.meta_path(name, &version.to_string()).exists()
+        self.has_version(name, &version.to_string())
+    }
+
+    /// Is this exact version present in the cache? (string form)
+    pub fn has_version(&self, name: &str, version: &str) -> bool {
+        self.archive_path(name, version).exists() && self.meta_path(name, version).exists()
     }
 
     /// Every cached version of `name`. Deterministic (ascending version order).
@@ -150,16 +232,18 @@ impl Cache {
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{name}@{version}: {e}"))?;
         let got = pkgfmt::sha256_hex(&bytes);
+        // recorded digests may or may not carry the `sha256:` prefix
         let want = self
             .meta(name, version)
             .map(|m| m.integrity)
+            .map(|i| i.trim_start_matches("sha256:").to_string())
             .unwrap_or_default();
         if want.is_empty() {
             // No recorded hash: verify structural validity instead.
             pkgfmt::read_archive(&bytes)
                 .map(|_| ())
                 .map_err(|e| format!("{name}@{version}: {e}"))
-        } else if got == want {
+        } else if got.eq_ignore_ascii_case(&want) {
             Ok(())
         } else {
             Err(format!(
@@ -170,8 +254,81 @@ impl Cache {
 
     // -- write --------------------------------------------------------------
 
+    /// Store archive bytes and their extracted sources in the cache.
+    ///
+    /// This is the only writer of `packages/<name>/<version>.hspkg`: the
+    /// archive is validated, hashed, written atomically and only then
+    /// extracted, so a crash can leave a `.tmp` file but never a half-written
+    /// package that `has()` would report as present. Returns the recorded
+    /// `sha256:<hex>`.
+    pub fn put_bytes(
+        &self,
+        name: &str,
+        version: &str,
+        bytes: &[u8],
+        registry: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<String, String> {
+        let integrity = pkgfmt::sha256_hex(bytes);
+        let files = pkgfmt::read_archive(bytes)
+            .map_err(|e| format!("refusing to cache invalid package {name}@{version}: {e}"))?;
+        let dir = self.root.join("packages").join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
+
+        atomic_write_bytes(&self.archive_path(name, version), bytes)?;
+        // an older, larger version's extracted tree must not linger
+        let src_dir = self.source_dir(name, version);
+        if src_dir.exists() {
+            let _ = std::fs::remove_dir_all(&src_dir);
+        }
+        std::fs::create_dir_all(&src_dir).map_err(|e| format!("cannot create source dir: {e}"))?;
+        pkgfmt::unpack(bytes, &src_dir).map_err(|e| format!("extract failed: {e}"))?;
+
+        let rel_paths: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
+        let recorded = format!("sha256:{integrity}");
+        let meta = CachedMeta {
+            name: name.to_string(),
+            version: version.to_string(),
+            integrity: recorded.clone(),
+            registry: registry.map(String::from),
+            deps: rel_paths.clone(),
+            description: description.map(String::from),
+        };
+        let json = hs_compiler::json::Json::obj(vec![
+            ("name", hs_compiler::json::Json::str(&meta.name)),
+            ("version", hs_compiler::json::Json::str(&meta.version)),
+            ("integrity", hs_compiler::json::Json::str(&meta.integrity)),
+            (
+                "registry",
+                match &meta.registry {
+                    Some(r) => hs_compiler::json::Json::str(r),
+                    None => hs_compiler::json::Json::Null,
+                },
+            ),
+            (
+                "files",
+                hs_compiler::json::Json::arr(
+                    rel_paths.iter().map(hs_compiler::json::Json::str).collect(),
+                ),
+            ),
+            (
+                "description",
+                match &meta.description {
+                    Some(d) => hs_compiler::json::Json::str(d),
+                    None => hs_compiler::json::Json::Null,
+                },
+            ),
+        ]);
+        atomic_write_bytes(
+            &self.meta_path(name, version),
+            json.to_string().as_bytes(),
+        )?;
+        Ok(recorded)
+    }
+
     /// Store an archive and its extracted sources in the cache. The archive's
     /// integrity is verified before it is kept.
+    #[allow(clippy::too_many_arguments)]
     pub fn put(
         &self,
         name: &str,
@@ -180,42 +337,14 @@ impl Cache {
         registry: Option<&str>,
         description: Option<&str>,
     ) -> Result<(), String> {
-        let integrity = pkgfmt::sha256_hex(archive);
-        pkgfmt::read_archive(archive)
-            .map_err(|e| format!("refusing to cache invalid package {name}@{version}: {e}"))?;
-        let dir = self.root.join("packages").join(name);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
-
-        let archive_path = self.archive_path(name, &version.to_string());
-        atomic_write_bytes(&archive_path, archive)?;
-        let src_dir = self.source_dir(name, &version.to_string());
-        std::fs::create_dir_all(&src_dir).map_err(|e| format!("cannot create source dir: {e}"))?;
-        pkgfmt::unpack(archive, &src_dir).map_err(|e| format!("extract failed: {e}"))?;
-
-        let meta = CachedMeta {
-            name: name.to_string(),
-            version: version.to_string(),
-            integrity,
-            registry: registry.map(String::from),
-            deps: Vec::new(),
-            description: description.map(String::from),
-        };
-        let json = hs_compiler::json::Json::obj(vec![
-            ("name", hs_compiler::json::Json::str(&meta.name)),
-            ("version", hs_compiler::json::Json::str(&meta.version)),
-            ("integrity", hs_compiler::json::Json::str(&meta.integrity)),
-            ("registry", match &meta.registry {
-                Some(r) => hs_compiler::json::Json::str(r),
-                None => hs_compiler::json::Json::Null,
-            }),
-            ("deps", hs_compiler::json::Json::arr(Vec::new())),
-            ("description", match &meta.description {
-                Some(d) => hs_compiler::json::Json::str(d),
-                None => hs_compiler::json::Json::Null,
-            }),
-        ]);
-        atomic_write_bytes(&self.meta_path(name, &version.to_string()), json.to_string().as_bytes())?;
-        Ok(())
+        self.put_bytes(
+            name,
+            &version.to_string(),
+            archive,
+            registry,
+            description,
+        )
+        .map(|_| ())
     }
 
     /// Copy a local directory into the cache as a package archive (used by

@@ -5,6 +5,7 @@
 //! package-manager command.
 
 use crate::cache::Cache;
+use crate::download::{BatchReport, DownloadConfig, Downloader};
 use crate::lockfile::{Lockfile, LOCKFILE_SCHEMA};
 use crate::manifest::Manifest;
 use crate::registry::{Registry, RegistryConfig};
@@ -26,6 +27,8 @@ pub struct InstallConfig {
     pub cache: Cache,
     /// Resolve only against the cache; never touch the registry.
     pub frozen: bool,
+    /// How many packages may download at once.
+    pub parallel: usize,
 }
 
 /// The result of an install/update/remove cycle.
@@ -41,6 +44,8 @@ pub struct InstallReport {
     /// ASCII dependency graph (deterministic).
     pub graph: String,
     pub errors: Vec<String>,
+    /// Download counters: hits, misses, bytes and requests.
+    pub downloads: BatchReport,
 }
 
 impl InstallReport {
@@ -302,19 +307,43 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
         }
     };
 
-    // Materialize: ensure every resolved package is present (cache + project).
+    // Materialize: fetch everything that is not already cached (in
+    // parallel, bounded by cfg.parallel), then link it into the project.
+    let wanted: Vec<(String, Version, Option<String>)> = resolution
+        .packages
+        .iter()
+        .filter(|p| p.source != SourceKind::Workspace)
+        .map(|p| (p.name.clone(), p.version.clone(), p.integrity.clone()))
+        .collect();
+    let downloader = Downloader::new(
+        cfg.registry.clone(),
+        cfg.cache.clone(),
+        DownloadConfig {
+            offline: cfg.offline || cfg.frozen,
+            parallel: cfg.parallel,
+            verbose: cfg.verbose,
+            max_bytes: 0,
+        },
+    );
+    let batch = downloader.fetch_all(&wanted);
+    for f in &batch.fetched {
+        match f.source {
+            crate::download::Source::Cache => report.reused.push((f.name.clone(), f.version.clone())),
+            _ => report.fetched.push((f.name.clone(), f.version.clone())),
+        }
+    }
+    // A failed download is a failed install: report every one of them, not
+    // just the first, and do not write a lockfile for a partial tree.
+    let download_errors = batch.errors.clone();
+    report.downloads = batch;
+    report.errors.extend(download_errors);
+    if !report.errors.is_empty() {
+        return report;
+    }
+
     for p in &resolution.packages {
-        match ensure_package(cfg, p) {
-            Ok(fetched) => {
-                if fetched {
-                    report.fetched.push((p.name.clone(), p.version.clone()));
-                } else {
-                    report.reused.push((p.name.clone(), p.version.clone()));
-                }
-            }
-            Err(e) => {
-                report.errors.push(e);
-            }
+        if let Err(e) = link_package(cfg, p) {
+            report.errors.push(e);
         }
     }
     if !report.errors.is_empty() {
@@ -364,49 +393,9 @@ fn resolver_errors(e: ResolveError) -> Vec<String> {
     v
 }
 
-/// Make sure a resolved package is present in the cache and the project's
-/// `.hard/packages/`. Returns true when it was downloaded this run.
-fn ensure_package(cfg: &InstallConfig, p: &ResolvedPackage) -> Result<bool, String> {
-    if p.source == SourceKind::Workspace {
-        return Ok(false);
-    }
-    let version_str = p.version.to_string();
-    let cached = cfg.cache.has(&p.name, &p.version);
-    if cached {
-        cfg.cache
-            .verify_version(&p.name, &version_str)
-            .map_err(|e| format!("cached {}@{version_str}: {e}", p.name))?;
-    } else {
-        if cfg.offline || cfg.frozen {
-            return Err(format!(
-                "{}@{} is not in the cache and the registry is offline",
-                p.name, version_str
-            ));
-        }
-        crate::tui::progress::start(&format!("fetch {}@{version_str}", p.name));
-        let archive = cfg
-            .registry
-            .download(&p.name, &p.version, p.integrity.as_deref())
-            .map_err(|e| format!("cannot download {}@{version_str}: {e}", p.name))?;
-        cfg.cache
-            .put(
-                &p.name,
-                &p.version,
-                &archive,
-                Some(&cfg.registry.config.url),
-                None,
-            )
-            .map_err(|e| format!("cannot cache {}@{version_str}: {e}", p.name))?;
-        crate::tui::progress::finish(&format!("fetch {}@{version_str}", p.name), true);
-        return link_package(cfg, p);
-    }
-
-    link_package(cfg, p)
-}
-
 /// Copy a cached package's extracted source into `.hard/packages/<name>` and
 /// update the marker metadata.
-fn link_package(cfg: &InstallConfig, p: &ResolvedPackage) -> Result<bool, String> {
+fn link_package(cfg: &InstallConfig, p: &ResolvedPackage) -> Result<(), String> {
     let version_str = p.version.to_string();
     let src = cfg.cache.source_dir(&p.name, &version_str);
     let dest = cfg
@@ -417,6 +406,11 @@ fn link_package(cfg: &InstallConfig, p: &ResolvedPackage) -> Result<bool, String
     if dest.exists() {
         let _ = std::fs::remove_dir_all(&dest);
     }
+    // Always materialize the directory, even when the cached source tree is
+    // missing: the marker below has to land somewhere, and an empty
+    // `.hard/packages/<name>` is a clearer signal than a write error.
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
     copy_tree(&src, &dest).map_err(|e| {
         format!(
             "cannot install {}@{version_str} into {}: {e}",
@@ -437,7 +431,7 @@ fn link_package(cfg: &InstallConfig, p: &ResolvedPackage) -> Result<bool, String
     }
     std::fs::write(dest.join(".hs-pkg.json"), marker.to_string())
         .map_err(|e| format!("cannot write marker: {e}"))?;
-    Ok(false)
+    Ok(())
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
@@ -572,6 +566,15 @@ pub fn base_config(
     compiler_version: &str,
 ) -> InstallConfig {
     let reg_cfg = RegistryConfig::resolve(manifest.registry.as_deref(), offline);
+    let parallel = std::env::var("HARD_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().min(8))
+                .unwrap_or(4)
+        });
     InstallConfig {
         manifest,
         project_root,
@@ -582,5 +585,6 @@ pub fn base_config(
         registry: Registry::new(reg_cfg),
         cache: Cache::new(),
         frozen: false,
+        parallel,
     }
 }
