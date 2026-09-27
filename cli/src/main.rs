@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod compose;
+mod environments;
 mod deploy;
 mod dockerfile;
 mod migrate;

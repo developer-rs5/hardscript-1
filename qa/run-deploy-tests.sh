@@ -237,6 +237,95 @@ else
     echo "deploy: skip the helper (no .hard/migrate-helper; run hard migrate first)"
 fi
 
+# ---- environments -----------------------------------------------------------
+# The env file is written by a heredoc over ssh, so the only way to know the
+# quoting is right is to run it and source the result.
+cat >> "$APP/hard.toml" <<'TOML'
+
+[env.production]
+host = "deploy@api.example.com"
+dir = "SRV_PLACEHOLDER"
+secrets = ["SESSION_KEY", "DATABASE_URL"]
+
+[env.production.vars]
+RUST_LOG = "info"
+MOTD = "it's fine"
+TOML
+sed -i "s|SRV_PLACEHOLDER|$SRV|" "$APP/hard.toml"
+
+if "$HARD" deploy env list 2>/dev/null | grep -q "deploy@api.example.com (dir $SRV"; then
+    pass "env list names the environment and where it goes"
+else
+    fail "env list names the environment and where it goes"
+fi
+
+ENV_PLAN="$TMP/envplan.txt"
+"$HARD" deploy ssh --print --no-build --no-health --no-migrate --env production \
+    > "$ENV_PLAN" 2>"$TMP/err"
+if grep -q "cat > '$SRV/shared/env' <<'HS_ENV_EOF'" "$ENV_PLAN"; then
+    pass "a deploy writes shared/env with a quoted heredoc"
+else
+    fail "a deploy writes shared/env with a quoted heredoc"
+fi
+if grep -q "grep -q \"^SESSION_KEY=\" " "$ENV_PLAN"; then
+    pass "and checks the host for the secrets by name"
+else
+    fail "and checks the host for the secrets by name"
+fi
+
+# The write step, for real, against the scratch root.
+sed -n '/^config    umask/,/^chmod 0644/p' "$ENV_PLAN" | sed 's/^config    //' > "$TMP/envwrite.sh"
+if sh -e "$TMP/envwrite.sh" 2>"$TMP/err"; then
+    pass "the env write step runs as sh"
+else
+    fail "the env write step ($(head -2 "$TMP/err" | tr '\n' ' '))"
+fi
+if ( set +u; . "$SRV/shared/env" && [ "$RUST_LOG" = "info" ] && [ "$MOTD" = "it's fine" ] ); then
+    pass "the file it wrote is sourceable, apostrophes and all"
+else
+    fail "the file it wrote is sourceable, apostrophes and all"
+fi
+if grep -q "^HS_ENVIRONMENT=production$" "$SRV/shared/env" && grep -q "^HS_RELEASE=" "$SRV/shared/env"; then
+    pass "and says which environment and release a service is running"
+else
+    fail "and says which environment and release a service is running"
+fi
+if grep -q "^SESSION_KEY=\|^DATABASE_URL=" "$SRV/shared/env"; then
+    fail "and names no secret in it"
+else
+    pass "and names no secret in it"
+fi
+
+# The secret check, for real: absent file, then present file, then one missing.
+SECHECK=$(sed -n '/^config    f=/p' "$ENV_PLAN" | sed 's/^config    //')
+if printf '%s' "$SECHECK" | sh -e 2>"$TMP/err"; then
+    fail "the secret check fails when the file is absent"
+else
+    pass "the secret check fails when the file is absent"
+fi
+if grep -q "no .*env.secrets on this host" "$TMP/err"; then
+    pass "and says which file is missing"
+else
+    fail "and says which file is missing"
+fi
+printf 'SESSION_KEY=abc\n' > "$SRV/shared/env.secrets"
+if printf '%s' "$SECHECK" | sh -e 2>"$TMP/err"; then
+    fail "the secret check fails when a variable is missing"
+else
+    pass "the secret check fails when a variable is missing"
+fi
+if grep -q "^DATABASE_URL is not set in" "$TMP/err"; then
+    pass "and names the variable that is missing"
+else
+    fail "and names the variable that is missing"
+fi
+printf 'SESSION_KEY=abc\nDATABASE_URL=postgres://u@h/d\n' > "$SRV/shared/env.secrets"
+if printf '%s' "$SECHECK" | sh -e 2>"$TMP/err"; then
+    pass "and passes once the host has them"
+else
+    fail "and passes once the host has them ($(head -2 "$TMP/err" | tr '\n' ' '))"
+fi
+
 # ---- the shell the tool generates is the shell that runs ---------------------
 # A plan is only trustworthy if the commands in it are the commands that run.
 # Every remote command the executor sends has to appear in the print.

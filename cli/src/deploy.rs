@@ -8,6 +8,7 @@
 //! project, calls a generator, and writes the answer to disk.
 
 use crate::dockerfile::{self, DockerConfig};
+use crate::environments::{self, Environment};
 use crate::release::{self, DeployConfig, DeployPlan, ReleaseId, RemoteLayout};
 use crate::ssh::{SshTarget, SystemSsh};
 use crate::{die, find_target, write, Manifest};
@@ -20,6 +21,7 @@ pub fn cmd_deploy(args: &[String]) {
     match sub {
         "compose" => cmd_compose(rest),
         "ssh" => cmd_ssh(rest),
+        "env" => environments::cmd_env(rest),
         "help" | "-h" | "--help" => help(),
         other => {
             eprintln!("hard deploy: unknown subcommand '{other}'");
@@ -35,6 +37,7 @@ fn help() {
          \n\
          \x20 hard deploy compose [file]        Write docker-compose.yml for this project\n\
          \x20 hard deploy ssh <host>            Build, upload, and restart this service\n\
+         \x20 hard deploy env <sub>            List, show, render, or check environments\n\
          \x20 hard deploy help                 Show this help"
     );
 }
@@ -202,8 +205,13 @@ pub struct SshArgs {
     pub health_path: Option<String>,
     pub health_port: u16,
     pub health_timeout: u32,
+    /// Whether `--health-timeout` was given; without this a default of 30 would
+    /// silently beat the number in the environment.
+    pub health_timeout_set: bool,
     /// Replaces the restart command, for a host without systemd.
     pub restart: Option<String>,
+    /// The named environment from `hard.toml` to deploy as.
+    pub env: Option<String>,
     /// Print the plan and stop.
     pub print: bool,
 }
@@ -223,7 +231,9 @@ impl Default for SshArgs {
             health_path: None,
             health_port: 0,
             health_timeout: 30,
+            health_timeout_set: false,
             restart: None,
+            env: None,
             print: false,
         }
     }
@@ -280,6 +290,10 @@ pub fn parse_ssh_args(args: &[String]) -> Result<SshArgs, String> {
                 out.restart = Some(value_at(&norm, i, a)?);
                 i += 2;
             }
+            "--env" => {
+                out.env = Some(value_at(&norm, i, a)?);
+                i += 2;
+            }
             "--health-path" => {
                 out.health_path = Some(value_at(&norm, i, a)?);
                 i += 2;
@@ -293,6 +307,7 @@ pub fn parse_ssh_args(args: &[String]) -> Result<SshArgs, String> {
                 let v = value_at(&norm, i, a)?;
                 out.health_timeout =
                     v.parse().map_err(|_| format!("`{v}` is not a number of seconds"))?;
+                out.health_timeout_set = true;
                 i += 2;
             }
             "--port" => {
@@ -335,14 +350,31 @@ pub fn parse_ssh_args(args: &[String]) -> Result<SshArgs, String> {
     if tcp_only {
         out.health_path = None;
     }
-    out.host = host.ok_or_else(|| "which host? try `hard deploy ssh root@1.2.3.4`".to_string())?;
+    // With `--env` the host may come from the environment, so a missing host is
+    // only an error once the environment has been consulted.
+    out.host = match host {
+        Some(h) => h,
+        None if out.env.is_none() => {
+            return Err("which host? try `hard deploy ssh root@1.2.3.4`".to_string())
+        }
+        None => String::new(),
+    };
     Ok(out)
 }
 
 /// The deploy config for a project: the manifest's port and database, the
-/// health path the program actually has, and the files that travel with the
-/// binary.
-pub fn project_deploy_config(target: &Path, args: &SshArgs) -> Result<DeployConfig, String> {
+/// health path the program actually has, the environment's overrides, and the
+/// files that travel with the binary.
+///
+/// The precedence is deliberate and worth stating once: a flag beats the
+/// environment, the environment beats the manifest, and the manifest beats the
+/// directory name. A flag is a person saying "this time, this host", so it wins
+/// over a file that describes every other day.
+pub fn project_deploy_config(
+    target: &Path,
+    args: &SshArgs,
+    env: Option<&Environment>,
+) -> Result<DeployConfig, String> {
     let docker = project_docker_config(target);
     let manifest = Manifest::load(Path::new("hard.toml")).ok().flatten();
     let app = manifest
@@ -350,9 +382,17 @@ pub fn project_deploy_config(target: &Path, args: &SshArgs) -> Result<DeployConf
         .map(|m| m.name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| docker.app_name.clone());
-    let mut layout = RemoteLayout::new(&args.dir, &app)?;
+    let env = env.cloned();
+    let mut layout = RemoteLayout::new(
+        if args.dir.is_empty() { env.as_ref().map(|e| e.dir.as_str()).unwrap_or("") } else { &args.dir },
+        &app,
+    )?;
+    // `Environment::resolve` fills in the project's default unit, so this only
+    // changes anything when the environment names a different one.
     if let Some(unit) = &args.service {
         layout = layout.with_service(unit)?;
+    } else if let Some(unit) = env.as_ref().map(|e| e.service.clone()) {
+        layout = layout.with_service(&unit)?;
     }
 
     let dialect = manifest
@@ -365,6 +405,8 @@ pub fn project_deploy_config(target: &Path, args: &SshArgs) -> Result<DeployConf
     // overrides it.
     let health_path = if args.health_path.is_some() {
         args.health_path.clone()
+    } else if let Some(path) = env.as_ref().and_then(|e| e.health_path.clone()) {
+        Some(path)
     } else if docker.health_path.is_some() {
         Some("/healthz".to_string())
     } else {
@@ -382,17 +424,31 @@ pub fn project_deploy_config(target: &Path, args: &SshArgs) -> Result<DeployConf
     // The manifest ships with the release when there is one, so the far side
     // knows what it is running without a checkout.
     let manifest_path = Path::new("hard.toml");
-    let manifest = if manifest.is_some() && manifest_path.exists() {
+    let manifest_file = if manifest.is_some() && manifest_path.exists() {
         Some(manifest_path.to_path_buf())
     } else {
         None
     };
 
+    let restart_command = args
+        .restart
+        .clone()
+        .or_else(|| env.as_ref().and_then(|e| e.restart_cmd.clone()));
+    let timeout = match (args.health_timeout_set, env.as_ref().and_then(|e| e.health_timeout)) {
+        (true, _) => args.health_timeout,
+        (false, Some(t)) => t,
+        (false, None) => args.health_timeout,
+    };
+
     Ok(DeployConfig {
         app: dockerfile::sanitize_name(&app),
         layout,
-        manifest: manifest,
-        user: args.user.clone().unwrap_or_else(|| "root".to_string()),
+        manifest: manifest_file,
+        user: args
+            .user
+            .clone()
+            .or_else(|| env.as_ref().and_then(|e| e.user.clone()))
+            .unwrap_or_else(|| "root".to_string()),
         binary,
         migrations,
         static_files,
@@ -401,10 +457,18 @@ pub fn project_deploy_config(target: &Path, args: &SshArgs) -> Result<DeployConf
         verify: args.health,
         run_migrations: args.migrate,
         health_path,
-        health_port: if args.health_port > 0 { args.health_port } else { docker.port },
-        health_timeout: args.health_timeout,
+        health_port: if args.health_port > 0 {
+            args.health_port
+        } else {
+            env.as_ref().and_then(|e| e.port).unwrap_or(docker.port)
+        },
+        health_timeout: timeout,
         health_interval: 2,
-        restart_command: args.restart.clone(),
+        restart_command,
+        // The env file is written by the plan, with the release id in it, so
+        // it is filled in once the id is known.
+        env_body: None,
+        secrets: env.as_ref().map(|e| e.secrets.clone()).unwrap_or_default(),
     })
 }
 
@@ -495,11 +559,34 @@ fn cmd_ssh(args: &[String]) {
     };
     // The local source file, for the build; the remote target, for the deploy.
     let (source, _) = find_target(args);
+    // An environment, when one was asked for, is resolved before the host so
+    // that its host can be the host.
+    let (project, manifest) = environments::project_manifest();
+    let env = match &parsed.env {
+        Some(name) => match environments::resolve(&project, &manifest, name) {
+            Ok(e) => Some(e),
+            Err(e) => die(&e),
+        },
+        None => None,
+    };
+    let mut parsed = parsed;
+    if parsed.host.is_empty() {
+        match env.as_ref().and_then(|e| e.host.clone()) {
+            Some(h) => parsed.host = h,
+            None => die(&format!(
+                "environment `{}` has no host; pass one: `hard deploy ssh --env {} <host>`",
+                parsed.env.clone().unwrap_or_default(),
+                parsed.env.clone().unwrap_or_default()
+            )),
+        }
+    }
     let mut target = match SshTarget::parse(&parsed.host) {
         Ok(t) => t,
         Err(e) => die(&e),
     };
     if let Some(user) = &parsed.user {
+        target.user = user.clone();
+    } else if let Some(user) = env.as_ref().and_then(|e| e.user.clone()) {
         target.user = user.clone();
     }
     if let Some(port) = parsed.port {
@@ -508,7 +595,6 @@ fn cmd_ssh(args: &[String]) {
     // The account being deployed to decides whether the restart needs sudo, so
     // it has to reach the config even when it came from `user@host` rather than
     // from `--user`.
-    let mut parsed = parsed;
     parsed.user = Some(target.user.clone());
 
     if parsed.build {
@@ -523,7 +609,7 @@ fn cmd_ssh(args: &[String]) {
         }
     }
 
-    let cfg = match project_deploy_config(&source, &parsed) {
+    let mut cfg = match project_deploy_config(&source, &parsed, env.as_ref()) {
         Ok(c) => c,
         Err(e) => die(&e),
     };
@@ -531,6 +617,11 @@ fn cmd_ssh(args: &[String]) {
         Ok(i) => i,
         Err(e) => die(&e),
     };
+    // The env file names the release, so it can only be rendered once the id
+    // is known.
+    if let Some(env) = &env {
+        cfg.env_body = Some(environments::render_env_file(env, &id.to_string()));
+    }
     let plan = DeployPlan::build(&cfg, &id);
 
     if parsed.print {
@@ -546,6 +637,9 @@ fn cmd_ssh(args: &[String]) {
 
     println!("deploying {} to {}", cfg.app, target.label());
     println!("  release {}", id);
+    if let Some(e) = &env {
+        println!("  env     {}", e.name);
+    }
     println!("  root    {}", cfg.layout.root);
     println!("  {} files, {} service", plan.upload_count(), cfg.layout.service);
     let mut ssh = SystemSsh::new();
@@ -802,7 +896,7 @@ mod tests {
         let s = Scratch::new("config");
         let target = s.file("main.hard", "GET \"/\" :: {\n    <- 1\n}\n");
         let args = SshArgs { host: "root@h".to_string(), ..SshArgs::default() };
-        let cfg = project_deploy_config(&target, &args).expect("a config");
+        let cfg = project_deploy_config(&target, &args, None).expect("a config");
         // With no manifest the name comes from the working directory, so assert
         // the relationship rather than a literal: the root is the name under
         // /srv, and the unit is the name with `.service`.
@@ -819,13 +913,111 @@ mod tests {
             health_port: 8080,
             ..SshArgs::default()
         };
-        let cfg = project_deploy_config(&target, &args).expect("a config");
+        let cfg = project_deploy_config(&target, &args, None).expect("a config");
         assert_eq!(cfg.layout.root, "/opt/web", "--dir");
         assert_eq!(cfg.layout.service, "web.service", "--service");
         assert_eq!(cfg.user, "deploy", "--user, which decides the sudo prefix");
         assert_eq!(cfg.health_path.as_deref(), Some("/live"), "--health-path overrides the source");
         assert_eq!(cfg.health_port, 8080, "--health-port");
         let bad = SshArgs { host: "root@h".to_string(), dir: "/opt/web; rm -rf /".to_string(), ..SshArgs::default() };
-        assert!(project_deploy_config(&target, &bad).is_err(), "and a root that is a shell problem is refused");
+        assert!(project_deploy_config(&target, &bad, None).is_err(), "and a root that is a shell problem is refused");
+    }
+
+    fn environment() -> Environment {
+        Environment {
+            name: "production".to_string(),
+            host: Some("deploy@app.example.com".to_string()),
+            dir: "/srv/api".to_string(),
+            service: "api.service".to_string(),
+            user: Some("deploy".to_string()),
+            port: Some(8080),
+            health_path: Some("/live".to_string()),
+            health_timeout: Some(90),
+            restart_cmd: Some("rc-service api restart".to_string()),
+            vars: vec![("RUST_LOG".to_string(), "info".to_string())],
+            secrets: vec!["DATABASE_URL".to_string()],
+        }
+    }
+
+    #[test]
+    fn an_environment_supplies_what_a_flag_does_not() {
+        let s = Scratch::new("envcfg");
+        let target = s.file("main.hard", "GET \"/\" :: {\n    <- 1\n}\n");
+        let env = environment();
+        let args = SshArgs { host: String::new(), env: Some("production".to_string()), ..SshArgs::default() };
+        let cfg = project_deploy_config(&target, &args, Some(&env)).expect("a config");
+        assert_eq!(cfg.layout.root, "/srv/api", "the environment's root");
+        assert_eq!(cfg.layout.service, "api.service", "and its unit");
+        assert_eq!(cfg.user, "deploy", "and the account it deploys as");
+        assert_eq!(cfg.health_port, 8080, "and the port it probes");
+        assert_eq!(cfg.health_path.as_deref(), Some("/live"), "and the path");
+        assert_eq!(cfg.health_timeout, 90, "and how long it waits");
+        assert_eq!(cfg.restart_command.as_deref(), Some("rc-service api restart"), "and how it restarts");
+        assert_eq!(cfg.secrets, vec!["DATABASE_URL".to_string()], "and which secrets the host must have");
+        // A flag still wins: a person on the command line outranks a file.
+        let override_args = SshArgs {
+            dir: "/opt/other".to_string(),
+            health_port: 9000,
+            health_timeout: 5,
+            health_timeout_set: true,
+            ..args.clone()
+        };
+        let cfg = project_deploy_config(&target, &override_args, Some(&env)).expect("a config");
+        assert_eq!(cfg.layout.root, "/opt/other", "--dir beats the environment");
+        assert_eq!(cfg.health_port, 9000, "--health-port beats it");
+        assert_eq!(cfg.health_timeout, 5, "and so does --health-timeout");
+    }
+
+    #[test]
+    fn a_deploy_with_no_environment_has_nothing_to_configure() {
+        let s = Scratch::new("noenv");
+        let target = s.file("main.hard", "GET \"/\" :: {\n    <- 1\n}\n");
+        let args = SshArgs { host: "root@h".to_string(), ..SshArgs::default() };
+        let cfg = project_deploy_config(&target, &args, None).expect("a config");
+        assert!(cfg.env_body.is_none(), "no env file to write");
+        assert!(cfg.secrets.is_empty(), "and no secrets to check");
+        let plan = DeployPlan::build(&cfg, &ReleaseId::parse("v1").unwrap());
+        assert!(
+            !plan.steps.iter().any(|s| s.kind == release::StepKind::Config),
+            "and no config step"
+        );
+    }
+
+    #[test]
+    fn a_deploy_with_an_environment_writes_it_and_checks_its_secrets() {
+        let s = Scratch::new("envplan");
+        let target = s.file("main.hard", "GET \"/\" :: {\n    <- 1\n}\n");
+        let env = environment();
+        let args = SshArgs { host: String::new(), env: Some("production".to_string()), ..SshArgs::default() };
+        let mut cfg = project_deploy_config(&target, &args, Some(&env)).expect("a config");
+        let id = ReleaseId::parse("1.0.0-20250915T070530Z-abcdef12").unwrap();
+        cfg.env_body = Some(environments::render_env_file(&env, &id.to_string()));
+        let plan = DeployPlan::build(&cfg, &id);
+        let config_steps: Vec<&release::DeployStep> =
+            plan.steps.iter().filter(|s| s.kind == release::StepKind::Config).collect();
+        assert_eq!(config_steps.len(), 2, "the file and the secret check: {}", plan.render());
+        let write = &config_steps[0].command;
+        assert!(write.contains("/srv/api/shared/env"), "into shared, not into the release: {write}");
+        assert!(write.contains("RUST_LOG=\"info\""), "with the variables: {write}");
+        assert!(write.contains(&format!("HS_RELEASE={id}")), "and the release: {write}");
+        assert!(!write.contains("DATABASE_URL="), "and no secret: {write}");
+        let check = &config_steps[1].command;
+        assert!(check.contains("/srv/api/shared/env.secrets"), "the operator's file: {check}");
+        assert!(check.contains("^DATABASE_URL="), "checked by name: {check}");
+        // Configuration happens before the migration, which may read it, and
+        // long before the restart.
+        let kinds: Vec<release::StepKind> = plan.steps.iter().map(|s| s.kind).collect();
+        let first_config = kinds.iter().position(|k| *k == release::StepKind::Config).expect("a config step");
+        let activate = kinds.iter().position(|k| *k == release::StepKind::Activate).expect("activation");
+        assert!(first_config < activate, "the host is configured before it goes live");
+    }
+
+    #[test]
+    fn an_environment_can_be_what_names_the_host() {
+        let args = parse_ssh_args(&argv(&["--env", "production"])).expect("an environment can carry the host");
+        assert_eq!(args.host, "", "no host on the command line");
+        assert_eq!(args.env.as_deref(), Some("production"), "and the environment to take it from");
+        let err = parse_ssh_args(&argv(&["--no-build"])).unwrap_err();
+        assert!(err.contains("which host"), "without an environment it is still required: {err}");
     }
 }

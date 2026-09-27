@@ -46,6 +46,66 @@ pub struct Manifest {
     pub dependencies: BTreeMap<String, String>,
     pub dev_dependencies: BTreeMap<String, String>,
     pub workspace: Vec<String>,
+    /// Deployment environments, keyed by name (`[env.production]`).
+    pub environments: BTreeMap<String, EnvironmentConfig>,
+}
+
+/// One named deployment environment.
+///
+/// An environment is the answer to "where does this go, and what does it need
+/// set to work there?" -- the host, the service, the port, and the variables.
+/// The defaults live in the manifest; the values that are secret do not, and
+/// are named in `secrets` so the tools can say which ones a host is missing
+/// without ever reading a secret out of a file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnvironmentConfig {
+    /// `user@host`, or a host with the account taken from the current user.
+    pub host: Option<String>,
+    /// The remote root, `/srv/<name>` when unset.
+    pub dir: Option<String>,
+    /// The systemd unit, `<name>.service` when unset.
+    pub service: Option<String>,
+    /// The account to deploy as.
+    pub user: Option<String>,
+    /// The port the service listens on there.
+    pub port: Option<u16>,
+    /// The path a deploy probes after a restart; unset means a TCP probe.
+    pub health_path: Option<String>,
+    /// Seconds to wait for the new release to answer.
+    pub health_timeout: Option<u32>,
+    /// Replaces the restart command, for a host without systemd.
+    pub restart_cmd: Option<String>,
+    /// Variables the deploy writes to the host. Values here are not secret;
+    /// anything secret belongs in `secrets` and in the operator's own file.
+    pub vars: BTreeMap<String, String>,
+    /// Variable names that must be present on the host. The tools check for
+    /// their presence by name and never ask for their values.
+    pub secrets: Vec<String>,
+}
+
+impl EnvironmentConfig {
+    /// Whether the environment sets nothing at all, so it can be left out of
+    /// the rendered manifest instead of being written as an empty table.
+    pub fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && self.dir.is_none()
+            && self.service.is_none()
+            && self.user.is_none()
+            && self.port.is_none()
+            && self.health_path.is_none()
+            && self.health_timeout.is_none()
+            && self.restart_cmd.is_none()
+            && self.vars.is_empty()
+            && self.secrets.is_empty()
+    }
+
+    /// A one-line summary for `hard deploy env list`.
+    pub fn summary(&self) -> String {
+        match &self.host {
+            Some(h) => h.clone(),
+            None => "(no host)".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -98,11 +158,15 @@ pub struct ParseResult {
 const KNOWN_TOP: &[&str] = &[
     "schema", "name", "version", "edition", "description", "authors", "license", "registry",
     "compiler", "server", "database", "dependencies", "dev-dependencies", "dev_dependencies", "workspace",
-    "modules",
+    "modules", "env", "environments",
 ];
 const KNOWN_COMPILER: &[&str] = &["opt", "warnings", "jobs"];
 const KNOWN_SERVER: &[&str] = &["port", "host"];
 const KNOWN_DATABASE: &[&str] = &["dialect", "path", "url"];
+const KNOWN_ENV: &[&str] = &[
+    "host", "dir", "service", "user", "port", "health_path", "health_timeout", "restart_cmd",
+    "vars", "secrets",
+];
 
 /// How detailed diagnostics the caller wants.
 #[derive(Clone, Copy, PartialEq)]
@@ -249,8 +313,30 @@ pub fn parse(src: &str, mode: ManifestMode) -> Result<ParseResult, Vec<ManifestE
         }
     }
 
-    res.manifest.dependencies = parse_dep_table(&doc, "dependencies", &mut errors, &mut res.warnings);
+    // Deployment environments: `[env.production]`, and `[environments]` as the
+    // spelled-out spelling, because a table of tables is easier to find when
+    // the name says what it is.
+    for section in ["env", "environments"] {
+        if let Some(t) = doc.table(section) {
+            for (name, value) in t {
+                let key = format!("{section}.{name}");
+                let entries = match value.as_table() {
+                    Some(e) => e,
+                    None => {
+                        errors.push(manifest_err(
+                            &key,
+                            "an environment must be a table like [env.production]",
+                        ));
+                        continue;
+                    }
+                };
+                let env = parse_environment(name, entries, &key, &mut errors, &mut res.warnings);
+                res.manifest.environments.insert(name.clone(), env);
+            }
+        }
+    }
 
+    res.manifest.dependencies = parse_dep_table(&doc, "dependencies", &mut errors, &mut res.warnings);
     // dev-dependencies spelling may be hyphenated or underscore.
     let dev = parse_dep_table(&doc, "dev-dependencies", &mut errors, &mut res.warnings);
     if !dev.is_empty() {
@@ -365,6 +451,121 @@ pub fn parse(src: &str, mode: ManifestMode) -> Result<ParseResult, Vec<ManifestE
         return Err(errors);
     }
     Ok(res)
+}
+
+/// One `[env.<name>]` table. Unknown keys are warnings, the way they are
+/// everywhere else in the manifest, because a manifest written for a later
+/// version should still deploy.
+fn parse_environment(
+    name: &str,
+    entries: &BTreeMap<String, TomlValue>,
+    key: &str,
+    errors: &mut Vec<ManifestError>,
+    warnings: &mut Vec<ManifestWarning>,
+) -> EnvironmentConfig {
+    let mut env = EnvironmentConfig::default();
+    if !is_valid_package_name(name) {
+        errors.push(manifest_err(
+            &format!("{key}.name"),
+            format!("invalid environment name '{name}': use lowercase letters, digits, '_' or '-'"),
+        ));
+    }
+    for (k, v) in entries {
+        let path = format!("{key}.{k}");
+        match k.as_str() {
+            "host" | "dir" | "service" | "user" | "health_path" | "restart_cmd" => {
+                match v.as_str() {
+                    Some(s) if !s.trim().is_empty() => match k.as_str() {
+                        "host" => env.host = Some(s.to_string()),
+                        "dir" => env.dir = Some(s.to_string()),
+                        "service" => env.service = Some(s.to_string()),
+                        "user" => env.user = Some(s.to_string()),
+                        "health_path" => env.health_path = Some(s.to_string()),
+                        _ => env.restart_cmd = Some(s.to_string()),
+                    },
+                    _ => errors.push(manifest_err(&path, format!("'{k}' must be a non-empty string"))),
+                }
+            }
+            "port" => match v.as_int() {
+                Some(n) if (1..=65535).contains(&n) => env.port = Some(n as u16),
+                Some(_) => errors.push(manifest_err(&path, "port must be between 1 and 65535")),
+                None => errors.push(manifest_err(&path, "'port' must be an integer")),
+            },
+            "health_timeout" => match v.as_int() {
+                Some(n) if n > 0 => env.health_timeout = Some(n as u32),
+                Some(_) => errors.push(manifest_err(&path, "health_timeout must be a positive number of seconds")),
+                None => errors.push(manifest_err(&path, "'health_timeout' must be an integer")),
+            },
+            "vars" => {
+                let table = match v.as_table() {
+                    Some(t) => t,
+                    None => {
+                        errors.push(manifest_err(&path, "'vars' must be a table of NAME = \"value\""));
+                        continue;
+                    }
+                };
+                for (var, value) in table {
+                    // A newline in a value would end the line in the env file
+                    // the deploy writes on the host, silently truncating it.
+                    match value.as_str() {
+                        Some(s) if !s.contains('\n') && is_env_name(var) => {
+                            env.vars.insert(var.clone(), s.to_string());
+                        }
+                        _ => errors.push(manifest_err(
+                            &format!("{path}.{var}"),
+                            "a variable must be a single-line string with an upper-case name like DATABASE_URL",
+                        )),
+                    }
+                }
+            }
+            "secrets" => match v.as_array() {
+                Some(items) => {
+                    for item in items {
+                        match item.as_str() {
+                            Some(s) if is_env_name(s) => {
+                                if !env.secrets.contains(&s.to_string()) {
+                                    env.secrets.push(s.to_string());
+                                }
+                            }
+                            _ => errors.push(manifest_err(
+                                &path,
+                                "secrets must be variable names like \"DATABASE_URL\"",
+                            )),
+                        }
+                    }
+                    env.secrets.sort();
+                }
+                None => errors.push(manifest_err(&path, "'secrets' must be an array of variable names")),
+            },
+            other => warnings.push(ManifestWarning {
+                key: path.clone(),
+                message: format!("unknown environment setting '{other}'"),
+                suggestion: suggest(other, KNOWN_ENV),
+            }),
+        }
+    }
+    // A variable that is written in `vars` cannot also be a secret: the deploy
+    // would write a value into the file the operator was told holds no secrets.
+    for name in &env.secrets {
+        if env.vars.contains_key(name) {
+            errors.push(manifest_err(
+                &format!("{key}.secrets"),
+                format!("'{name}' is in both vars and secrets; a secret is not written to the host"),
+            ));
+        }
+    }
+    env
+}
+
+/// An environment variable name: `UPPER_CASE` or `UPPER_CASE_WITH_1`, which is
+/// what every other tool on the box agrees to read.
+fn is_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && !name.starts_with('_')
 }
 
 fn parse_dep_table(
@@ -528,6 +729,53 @@ impl Manifest {
                 s.push_str(&format!("url = {}\n", toml_quote(u)));
             }
             s.push('\n');
+        }
+
+        if !self.environments.is_empty() {
+            for (name, env) in &self.environments {
+                if env.is_empty() {
+                    continue;
+                }
+                s.push_str(&format!("[env.{name}]\n"));
+                if let Some(h) = &env.host {
+                    s.push_str(&format!("host = {}\n", toml_quote(h)));
+                }
+                if let Some(d) = &env.dir {
+                    s.push_str(&format!("dir = {}\n", toml_quote(d)));
+                }
+                if let Some(u) = &env.service {
+                    s.push_str(&format!("service = {}\n", toml_quote(u)));
+                }
+                if let Some(u) = &env.user {
+                    s.push_str(&format!("user = {}\n", toml_quote(u)));
+                }
+                if let Some(p) = env.port {
+                    s.push_str(&format!("port = {p}\n"));
+                }
+                if let Some(h) = &env.health_path {
+                    s.push_str(&format!("health_path = {}\n", toml_quote(h)));
+                }
+                if let Some(t) = env.health_timeout {
+                    s.push_str(&format!("health_timeout = {t}\n"));
+                }
+                if let Some(c) = &env.restart_cmd {
+                    s.push_str(&format!("restart_cmd = {}\n", toml_quote(c)));
+                }
+                if !env.secrets.is_empty() {
+                    // Before the `vars` subtable: a key written after it would
+                    // land inside that table instead of in the environment.
+                    let names: Vec<String> = env.secrets.iter().map(|s| toml_quote(s)).collect();
+                    s.push_str(&format!("secrets = [{}]\n", names.join(", ")));
+                }
+                if !env.vars.is_empty() {
+                    s.push('\n');
+                    s.push_str(&format!("[env.{name}.vars]\n"));
+                    for (k, v) in &env.vars {
+                        s.push_str(&format!("{k} = {}\n", toml_quote(v)));
+                    }
+                }
+                s.push('\n');
+            }
         }
 
         if !self.dependencies.is_empty() || !self.dev_dependencies.is_empty() {
@@ -748,5 +996,125 @@ datetime = "latest"
         assert_eq!(base.dependencies.len(), 2);
         // merge_dependencies merges only [dependencies], not dev-dependencies
         assert!(base.dev_dependencies.is_empty());
+    }
+
+    const ENVS: &str = r#"schema = 1
+name = "demo"
+version = "1.0.0"
+edition = "2027"
+
+[env.production]
+host = "deploy@app.example.com"
+dir = "/srv/api"
+service = "api.service"
+port = 8080
+health_path = "/live"
+health_timeout = 60
+restart_cmd = "rc-service api restart"
+secrets = ["SESSION_KEY"]
+
+[env.production.vars]
+RUST_LOG = "info"
+HS_ENV = "production"
+
+[env.staging]
+host = "deploy@staging.example.com"
+"#;
+
+    #[test]
+    fn parses_deployment_environments() {
+        let res = parse(ENVS, ManifestMode::Strict).expect("environments parse");
+        let m = &res.manifest;
+        assert_eq!(m.environments.len(), 2, "both environments");
+        let prod = m.environments.get("production").expect("production");
+        assert_eq!(prod.host.as_deref(), Some("deploy@app.example.com"));
+        assert_eq!(prod.dir.as_deref(), Some("/srv/api"));
+        assert_eq!(prod.service.as_deref(), Some("api.service"));
+        assert_eq!(prod.port, Some(8080));
+        assert_eq!(prod.health_path.as_deref(), Some("/live"));
+        assert_eq!(prod.health_timeout, Some(60));
+        assert_eq!(prod.restart_cmd.as_deref(), Some("rc-service api restart"));
+        assert_eq!(prod.vars.get("RUST_LOG").map(String::as_str), Some("info"));
+        assert_eq!(prod.secrets, vec!["SESSION_KEY".to_string()]);
+        let staging = m.environments.get("staging").expect("staging");
+        assert_eq!(staging.summary(), "deploy@staging.example.com", "one line for a list");
+        assert!(!staging.is_empty(), "a host is not an empty environment");
+    }
+
+    #[test]
+    fn environments_round_trip_through_the_renderer() {
+        let res = parse(ENVS, ManifestMode::Strict).expect("parses");
+        let rendered = res.manifest.render();
+        let again = parse(&rendered, ManifestMode::Strict)
+            .unwrap_or_else(|e| panic!("rendered manifest re-parses: {e:?}"));
+        assert_eq!(again.manifest.environments, res.manifest.environments, "byte for byte");
+        // And rendering it again changes nothing, which is what makes a
+        // rewritten manifest show a real diff.
+        assert_eq!(again.manifest.render(), rendered, "the render is stable");
+    }
+
+    #[test]
+    fn a_secret_is_named_not_valued() {
+        let src = r#"schema = 1
+name = "demo"
+version = "1.0.0"
+edition = "2027"
+
+[env.production]
+secrets = ["DATABASE_URL"]
+
+[env.production.vars]
+DATABASE_URL = "postgresql://user:pw@localhost/db"
+"#;
+        let errs = parse(src, ManifestMode::Strict).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.message.contains("both vars and secrets")),
+            "a value for a secret is a hard error: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn an_environment_that_would_break_the_env_file_is_refused() {
+        let cases = [
+            // A newline in a value truncates the file the deploy writes on the host.
+            (r#"[env.p]
+[env.p.vars]
+RUST_LOG = "info\nRUST_BACKTRACE=1""#, "single-line"),
+            // A lowercase name is a different variable to every other tool on the box.
+            (r#"[env.p]
+[env.p.vars]
+rust_log = "info""#, "upper-case"),
+            (r#"[env.p]
+secrets = ["database_url"]"#, "secrets must be variable names"),
+            (r#"[env.p]
+port = 70000"#, "port must be between"),
+            (r#"[env.p]
+port = "8080""#, "'port' must be an integer"),
+            (r#"[env.p]
+health_timeout = 0"#, "positive number of seconds"),
+            (r#"[env.p]
+host = """#, "non-empty string"),
+            (r#"[env.p]
+vars = "RUST_LOG=info""#, "must be a table"),
+            ("[env.Production]\nhost = \"h\"", "invalid environment name"),
+        ];
+        for (body, want) in cases {
+            let src = format!("schema = 1\nname = \"demo\"\nversion = \"1.0.0\"\nedition = \"2027\"\n\n{body}\n");
+            let res = parse(&src, ManifestMode::Strict);
+            let ok = match &res {
+                Ok(_) => false,
+                Err(errs) => errs.iter().any(|e| e.message.contains(want)),
+            };
+            assert!(ok, "expected an error containing {want:?} for:\n{body}\ngot {res:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_environment_setting_is_a_warning_not_an_error() {
+        let src = "schema = 1\nname = \"demo\"\nversion = \"1.0.0\"\nedition = \"2027\"\n\n[env.p]\nhosts = \"eu-west-1\"\n";
+        let res = parse(src, ManifestMode::Lenient).expect("a manifest written for a later version still parses");
+        let w = res.warnings.iter().find(|w| w.key == "env.p.hosts").expect("a warning for it");
+        assert!(w.message.contains("unknown environment setting"), "{}", w.message);
+        assert!(w.suggestion.is_some(), "and a suggestion");
     }
 }

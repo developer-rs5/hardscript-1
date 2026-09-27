@@ -166,6 +166,21 @@ def setup_docker(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+ENVS_TOML = DB_TOML + """
+[env.production]
+host = "deploy@app.example.com"
+dir = "/srv/hsdb"
+port = 8080
+health_path = "/live"
+secrets = ["DATABASE_URL"]
+
+[env.production.vars]
+RUST_LOG = "info"
+
+[env.broken]
+dir = "/srv/hsdb; rm -rf /"
+"""
+
 MIGRATION_SQL = """-- hardscript:migration 0001
 -- hardscript:fingerprint -- table t\\n  "id" INTEGER PRIMARY KEY NOT NULL\\n
 -- hardscript:models
@@ -190,11 +205,24 @@ def setup_deploy(d):
     # migration, and a static file.
     d.mkdir(parents=True, exist_ok=True)
     (d / "main.hard").write_text(MAIN_DEPLOY)
-    (d / "hard.toml").write_text(DB_TOML)
+    (d / "hard.toml").write_text(ENVS_TOML)
     (d / "migrations").mkdir(exist_ok=True)
     (d / "migrations" / "0001_init.sql").write_text(MIGRATION_SQL)
     (d / "static").mkdir(exist_ok=True)
     (d / "static" / "app.css").write_text("body { color: red }\n")
+
+
+def setup_noenv(d):
+    # A project with no environments at all: the tools have to say what to add.
+    setup_deploy(d)
+    (d / "hard.toml").write_text(DB_TOML)
+
+
+def setup_badenv(d):
+    # An environment with a root that would be a shell problem on the host.
+    setup_deploy(d)
+    (d / "hard.toml").write_text(ENVS_TOML.replace(
+        'dir = "/srv/hsdb"\nport = 8080', 'dir = "/srv/hsdb; rm -rf /"\nport = 8080'))
 
 
 def setup_cluster(d):
@@ -210,7 +238,7 @@ SETUPS = {
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
     "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics, "cluster": setup_cluster, "docker": setup_docker,
-    "deploy": setup_deploy,
+    "deploy": setup_deploy, "noenv": setup_noenv, "badenv": setup_badenv,
 }
 
 # id, argv, expected_rc, setup, note
@@ -331,6 +359,20 @@ CASES = [
     ("dp006", ["deploy", "ssh", "--print", "--no-build", "--health-port", "http", "root@example.com"], 2, "deploy", "a health port that is not a number is a usage error"),
     ("dp007", ["deploy", "ssh", "--print", "--no-build", "--nonsense", "root@example.com"], 2, "deploy", "an unknown deploy flag is a usage error"),
     ("dp008", ["deploy", "ssh", "--print", "--no-build", "--no-health", "root@example.com"], 0, "deploy", "a deploy that does not verify still prints"),
+    # environments ===========================================================
+    ("ev001", ["deploy", "env"], 2, "deploy", "env with no subcommand is a usage error"),
+    ("ev002", ["deploy", "env", "nonsense"], 2, "deploy", "an unknown env subcommand is a usage error"),
+    ("ev003", ["deploy", "env", "list"], 0, "deploy", "list environments"),
+    ("ev004", ["deploy", "env", "show", "production"], 0, "deploy", "show one environment"),
+    ("ev005", ["deploy", "env", "show", "nope"], 1, "deploy", "an environment that does not exist fails"),
+    ("ev006", ["deploy", "env", "show"], 2, "deploy", "show with no name is a usage error"),
+    ("ev007", ["deploy", "env", "render", "production"], 0, "deploy", "render the env file"),
+    ("ev008", ["deploy", "env", "check", "production"], 0, "deploy", "check a good environment"),
+    ("ev009", ["deploy", "env", "check", "broken"], 1, "badenv", "a root that is a shell problem fails the check"),
+    ("ev010", ["deploy", "env", "list"], 0, "noenv", "a project with no environments says what to add"),
+    ("ev011", ["deploy", "ssh", "--print", "--no-build", "--env", "production"], 0, "deploy", "an environment can name the host"),
+    ("ev012", ["deploy", "ssh", "--print", "--no-build", "--env", "nope"], 1, "deploy", "an environment that does not exist fails a deploy"),
+    ("ev013", ["deploy", "ssh", "--print", "--no-build", "--env", "broken"], 1, "badenv", "a bad environment fails a deploy before it connects"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

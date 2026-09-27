@@ -209,6 +209,18 @@ impl RemoteLayout {
         format!("{}/hard.toml", self.release_dir(id))
     }
 
+    /// The generated environment file. Not in the release directory: the
+    /// values are per-environment and every release on this host shares them.
+    pub fn env_file(&self) -> String {
+        format!("{}/env", self.shared())
+    }
+
+    /// The file the operator keeps the secrets in. The deploy reads it and
+    /// never writes it.
+    pub fn secrets_file(&self) -> String {
+        format!("{}/env.secrets", self.shared())
+    }
+
     pub fn current(&self) -> String {
         format!("{}/current", self.root)
     }
@@ -352,6 +364,10 @@ pub struct DeployConfig {
     pub health_interval: u32,
     /// Overrides the restart command entirely (OpenRC, `supervisorctl`, ...).
     pub restart_command: Option<String>,
+    /// The environment file to write on the host, and the secrets it must not
+    /// contain. Empty means this deploy has nothing to configure.
+    pub env_body: Option<String>,
+    pub secrets: Vec<String>,
 }
 
 impl Default for DeployConfig {
@@ -373,6 +389,8 @@ impl Default for DeployConfig {
             health_timeout: 30,
             health_interval: 2,
             restart_command: None,
+            env_body: None,
+            secrets: Vec::new(),
         }
     }
 }
@@ -406,6 +424,7 @@ pub enum StepKind {
     /// binary that arrives without the execute bit fails at the restart with a
     /// message about permissions rather than about the deploy.
     Install,
+    Config,
     Migrate,
     Activate,
     Restart,
@@ -419,6 +438,7 @@ impl StepKind {
             StepKind::Prepare => "prepare",
             StepKind::Upload => "upload",
             StepKind::Install => "install",
+            StepKind::Config => "config",
             StepKind::Migrate => "migrate",
             StepKind::Activate => "activate",
             StepKind::Restart => "restart",
@@ -492,6 +512,28 @@ impl DeployPlan {
                 detail: format!("{name}"),
                 command: String::new(),
                 upload: Some((file.clone(), format!("{}/{name}", cfg.layout.static_dir()))),
+            });
+        }
+
+        // Configuration before migrations: a migration that reads a variable
+        // the release has not been given yet fails for the wrong reason.
+        if let Some(body) = &cfg.env_body {
+            steps.push(DeployStep {
+                kind: StepKind::Config,
+                detail: format!("write {}", cfg.layout.env_file()),
+                command: crate::environments::env_write_command(&cfg.layout.env_file(), body),
+                upload: None,
+            });
+        }
+        if !cfg.secrets.is_empty() {
+            steps.push(DeployStep {
+                kind: StepKind::Config,
+                detail: format!("the host has {}", cfg.secrets.join(", ")),
+                command: crate::environments::secrets_check_command(
+                    &cfg.layout.secrets_file(),
+                    &cfg.secrets,
+                ),
+                upload: None,
             });
         }
 
@@ -599,10 +641,12 @@ impl DeployConfig {
         files.sort();
         let files = files.join(" ");
         if dialect.eq_ignore_ascii_case("postgres") {
-            let env_file = sh_quote(&format!("{}/env", self.layout.shared()));
+            let secrets = sh_quote(&self.layout.secrets_file());
+            let env_file = sh_quote(&self.layout.env_file());
+            let source = crate::environments::env_source_lines(&self.layout.shared());
             format!(
-                "if [ -f {env_file} ]; then set -a; . {env_file}; set +a; fi; \
-                 : \"${{DATABASE_URL:?no DATABASE_URL in {env_file}}}\"; \
+                "{source}; \
+                 : \"${{DATABASE_URL:?no DATABASE_URL in {secrets} or {env_file}}}\"; \
                  {helper} up postgres \"$DATABASE_URL\" {files}"
             )
         } else {
@@ -982,6 +1026,50 @@ mod tests {
         assert!(keep < swap, "previous is recorded first: {cmd}");
     }
 
+    /// The activation is shell, and a shell command that does not parse is a
+    /// deploy that fails with a syntax error instead of a release. Run it.
+    #[test]
+    fn the_activation_runs_in_a_shell_and_moves_the_symlink() {
+        let root = std::env::temp_dir().join(format!("hs-activate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = RemoteLayout::new(root.to_str().expect("a path"), "app").expect("a layout");
+        let a = ReleaseId::parse("v1").expect("an id");
+        let b = ReleaseId::parse("v2").expect("an id");
+        for cmd in layout.prepare() {
+            let out = std::process::Command::new("sh").arg("-c").arg(&cmd).output().expect("sh");
+            assert!(out.status.success(), "prepare: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        for id in [&a, &b] {
+            std::fs::create_dir_all(layout.release_dir(id)).expect("a release directory");
+        }
+        let run = |id: &ReleaseId| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(layout.activate(id))
+                .output()
+                .expect("sh runs");
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        };
+        let (ok, pointed, err) = run(&a);
+        assert!(ok, "the first activation runs: {err}");
+        assert_eq!(pointed, layout.release_dir(&a), "and reports where current points");
+        let (ok, pointed, err) = run(&b);
+        assert!(ok, "the second activation runs: {err}");
+        assert_eq!(pointed, layout.release_dir(&b), "current moved");
+        let previous = std::fs::read_link(layout.previous()).expect("previous is a symlink");
+        assert_eq!(previous.display().to_string(), layout.release_dir(&a), "and previous kept the first release");
+        assert!(
+            !std::path::Path::new(&layout.release_dir(&a)).join("releases").exists(),
+            "no link inside the old release"
+        );
+        assert!(!root.join("current.new").exists(), "and no temporary link left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_plan_uploads_the_binary_then_activates_then_restarts() {
         let cfg = config();
@@ -1169,6 +1257,7 @@ mod tests {
         assert!(command.contains("'/srv/app/shared/env'"), "the env file: {command}");
         assert!(command.contains("\"$DATABASE_URL\""), "and the URL from it: {command}");
         assert!(command.contains("'/srv/app/shared/migrations/002_add_email.sql'"), "the files: {command}");
+        assert!(command.contains("'/srv/app/shared/env.secrets'"), "and the operator's secrets file: {command}");
         let kinds: Vec<StepKind> = plan.steps.iter().map(|s| s.kind).collect();
         assert!(
             kinds.iter().position(|k| *k == StepKind::Migrate) < kinds.iter().position(|k| *k == StepKind::Activate),

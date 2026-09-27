@@ -86,3 +86,16 @@ dp005	deploy ssh --print --no-build --dir /opt/web;id root@example.com	1	deploy	
 dp006	deploy ssh --print --no-build --health-port http root@example.com	2	deploy	a health port that is not a number is a usage error
 dp007	deploy ssh --print --no-build --nonsense root@example.com	2	deploy	an unknown deploy flag is a usage error
 dp008	deploy ssh --print --no-build --no-health root@example.com	0	deploy	a deploy that does not verify still prints
+ev001	deploy env	2	deploy	env with no subcommand is a usage error
+ev002	deploy env nonsense	2	deploy	an unknown env subcommand is a usage error
+ev003	deploy env list	0	deploy	list environments
+ev004	deploy env show production	0	deploy	show one environment
+ev005	deploy env show nope	1	deploy	an environment that does not exist fails
+ev006	deploy env show	2	deploy	show with no name is a usage error
+ev007	deploy env render production	0	deploy	render the env file
+ev008	deploy env check production	0	deploy	check a good environment
+ev009	deploy env check broken	1	badenv	a root that is a shell problem fails the check
+ev010	deploy env list	0	noenv	a project with no environments says what to add
+ev011	deploy ssh --print --no-build --env production	0	deploy	an environment can name the host
+ev012	deploy ssh --print --no-build --env nope	1	deploy	an environment that does not exist fails a deploy
+ev013	deploy ssh --print --no-build --env broken	1	badenv	a bad environment fails a deploy before it connects
