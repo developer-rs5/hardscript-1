@@ -265,6 +265,8 @@ impl<'a> P<'a> {
             match self.peek()? {
                 b',' => {
                     self.pos += 1;
+                    // Whitespace is legal after the separator.
+                    self.skip_ws();
                 }
                 b']' => break,
                 _ => return None,
@@ -291,6 +293,8 @@ impl<'a> P<'a> {
             match self.peek()? {
                 b',' => {
                     self.pos += 1;
+                    // Whitespace is legal after the separator.
+                    self.skip_ws();
                 }
                 b'}' => break,
                 _ => return None,
@@ -324,6 +328,16 @@ mod tests {
         assert!(s.contains("\\\""));
         assert!(s.contains("\\n"));
         assert_eq!(parse(&s), Some(v));
+    }
+
+    #[test]
+    fn parses_pretty_printed_documents() {
+        // Whitespace after a separator is legal JSON; the reader must accept
+        // the pretty-printed documents a registry client sends.
+        let pretty = "{\n  \"a\": \"x\",\n  \"b\": [1, 2,\n   3],\n  \"c\": {\"d\": true}\n}";
+        let v = parse(pretty).expect("pretty JSON parses");
+        assert_eq!(v.get("a").and_then(|x| x.as_str()), Some("x"));
+        assert_eq!(v.to_string(), parse(&v.to_string()).unwrap().to_string());
     }
 
     #[test]

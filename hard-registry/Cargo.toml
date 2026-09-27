@@ -1,0 +1,20 @@
+[package]
+name = "hard-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HardScript package registry: REST API, SQLite backend, publish/download/search, PAT authentication, Ed25519 package signatures and mirror replication."
+
+[lib]
+name = "hard_registry"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hard-registry"
+path = "src/main.rs"
+
+[dependencies]
+hs-compiler = { path = "../compiler" }
+hs-pm = { path = "../pm" }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "fast", "zeroize"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
