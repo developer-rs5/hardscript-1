@@ -4,6 +4,12 @@
 //! integrity hash, its dependency tree, plus the compiler/CLI version and
 //! platform metadata that produced it. For identical inputs the lockfile
 //! bytes are identical (all collection ordering is canonical).
+//!
+//! Since v1 it also records *trust*: the signature, key id and manifest
+//! fingerprint of every registry package, and whether that signature was
+//! verified against the local trust store. All four fields are optional, so a
+//! lockfile written by an older `hard` still parses, and one written by a newer
+//! `hard` still loads on an older one (which ignores what it does not know).
 
 use crate::resolver::Resolution;
 use crate::semver::Version;
@@ -21,6 +27,42 @@ pub struct LockedPackage {
     /// Dependency names, in sorted order.
     pub deps: Vec<String>,
     pub source: String,
+    /// Ed25519 signature over the canonical publish payload, base64.
+    pub signature: Option<String>,
+    /// The key id that produced the signature, e.g. `k:0123456789abcdef`.
+    pub key_id: Option<String>,
+    /// The manifest fingerprint the signature covers.
+    pub fingerprint: Option<String>,
+    /// Whether that signature verified against the local trust store.
+    pub verified: bool,
+}
+
+impl LockedPackage {
+    /// Is this entry's trust information present?
+    pub fn has_signature(&self) -> bool {
+        self.signature.is_some() && self.key_id.is_some()
+    }
+
+    /// Attach trust information from a verification.
+    pub fn with_trust(
+        &mut self,
+        signature: Option<&str>,
+        key_id: Option<&str>,
+        fingerprint: Option<&str>,
+        verified: bool,
+    ) -> &mut LockedPackage {
+        if let Some(s) = signature {
+            self.signature = Some(s.to_string());
+        }
+        if let Some(k) = key_id {
+            self.key_id = Some(k.to_string());
+        }
+        if let Some(f) = fingerprint {
+            self.fingerprint = Some(f.to_string());
+        }
+        self.verified = verified;
+        self
+    }
 }
 
 /// A parsed/representable lockfile.
@@ -53,6 +95,10 @@ impl Lockfile {
                     crate::resolver::SourceKind::Registry => "registry".to_string(),
                     crate::resolver::SourceKind::Workspace => "workspace".to_string(),
                 },
+                signature: p.signature.clone(),
+                key_id: p.key_id.clone(),
+                fingerprint: p.fingerprint.clone(),
+                verified: p.verified,
             })
             .collect();
         // Packages are emitted sorted by (source, name, version) so identical
@@ -88,6 +134,21 @@ impl Lockfile {
             s.push_str(&format!("version = \"{}\"\n", p.version));
             if let Some(i) = &p.integrity {
                 s.push_str(&format!("integrity = \"{i}\"\n"));
+            }
+            // Trust fields are written only when there is something to record,
+            // so a lockfile for a workspace with no registry packages keeps
+            // exactly the bytes it had before signatures existed.
+            if p.has_signature() || p.verified {
+                if let Some(sig) = &p.signature {
+                    s.push_str(&format!("signature = \"{}\"\n", escape(sig)));
+                }
+                if let Some(k) = &p.key_id {
+                    s.push_str(&format!("key_id = \"{}\"\n", escape(k)));
+                }
+                if let Some(f) = &p.fingerprint {
+                    s.push_str(&format!("fingerprint = \"{}\"\n", escape(f)));
+                }
+                s.push_str(&format!("verified = {}\n", p.verified));
             }
             if !p.deps.is_empty() {
                 let deps: Vec<String> = p.deps.iter().map(|d| format!("\"{}\"", escape(d))).collect();
@@ -154,12 +215,28 @@ impl Lockfile {
                 .and_then(|v| v.as_str())
                 .unwrap_or("registry")
                 .to_string();
+            // All four are optional: a lockfile from before signature support
+            // parses unchanged, and the entry is simply unverified.
+            let signature = t
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let key_id = t.get("key_id").and_then(|v| v.as_str()).map(String::from);
+            let fingerprint = t
+                .get("fingerprint")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let verified = t.get("verified").and_then(|v| v.as_bool()).unwrap_or(false);
             packages.push(LockedPackage {
                 name: name.clone(),
                 version,
                 integrity,
                 deps,
                 source,
+                signature,
+                key_id,
+                fingerprint,
+                verified,
             });
         }
         packages.sort_by(|a, b| a.name.cmp(&b.name));
@@ -237,6 +314,10 @@ dependencies = []
                     source: "registry".into(),
                     integrity: None,
                     deps: Vec::new(),
+                    signature: None,
+                    key_id: None,
+                    fingerprint: None,
+                    verified: false,
                 },
                 LockedPackage {
                     name: "aaa".into(),
@@ -244,12 +325,120 @@ dependencies = []
                     source: "registry".into(),
                     integrity: None,
                     deps: Vec::new(),
+                    signature: None,
+                    key_id: None,
+                    fingerprint: None,
+                    verified: false,
                 },
             ],
         };
         lf.packages.sort_by(|a, b| a.name.cmp(&b.name));
         let rendered = lf.render();
         assert!(rendered.find("[package.aaa]").unwrap() < rendered.find("[package.zzz]").unwrap());
+    }
+
+    #[test]
+    fn trust_fields_round_trip() {
+        let lf = Lockfile {
+            schema: LOCKFILE_SCHEMA.into(),
+            toolchain: "hard".into(),
+            compiler_version: "0.5.0".into(),
+            platform: "linux-x86_64".into(),
+            packages: vec![LockedPackage {
+                name: "jwt".into(),
+                version: Version::parse("1.0.0").unwrap(),
+                source: "registry".into(),
+                integrity: Some("sha256:aa".into()),
+                deps: Vec::new(),
+                signature: Some("c2ln".into()),
+                key_id: Some("k:0123456789abcdef".into()),
+                fingerprint: Some("sha256:bb".into()),
+                verified: true,
+            }],
+        };
+        let text = lf.render();
+        assert!(text.contains("signature = \"c2ln\""), "{text}");
+        assert!(text.contains("key_id = \"k:0123456789abcdef\""), "{text}");
+        assert!(text.contains("fingerprint = \"sha256:bb\""), "{text}");
+        assert!(text.contains("verified = true"), "{text}");
+        let back = Lockfile::parse(&text).unwrap();
+        assert_eq!(back.packages[0].signature.as_deref(), Some("c2ln"));
+        assert_eq!(back.packages[0].key_id.as_deref(), Some("k:0123456789abcdef"));
+        assert_eq!(back.packages[0].fingerprint.as_deref(), Some("sha256:bb"));
+        assert!(back.packages[0].verified);
+        assert!(back.packages[0].has_signature());
+        // and the re-render is byte-identical below the generated-by comment,
+        // which `parse` deliberately does not recover
+        let body = |s: &str| s.lines().skip(1).collect::<Vec<_>>().join("\n");
+        assert_eq!(body(&back.render()), body(&text));
+    }
+
+    #[test]
+    fn a_lockfile_without_trust_fields_still_parses() {
+        // exactly what an older `hard` wrote
+        let text = "schema = \"hard-lock/v1\"\ncompiler = \"0.4.0\"\nplatform = \"linux\"\n\n[package.lib]\nversion = \"1.0.0\"\nintegrity = \"sha256:abc\"\nsource = \"registry\"\n";
+        let lf = Lockfile::parse(text).unwrap();
+        let p = &lf.packages[0];
+        assert!(p.signature.is_none());
+        assert!(p.key_id.is_none());
+        assert!(p.fingerprint.is_none());
+        assert!(!p.verified);
+        assert!(!p.has_signature());
+        // and re-rendering does not invent trust fields
+        let out = lf.render();
+        assert!(!out.contains("signature"), "{out}");
+        assert!(!out.contains("verified"), "{out}");
+        assert!(out.contains("version = \"1.0.0\""), "{out}");
+    }
+
+    #[test]
+    fn verified_false_is_recorded_when_a_signature_exists() {
+        let lf = Lockfile {
+            schema: LOCKFILE_SCHEMA.into(),
+            toolchain: "hard".into(),
+            compiler_version: "0.5.0".into(),
+            platform: "linux".into(),
+            packages: vec![LockedPackage {
+                name: "jwt".into(),
+                version: Version::parse("1.0.0").unwrap(),
+                source: "registry".into(),
+                integrity: Some("sha256:aa".into()),
+                deps: Vec::new(),
+                signature: Some("c2ln".into()),
+                key_id: Some("k:1".into()),
+                fingerprint: None,
+                verified: false,
+            }],
+        };
+        let text = lf.render();
+        assert!(text.contains("verified = false"), "{text}");
+        assert!(!text.contains("fingerprint"), "absent fields stay absent");
+        let back = Lockfile::parse(&text).unwrap();
+        assert!(!back.packages[0].verified);
+        assert!(back.packages[0].has_signature());
+        assert_eq!(lf.render(), text);
+    }
+
+    #[test]
+    fn with_trust_attaches_and_merges() {
+        let mut p = LockedPackage {
+            name: "jwt".into(),
+            version: Version::parse("1.0.0").unwrap(),
+            source: "registry".into(),
+            integrity: None,
+            deps: Vec::new(),
+            signature: None,
+            key_id: None,
+            fingerprint: None,
+            verified: false,
+        };
+        p.with_trust(Some("c2ln"), Some("k:1"), Some("sha256:aa"), true);
+        assert!(p.has_signature());
+        assert!(p.verified);
+        p.with_trust(None, None, Some("sha256:bb"), false);
+        assert_eq!(p.fingerprint.as_deref(), Some("sha256:bb"));
+        assert_eq!(p.signature.as_deref(), Some("c2ln"), "nothing is cleared");
+        assert!(!p.verified);
     }
 
     #[test]

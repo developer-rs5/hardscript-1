@@ -155,6 +155,8 @@ fn main() {
         "logout" => cmd_logout(rest),
         "whoami" => cmd_whoami(rest),
         "token" => cmd_token(rest),
+        "verify" => cmd_verify(rest),
+        "keys" => cmd_keys(rest),
         "remove" | "rm" => cmd_remove(rest),
         "install" => cmd_install(rest),
         "update" => cmd_update(rest),
@@ -853,6 +855,20 @@ fn cmd_doctor(args: &[String]) {
             }
         }
     }
+
+    // Registry security: which key signs, and do we trust it? This is a
+    // machine-wide fact, so it is reported whether or not this directory has
+    // ever been built. `--no-registry` skips the network round trip.
+    if !args.iter().any(|a| a == "--no-registry") {
+        println!();
+        let registry = Registry::new(RegistryConfig::resolve(None, false));
+        let store = hs_pm::verify::TrustStore::load_default();
+        let diag = hs_pm::verify::diagnose(&registry, &store);
+        print!("{}", diag.render());
+        if !diag.warnings().is_empty() {
+            ok = false;
+        }
+    }
     if !ok {
         std::process::exit(1);
     }
@@ -891,7 +907,7 @@ fn cmd_add(args: &[String]) {
     manifest.dependencies.insert(name.clone(), req.clone());
     write(&project_root.join("hard.toml"), &manifest.render());
 
-    let cfg = base_config_for(manifest, project_root.clone());
+    let cfg = base_config_for(manifest, project_root.clone(), args);
     let report = install::install(&cfg);
     println!("added {name} = \"{req}\" to hard.toml");
     if report.succeeded() {
@@ -1352,6 +1368,215 @@ fn cmd_yank(args: &[String]) {
 }
 
 /// The value of `--name <value>` or `--name=<value>`.
+/// `hard verify <target>` — check a package's signature.
+///
+/// The target is either a local `.hspkg` file (verified against its `.sig`
+/// sidecar) or a `name`/`name@version` on the registry.
+fn cmd_verify(args: &[String]) {
+    use hs_pm::verify;
+    let Some(target) = args.iter().find(|a| !a.starts_with('-')) else {
+        eprintln!("hard verify: missing a package or .hspkg file");
+        eprintln!("usage: hard verify <name>[@<ver>] | <file.hspkg> [--verify=<mode>] [--json] [--write-sidecar]");
+        std::process::exit(2);
+    };
+    let json_out = args.iter().any(|a| a == "--json");
+    let policy = verify_policy(args).unwrap_or_default();
+    let verifier = hs_pm::verify::Verifier::with_store(policy, verify::TrustStore::load_default());
+    let registry = Registry::new(RegistryConfig::resolve(flag_value(args, "--registry").as_deref(), false));
+
+    // A path on disk is verified offline against its sidecar.
+    let as_path = PathBuf::from(target);
+    let (outcome, record) = if as_path.exists() || target.ends_with(".hspkg") {
+        verify::verify_archive_file(&verifier, &as_path)
+    } else {
+        let (name, version) = match target.split_once('@') {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (target.clone(), None),
+        };
+        let version = match version {
+            Some(v) => v,
+            None => {
+                let meta = match registry.metadata(&name) {
+                    Ok(m) => m,
+                    Err(e) => die(&format!("cannot read metadata for '{name}': {e}")),
+                };
+                meta.versions
+                    .iter()
+                    .map(|v| v.version.clone())
+                    .max()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| die(&format!("'{name}' has no published versions")))
+            }
+        };
+        (verifier.verify_remote(&registry, &name, &version), None)
+    };
+
+    if let Some(p) = flag_value(args, "--write-sidecar") {
+        let Some(rec) = &record else {
+            die("--write-sidecar needs a local .hspkg with a known signature");
+        };
+        match verify::write_sidecar(rec, Path::new(&p)) {
+            Ok(path) => println!("wrote {}", path.display()),
+            Err(e) => die(&e),
+        }
+    }
+
+    if json_out {
+        println!("{}", outcome.to_json().to_string());
+    } else {
+        println!("{}", outcome.render());
+    }
+    // `hard verify` was asked to check, so a package that does not check out
+    // is a failed command. The policy only decides what is *installed*.
+    if policy != hs_pm::verify::VerifyPolicy::Off && !outcome.ok() {
+        std::process::exit(1);
+    }
+}
+
+/// `hard keys <list|add|remove|trust|export>` — the local trust store.
+fn cmd_keys(args: &[String]) {
+    use hs_pm::verify::{self, TrustedKey};
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+    let path = flag_value(args, "--file")
+        .map(PathBuf::from)
+        .unwrap_or_else(verify::TrustStore::default_path);
+    let mut store = verify::TrustStore::load(path.clone());
+    let json_out = rest.iter().any(|a| a == "--json");
+
+    match sub {
+        "list" => {
+            if json_out {
+                println!("{}", store.to_json().to_string());
+                return;
+            }
+            if store.is_empty() {
+                println!("no keys recorded ({} does not exist yet)", path.display());
+                println!("add one with: hard keys add <registry-url> | --key <hex> [--trust]");
+                return;
+            }
+            for k in &store.keys {
+                println!(
+                    "{}  {}{}{}",
+                    k.key_id,
+                    if k.trusted { "trusted" } else { "seen   " },
+                    match &k.packages {
+                        Some(p) if !p.is_empty() => format!("  [{}]", p.join(", ")),
+                        _ => String::new(),
+                    },
+                    if k.label.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", k.label)
+                    }
+                );
+            }
+            println!(
+                "{} of {} trusted ({} mode)",
+                store.trusted_count(),
+                store.len(),
+                if store.trusted_count() == 0 {
+                    "nothing will pass --verify=strict"
+                } else {
+                    "strict verification will accept these"
+                }
+            );
+        }
+        "add" => {
+            let hex_key = flag_value(&rest, "--key");
+            let label = flag_value(&rest, "--label").unwrap_or_default();
+            let trust = flag_value(&rest, "--trust").is_some() || rest.iter().any(|a| a == "--trust");
+            let for_pkg = flag_value(&rest, "--for");
+            let key = match hex_key {
+                Some(hex) => {
+                    if !verify::is_valid_public_key(&hex) {
+                        die(&format!("'{hex}' is not a valid ed25519 public key"));
+                    }
+                    let id = match verify::key_id_of(&hex) {
+                        Some(id) => id,
+                        None => die("cannot derive a key id from that key"),
+                    };
+                    TrustedKey {
+                        key_id: id,
+                        public_key: hex,
+                        label: if label.is_empty() { "added by hand".to_string() } else { label },
+                        trusted: trust,
+                        packages: for_pkg.clone().map(|p| vec![p]),
+                    }
+                }
+                None => {
+                    // No key given: read it from a registry.
+                    let url = rest
+                        .iter()
+                        .find(|a| !a.starts_with('-'))
+                        .cloned()
+                        .or_else(|| flag_value(&rest, "--registry"))
+                        .unwrap_or_else(|| die("hard keys add: pass a registry URL or --key <hex>"));
+                    let reg = Registry::new(RegistryConfig::resolve(Some(&url), false));
+                    let k = match verify::RegistryKey::fetch(&reg) {
+                        Ok(k) => k,
+                        Err(e) => die(&format!("cannot read the signing key of {url}: {e}")),
+                    };
+                    if !verify::is_valid_public_key(&k.public_key) {
+                        die("the registry published an invalid public key");
+                    }
+                    println!(
+                        "{} signs with {} ({}{})",
+                        url,
+                        k.key_id,
+                        if k.test_key { "TEST KEY, " } else { "" },
+                        if trust { "pinning now" } else { "recorded, not pinned" }
+                    );
+                    if k.test_key && trust && !rest.iter().any(|a| a == "--allow-test-key") {
+                        println!("(a test key is reproducible by anyone; pass --allow-test-key to pin it anyway)");
+                    }
+                    TrustedKey {
+                        key_id: k.key_id,
+                        public_key: k.public_key,
+                        label: if label.is_empty() { url } else { label },
+                        trusted: trust,
+                        packages: for_pkg.clone().map(|p| vec![p]),
+                    }
+                }
+            };
+            let id = key.key_id.clone();
+            let fresh = store.add(key);
+            store.save().unwrap_or_else(|e| die(&e));
+            println!("{} key {id}", if fresh { "recorded" } else { "updated" });
+        }
+        "trust" => {
+            let Some(id) = rest.iter().find(|a| !a.starts_with('-')) else {
+                die("hard keys trust: missing a key id");
+            };
+            store.trust(id).unwrap_or_else(|e| die(&e));
+            store.save().unwrap_or_else(|e| die(&e));
+            println!("trusted {id}");
+        }
+        "remove" | "rm" => {
+            let Some(id) = rest.iter().find(|a| !a.starts_with('-')) else {
+                die("hard keys remove: missing a key id");
+            };
+            if !store.remove(id) {
+                die(&format!("no key with id '{id}'"));
+            }
+            store.save().unwrap_or_else(|e| die(&e));
+            println!("removed {id}");
+        }
+        "export" => {
+            if json_out {
+                println!("{}", store.to_json().to_string());
+            } else {
+                print!("{}", store.render());
+            }
+        }
+        other => {
+            eprintln!("hard keys: unknown subcommand '{other}'");
+            eprintln!("usage: hard keys <list|add|remove|trust|export>");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn flag_value(args: &[String], name: &str) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
@@ -1404,7 +1629,7 @@ fn cmd_remove(args: &[String]) {
     write(&project_root.join("hard.toml"), &manifest.render());
     if had {
         println!("removed {name}");
-        let cfg = base_config_for(manifest, project_root.clone());
+        let cfg = base_config_for(manifest, project_root.clone(), args);
         let report = install::install(&cfg);
         if report.lock_written {
             println!("  re-locked {}", report.lock_path.display());
@@ -1426,7 +1651,7 @@ fn cmd_install(args: &[String]) {
         write(&project_root.join("hard.toml"), &manifest.render());
         println!("wrote hard.toml");
     }
-    let mut cfg = base_config_for(manifest, project_root);
+    let mut cfg = base_config_for(manifest, project_root, args);
     cfg.offline = offline;
     cfg.frozen = frozen;
     let report = install::install(&cfg);
@@ -1443,6 +1668,7 @@ fn cmd_install(args: &[String]) {
         if report.lock_written {
             println!("locked -> {}", report.lock_path.display());
         }
+        print_report_verification(&report);
         print!("{}", report.graph);
     } else {
         for e in &report.errors {
@@ -1452,18 +1678,44 @@ fn cmd_install(args: &[String]) {
     }
 }
 
-fn cmd_update(_args: &[String]) {
+/// Print what signature checking found: one line per problem, then a count.
+fn print_report_verification(report: &install::InstallReport) {
+    for w in &report.verification_warnings {
+        eprintln!("warning: {w}");
+    }
+    if report.verify_policy == hs_pm::verify::VerifyPolicy::Off
+        || report.verification.is_empty()
+    {
+        return;
+    }
+    if report.verified == report.verification.len() {
+        println!(
+            "verified {} package signature(s)",
+            report.verification.len()
+        );
+    } else {
+        println!(
+            "verified {}/{} package signature(s) ({})",
+            report.verified,
+            report.verification.len(),
+            report.verify_policy
+        );
+    }
+}
+
+fn cmd_update(args: &[String]) {
     let project_root = PathBuf::from(".");
     let (manifest, created) = load_manifest_or_default(&project_root);
     if created {
         write(&project_root.join("hard.toml"), &manifest.render());
     }
-    let mut cfg = base_config_for(manifest, project_root);
+    let mut cfg = base_config_for(manifest, project_root, args);
     // `update` is the one install that must not prefer locked versions.
     cfg.update = true;
     let report = install::install(&cfg);
     if report.succeeded() {
         println!("updated to newest matching versions");
+        print_report_verification(&report);
         print!("{}", report.graph);
     } else {
         for e in &report.errors {
@@ -1473,13 +1725,13 @@ fn cmd_update(_args: &[String]) {
     }
 }
 
-fn cmd_list(_args: &[String]) {
+fn cmd_list(args: &[String]) {
     let project_root = PathBuf::from(".");
     let (manifest, created) = load_manifest_or_default(&project_root);
     if created {
         write(&project_root.join("hard.toml"), &manifest.render());
     }
-    let cfg = base_config_for(manifest, project_root);
+    let cfg = base_config_for(manifest, project_root, args);
     for l in install::list_out(cfg) {
         println!("{l}");
     }
@@ -1492,7 +1744,7 @@ fn cmd_outdated(args: &[String]) {
     if created {
         write(&project_root.join("hard.toml"), &manifest.render());
     }
-    let mut cfg = base_config_for(manifest, project_root);
+    let mut cfg = base_config_for(manifest, project_root, args);
     cfg.offline = offline;
     for l in install::outdated(cfg) {
         println!("{l}");
@@ -1779,8 +2031,35 @@ fn load_manifest_or_default(project_root: &Path) -> (Manifest, bool) {
     }
 }
 
-fn base_config_for(manifest: Manifest, project_root: PathBuf) -> InstallConfig {
-    install::base_config(manifest, project_root, false, false, "hard", VERSION)
+/// The signature policy for a command: `--verify=<mode>`, else `HARD_VERIFY`.
+///
+/// A bad value is fatal. Someone who typed `--verify=strict` must never end up
+/// running a `warn` install because the mode name was misspelled.
+fn verify_policy(args: &[String]) -> Option<hs_pm::verify::VerifyPolicy> {
+    let raw = flag_value(args, "--verify")
+        .or_else(|| args.iter().find_map(|a| a.strip_prefix("--verify=").map(String::from)));
+    match hs_pm::verify::VerifyPolicy::from_flags(raw.as_deref()) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("hard: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The shared install configuration, with the signature policy resolved.
+fn base_config_for(manifest: Manifest, project_root: PathBuf, args: &[String]) -> InstallConfig {
+    let mut cfg = install::base_config(
+        manifest,
+        project_root,
+        false,
+        false,
+        "hard",
+        VERSION,
+        verify_policy(args),
+    );
+    cfg.offline = args.iter().any(|a| a == "--offline" || a == "-o");
+    cfg
 }
 
 fn cmd_hir(rest: &[String]) {

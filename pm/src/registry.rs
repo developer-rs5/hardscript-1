@@ -196,6 +196,12 @@ pub struct RegistryError {
 }
 
 impl RegistryError {
+    /// A transport-level or protocol-level failure, as opposed to a non-2xx
+    /// response. Used by callers that build their own error text.
+    pub fn other(message: impl Into<String>) -> RegistryError {
+        RegistryError::new(message)
+    }
+
     fn new(message: impl Into<String>) -> RegistryError {
         RegistryError {
             message: message.into(),

@@ -174,12 +174,13 @@ impl SigningKey {
 }
 
 /// The canonical text that gets signed.
+///
+/// This delegates to the client so producer and consumer cannot drift apart:
+/// a client that built the payload differently would reject every signature
+/// this registry produced. `canonical_payload_matches_the_client` in the tests
+/// below pins the format from both sides.
 pub fn payload(name: &str, version: &str, integrity: &str, fingerprint: &str) -> String {
-    format!(
-        "{SIGNATURE_VERSION}\nname {name}\nversion {version}\nintegrity {}\nfingerprint {}\n",
-        security::normalize_integrity(integrity),
-        security::normalize_integrity(fingerprint)
-    )
+    hs_pm::verify::signature_payload(name, version, integrity, fingerprint)
 }
 
 /// Verify a signature against an explicit public key (used by clients and by
@@ -342,5 +343,30 @@ mod tests {
             base64::decode(&k.public_base64()).unwrap(),
             k.public_bytes().to_vec()
         );
+    }
+
+    #[test]
+    fn canonical_payload_matches_the_client() {
+        // The client builds the same text; if these ever diverge, every
+        // signature this registry produces becomes unverifiable.
+        let p = payload("jwt", "1.2.3", "sha256:AB", "SHA256:cd");
+        assert_eq!(
+            p,
+            hs_pm::verify::signature_payload("jwt", "1.2.3", "sha256:AB", "SHA256:cd")
+        );
+        assert_eq!(p, format!("{SIGNATURE_VERSION}\nname jwt\nversion 1.2.3\nintegrity sha256:ab\nfingerprint sha256:cd\n"));
+        assert_eq!(p.lines().count(), 5, "no timestamps, no counts");
+    }
+
+    #[test]
+    fn a_signature_made_here_verifies_on_the_client() {
+        let k = SigningKey::deterministic_for_tests();
+        let p = payload("jwt", "1.0.0", "sha256:aa", "sha256:bb");
+        let sig = k.sign(&p).unwrap();
+        assert!(
+            hs_pm::verify::verify_with_public_key(&k.public_hex(), &p, &sig),
+            "the client must accept what the registry signs"
+        );
+        assert!(!hs_pm::verify::verify_with_public_key(&k.public_hex(), "tampered", &sig));
     }
 }

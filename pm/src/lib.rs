@@ -16,6 +16,7 @@
 //! - [`publish`] — `hard publish`: `.hspkg` building and upload
 //! - [`workspace`] — monorepo support
 //! - [`search`] — `hard search`: query shaping, offline fallback, ranking
+//! - [`verify`] — Ed25519 signature verification and the trust store
 //! - [`templates`] — official project templates
 //! - [`report`] — automatic milestone reports
 
@@ -32,6 +33,7 @@ pub mod registry;
 pub mod report;
 pub mod resolver;
 pub mod search;
+pub mod verify;
 pub mod semver;
 pub mod templates;
 pub mod toml;

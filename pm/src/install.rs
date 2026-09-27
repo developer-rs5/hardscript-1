@@ -13,6 +13,7 @@ use crate::resolver::{
     self, DepKind, Index, IndexEntry, Resolution, ResolveError, ResolvedPackage, SourceKind,
 };
 use crate::semver::{Version, VersionReq};
+use crate::verify::{self, SignatureRecord, Status, Verifier, VerifyPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,13 @@ pub struct InstallConfig {
     pub update: bool,
     /// How many packages may download at once.
     pub parallel: usize,
+    /// How to treat packages whose signature does not verify.
+    ///
+    /// `None` means "not specified", which resolves to
+    /// [`VerifyPolicy::Warn`]. Off is not the default on purpose: a package
+    /// manager that cannot tell you a package is unverified is not much better
+    /// than one that does not check at all.
+    pub verify: Option<VerifyPolicy>,
 }
 
 /// The result of an install/update/remove cycle.
@@ -50,11 +58,28 @@ pub struct InstallReport {
     pub errors: Vec<String>,
     /// Download counters: hits, misses, bytes and requests.
     pub downloads: BatchReport,
+    /// One line per package whose signature was checked.
+    pub verification: Vec<verify::Outcome>,
+    /// Signature checks that were refused but did not stop the install
+    /// (the `warn` policy). Printed as warnings, never as errors.
+    pub verification_warnings: Vec<String>,
+    /// How many packages checked out as verified.
+    pub verified: usize,
+    /// The policy that was in force.
+    pub verify_policy: VerifyPolicy,
 }
 
 impl InstallReport {
     pub fn succeeded(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    /// Packages that were checked and did not verify.
+    pub fn unverified(&self) -> Vec<&verify::Outcome> {
+        self.verification
+            .iter()
+            .filter(|o| !matches!(o.status, verify::Status::Verified | verify::Status::Skipped))
+            .collect()
     }
 }
 
@@ -275,6 +300,12 @@ fn locked_resolution(
             } else {
                 SourceKind::Registry
             },
+            // Trust recorded in the lockfile is carried forward, so an install
+            // that trusts the lockfile does not silently forget what it knew.
+            signature: p.signature.clone(),
+            key_id: p.key_id.clone(),
+            fingerprint: p.fingerprint.clone(),
+            verified: p.verified,
         });
     }
     let graph = lock
@@ -326,7 +357,7 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
     };
 
     let preferred = locked_versions(&lock);
-    let resolution: Resolution = if !cfg.offline || lock.packages.is_empty() {
+    let mut resolution: Resolution = if !cfg.offline || lock.packages.is_empty() {
         match fresh_resolve(cfg, preferred) {
             Ok(r) => r,
             Err(errors) => {
@@ -380,6 +411,15 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
         return report;
     }
 
+    // Verify before anything is linked: an unverified package must never end
+    // up in the project's package directory.
+    let verifier = verifier_for(cfg);
+    report.verify_policy = verifier.policy;
+    verify_resolution(cfg, &verifier, &mut report, &mut resolution);
+    if !report.errors.is_empty() {
+        return report;
+    }
+
     for p in &resolution.packages {
         if let Err(e) = link_package(cfg, p) {
             report.errors.push(e);
@@ -402,6 +442,139 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
     report.resolved = resolution.packages.clone();
     report.graph = render_graph(&resolution);
     report
+}
+
+/// The verifier for an install: the configured policy plus the trust store.
+fn verifier_for(cfg: &InstallConfig) -> Verifier {
+    let policy = cfg.verify.unwrap_or_default();
+    Verifier::with_store(policy, verify::TrustStore::load_default())
+}
+
+/// Check every registry package in a resolution, and record the result.
+///
+/// The signature comes from the registry, the trust decision from the local
+/// store, and the archive digest from the bytes the downloader verified. Under
+/// `strict` anything that is not `verified` is an error, so the install stops
+/// before linking; under `warn` the same findings become warnings and the
+/// install continues. `off` costs one no-op per package.
+fn verify_resolution(
+    cfg: &InstallConfig,
+    verifier: &Verifier,
+    report: &mut InstallReport,
+    resolution: &mut Resolution,
+) {
+    if verifier.policy == VerifyPolicy::Off {
+        for p in &mut resolution.packages {
+            if p.source == SourceKind::Workspace {
+                continue;
+            }
+            p.verified = false;
+        }
+        return;
+    }
+    let offline = cfg.offline || cfg.frozen;
+    for i in 0..resolution.packages.len() {
+        if resolution.packages[i].source == SourceKind::Workspace {
+            continue;
+        }
+        let (name, version) = {
+            let p = &resolution.packages[i];
+            (p.name.clone(), p.version.to_string())
+        };
+        // Offline installs have no registry to ask, so they fall back to the
+        // trust record cached next to the archive. Absence is reported, not
+        // silently treated as verified.
+        let record = if offline {
+            cached_signature(cfg, &name, &version)
+        } else {
+            SignatureRecord::fetch(&cfg.registry, &name, &version).ok()
+        };
+        let outcome = match record.as_ref() {
+            Some(rec) => {
+                let archive = cfg
+                    .cache
+                    .archive_path(&name, &version);
+                match std::fs::read(&archive) {
+                    Ok(bytes) if cfg.cache.has_version(&name, &version) => {
+                        verifier.verify_downloaded(rec, &bytes)
+                    }
+                    _ => verifier.verify(rec),
+                }
+            }
+            None => verify::Outcome {
+                name: name.clone(),
+                version: version.clone(),
+                status: Status::Unsigned,
+                key_id: String::new(),
+                integrity: resolution.packages[i].integrity.clone().unwrap_or_default(),
+                payload_hash: String::new(),
+                detail: if offline {
+                    "offline: no cached signature to check".to_string()
+                } else {
+                    "the registry has no signature for this version".to_string()
+                },
+            },
+        };
+        // Keep the record beside the archive so a later `--offline` install
+        // can re-verify without the registry. It is re-checked every time, so
+        // a poisoned cache file cannot make anything pass.
+        if let Some(rec) = &record {
+            save_cached_signature(cfg, rec);
+        }
+        let entry = &mut resolution.packages[i];
+        entry.signature = match &record {
+            Some(r) if !r.signature.is_empty() => Some(r.signature.clone()),
+            _ => None,
+        };
+        entry.key_id = match &record {
+            Some(r) if !r.key_id.is_empty() => Some(r.key_id.clone()),
+            _ => None,
+        };
+        entry.fingerprint = match &record {
+            Some(r) if !r.fingerprint.is_empty() => Some(r.fingerprint.clone()),
+            _ => None,
+        };
+        entry.verified = outcome.ok();
+        if outcome.ok() {
+            report.verified += 1;
+        } else {
+            // Strict stops the install; warn records a line the CLI prints.
+            // Either way the finding is not swallowed.
+            let line = outcome.render();
+            if verifier.policy.is_fatal() {
+                report.errors.push(line);
+            } else {
+                report.verification_warnings.push(line);
+            }
+        }
+        report.verification.push(outcome);
+    }
+    report.verification.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.version.cmp(&b.version))
+    });
+}
+
+/// Save a signature record in the cache for offline verification.
+fn save_cached_signature(cfg: &InstallConfig, record: &verify::SignatureRecord) {
+    let dir = cfg.cache.root.join("signatures");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("{}@{}.json", record.name, record.version));
+    let _ = std::fs::write(path, format!("{}\n", record.to_json().to_string()));
+}
+
+/// A signature record saved in the cache by an earlier verified install.
+fn cached_signature(cfg: &InstallConfig, name: &str, version: &str) -> Option<SignatureRecord> {
+    let path = cfg
+        .cache
+        .root
+        .join("signatures")
+        .join(format!("{name}@{version}.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    SignatureRecord::from_sidecar(&text).ok()
 }
 
 fn empty_lockfile(cfg: &InstallConfig) -> String {
@@ -620,8 +793,12 @@ pub fn base_config(
     verbose: bool,
     toolchain: &str,
     compiler_version: &str,
+    verify: Option<VerifyPolicy>,
 ) -> InstallConfig {
     let reg_cfg = RegistryConfig::resolve(manifest.registry.as_deref(), offline);
+    // `None` means the caller passed no policy, so `HARD_VERIFY` still applies
+    // and, failing that, the default. The CLI resolves --verify itself and
+    // exits on a bad value, so nothing is silently downgraded here.
     let parallel = std::env::var("HARD_JOBS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -643,5 +820,6 @@ pub fn base_config(
         frozen: false,
         update: false,
         parallel,
+        verify,
     }
 }

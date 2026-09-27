@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 hs-compiler = { path = "../compiler" }
+ed25519-dalek = "2.1"

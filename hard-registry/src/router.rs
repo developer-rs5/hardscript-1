@@ -334,6 +334,10 @@ impl Router {
                     ),
                     ("algorithm", Json::str("ed25519")),
                     ("public_key", Json::str(self.app.key.public_hex())),
+                    // The client needs the two digests to re-derive the
+                    // payload itself rather than trusting this server's copy.
+                    ("integrity", Json::str(&v.integrity)),
+                    ("fingerprint", Json::str(&v.fingerprint)),
                     ("payload", Json::str(&payload)),
                     (
                         "verified",

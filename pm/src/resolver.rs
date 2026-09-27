@@ -145,6 +145,14 @@ pub struct ResolvedPackage {
     pub deps: Vec<String>,
     pub integrity: Option<String>,
     pub source: SourceKind,
+    /// The publish signature, filled in when the metadata carried one.
+    pub signature: Option<String>,
+    /// The key id that signed this version.
+    pub key_id: Option<String>,
+    /// The manifest fingerprint the signature covers.
+    pub fingerprint: Option<String>,
+    /// Whether the signature verified against the local trust store.
+    pub verified: bool,
 }
 
 /// The deterministic result of a resolution.
@@ -796,6 +804,12 @@ impl<'a> State<'a> {
             deps,
             integrity,
             source,
+            // A v1 index carries no trust information; install verifies after
+            // download, which is where the signature is actually checked.
+            signature: None,
+            key_id: None,
+            fingerprint: None,
+            verified: false,
         });
         Ok(())
     }
@@ -954,6 +968,10 @@ pub mod resolve_v1 {
                 deps,
                 integrity: a.integrity.clone(),
                 source: a.source.clone(),
+                signature: None,
+                key_id: None,
+                fingerprint: None,
+                verified: false,
             });
         }
     }
