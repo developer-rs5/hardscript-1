@@ -9,6 +9,8 @@
 //! - [`pkgfmt`] — the `.hspkg` package archive format
 //! - [`cache`] — the shared `~/.hard/cache/` store (offline installs)
 //! - [`download`] — the download client: cache-first, resumable, parallel
+//! - [`credentials`] — per-registry tokens for `hard login` / `hard logout`
+//! - [`auth`] — the registry authentication client (login, tokens, whoami)
 //! - [`registry`] — registry HTTP/1.1 client (read, publish, auth)
 //! - [`install`] — install/remove/update/list/outdated orchestration
 //! - [`publish`] — `hard publish`: `.hspkg` building and upload
@@ -16,7 +18,9 @@
 //! - [`templates`] — official project templates
 //! - [`report`] — automatic milestone reports
 
+pub mod auth;
 pub mod cache;
+pub mod credentials;
 pub mod download;
 pub mod install;
 pub mod lockfile;

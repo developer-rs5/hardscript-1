@@ -34,16 +34,27 @@ pub const EXCLUDED_DIRS: &[&str] = &[
 ];
 
 /// File names never included in a package.
+///
+/// The secret-shaped entries matter as much as the build artifacts: publishing
+/// a `.env` or a credentials file is how a token ends up in a public
+/// registry, and no amount of `.gitignore` protects against `hard publish`
+/// walking the tree itself.
 pub const EXCLUDED_FILES: &[&str] = &[
     "hard.lock",
     ".DS_Store",
     "Cargo.lock",
     ".env",
+    ".envrc",
+    "credentials.toml",
     "registry.key",
+    "id_rsa",
+    "id_ed25519",
 ];
 
 /// Suffixes never included in a package.
-pub const EXCLUDED_SUFFIXES: &[&str] = &[".hspkg", ".o", ".obj", ".exe", ".release", ".bin"];
+pub const EXCLUDED_SUFFIXES: &[&str] = &[
+    ".hspkg", ".o", ".obj", ".exe", ".release", ".bin", ".key", ".pem", ".p12", ".pfx", ".keystore",
+];
 
 /// Largest package the client will build or upload.
 pub const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
@@ -658,6 +669,47 @@ mod tests {
         assert!(!is_publishable("target/debug/app"));
         assert!(!is_publishable("nested/target/x"));
         assert!(!is_publishable("x.hspkg"));
+    }
+
+    #[test]
+    fn secrets_are_never_publishable() {
+        // A token that reaches a public registry cannot be taken back, so the
+        // walk refuses secret-shaped files wherever they are.
+        for secret in [
+            ".env",
+            ".envrc",
+            "credentials.toml",
+            "registry.key",
+            "server.key",
+            "cert.pem",
+            "id_rsa",
+            "id_ed25519",
+            "keystore.p12",
+            "nested/deep/.env",
+        ] {
+            assert!(!is_publishable(secret), "'{secret}' must not be published");
+        }
+    }
+
+    #[test]
+    fn a_credentials_file_in_the_project_is_skipped() {
+        let (dir, m) = demo_project("secret");
+        // HARD_HOME inside the project is unusual, but the walk must still
+        // refuse to ship the token store
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        std::fs::write(
+            dir.join("home/credentials.toml"),
+            "[registry.\"http://x\"]\ntoken = \"hspat_secret\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".env"), "SECRET=1\n").unwrap();
+        let (p, archive) = plan(&dir, &m, &PublishOptions::default()).unwrap();
+        assert!(!p.files.iter().any(|f| f.contains("credentials.toml")), "{:?}", p.files);
+        assert!(!p.files.iter().any(|f| f.ends_with(".env")), "{:?}", p.files);
+        // and the bytes really are not in the archive
+        let text = String::from_utf8_lossy(&archive);
+        assert!(!text.contains("hspat_secret"), "the token leaked into the archive");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

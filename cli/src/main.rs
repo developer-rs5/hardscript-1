@@ -140,6 +140,11 @@ fn main() {
         "publish" => cmd_publish(rest),
         "yank" => cmd_yank(rest),
         "download" => cmd_download(rest),
+        "login" => cmd_login(rest),
+        "register" => cmd_register(rest),
+        "logout" => cmd_logout(rest),
+        "whoami" => cmd_whoami(rest),
+        "token" => cmd_token(rest),
         "remove" | "rm" => cmd_remove(rest),
         "install" => cmd_install(rest),
         "update" => cmd_update(rest),
@@ -182,6 +187,11 @@ fn help() {
          \x20 hard publish                  Build a .hspkg and publish it to the registry\n\
          \x20 hard yank <pkg>[@<ver>]       Retract a published version\n\
          \x20 hard download <pkg>[@<ver>]    Download a .hspkg archive to disk\n\
+         \x20 hard register --user <name>    Create a registry account\n\
+         \x20 hard login [--user <name>]     Log in to a registry and store a token\n\
+         \x20 hard logout                    Revoke and forget the stored token\n\
+         \x20 hard whoami                     Show who the stored token belongs to\n\
+         \x20 hard token <create|list|revoke>  Manage personal access tokens\n\
          \x20 hard remove <pkg>            Remove a dependency\n\
          \x20 hard install                 Resolve and lock all dependencies\n\
          \x20 hard update [pkg]            Update locked packages to newest match\n\
@@ -828,6 +838,243 @@ fn cmd_add(args: &[String]) {
     }
 }
 
+/// The bearer token a registry command should present.
+///
+/// Precedence: `--token`, then `$HARD_TOKEN`, then the stored credentials
+/// for that registry. This is the one place that decision is made, so
+/// publish, yank, download and the auth commands cannot disagree.
+fn registry_token(args: &[String], registry_url: &str) -> Option<String> {
+    if let Some(t) = flag_value(args, "--token") {
+        if !t.trim().is_empty() {
+            return Some(t.trim().to_string());
+        }
+    }
+    if let Ok(t) = std::env::var("HARD_TOKEN") {
+        if !t.trim().is_empty() {
+            return Some(t.trim().to_string());
+        }
+    }
+    let store = hs_pm::credentials::CredentialStore::open();
+    let t = store.token_for(registry_url);
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+/// Build an auth client for the registry the command should use.
+fn auth_client(args: &[String]) -> hs_pm::auth::Auth {
+    let registry_override = flag_value(args, "--registry");
+    let registry = Registry::new(RegistryConfig::resolve(registry_override.as_deref(), false));
+    let mut store = hs_pm::credentials::CredentialStore::open();
+    // `--token` (and $HARD_TOKEN) win over the stored credentials, which is
+    // what a one-off command or a CI job wants.
+    if let Some(t) = flag_value(args, "--token") {
+        if !t.trim().is_empty() {
+            if let Err(e) = store.add_token(&registry.config.url, t.trim()) {
+                die(&e);
+            }
+        }
+    }
+    hs_pm::auth::Auth::new(registry, store)
+}
+
+/// `hard register` — create an account on a registry.
+fn cmd_register(args: &[String]) {
+    let user = flag_value(args, "--user")
+        .or_else(|| flag_value(args, "-u"))
+        .or_else(|| std::env::var("HARD_USER").ok())
+        .unwrap_or_default();
+    if user.trim().is_empty() {
+        eprintln!("hard register: missing user name (--user <name>)");
+        std::process::exit(2);
+    }
+    let password = match flag_value(args, "--password") {
+        Some(p) => p,
+        None => match std::env::var("HARD_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                eprintln!("hard register: no password supplied (--password, or HARD_PASSWORD)");
+                std::process::exit(2);
+            }
+        },
+    };
+    let email = flag_value(args, "--email").or_else(|| std::env::var("HARD_EMAIL").ok());
+    let auth = auth_client(args);
+    match auth.register(&user, &password, email.as_deref()) {
+        Ok(msg) => {
+            println!("{msg}");
+            println!("now run: hard login --user {user}");
+        }
+        Err(e) => die(&e),
+    }
+}
+
+/// `hard login` — exchange credentials for a token and store it.
+fn cmd_login(args: &[String]) {
+    let user = flag_value(args, "--user")
+        .or_else(|| flag_value(args, "-u"))
+        .or_else(|| std::env::var("HARD_USER").ok())
+        .unwrap_or_default();
+    let auth = auth_client(args);
+    if let Some(t) = flag_value(args, "--token") {
+        // `hard login --token <t>` adopts a token obtained elsewhere
+        if t.trim().is_empty() {
+            die("hard login: --token needs a value");
+        }
+        match auth.adopt(if user.is_empty() { "unknown" } else { &user }, t.trim()) {
+            Ok(()) => println!("stored a token for {} (as {})", auth.url(), if user.is_empty() { "unknown" } else { &user }),
+            Err(e) => die(&e),
+        }
+        return;
+    }
+    if user.trim().is_empty() {
+        eprintln!("hard login: missing user name (--user <name>, or set HARD_USER)");
+        eprintln!("usage: hard login --user ada          (prompts for the password)");
+        eprintln!("       hard login --user ada --password secret");
+        std::process::exit(2);
+    }
+    let password = match flag_value(args, "--password") {
+        Some(p) => p,
+        None => match std::env::var("HARD_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                eprintln!("hard login: no password supplied");
+                eprintln!("set HARD_PASSWORD, or pass --password (a shell prompt is not read here)");
+                std::process::exit(2);
+            }
+        },
+    };
+    match auth.login(&user, &password) {
+        Ok(login) => {
+            println!("logged in to {} as {}", auth.url(), login.user);
+            if !login.scopes.is_empty() {
+                println!("  scopes: {}", login.scopes.join(", "));
+            }
+            println!("  token stored in {}", auth.store.path().display());
+        }
+        Err(e) => die(&e),
+    }
+}
+
+/// `hard logout` — revoke the token and forget it.
+fn cmd_logout(args: &[String]) {
+    let all = args.iter().any(|a| a == "--all");
+    let auth = auth_client(args);
+    if all {
+        let mut store = hs_pm::credentials::CredentialStore::open();
+        match store.logout_all() {
+            Ok(n) => {
+                if n == 0 {
+                    println!("not logged in to any registry");
+                } else {
+                    println!("logged out of {n} registry/registries");
+                }
+            }
+            Err(e) => die(&e),
+        }
+        return;
+    }
+    match auth.logout() {
+        Ok(true) => println!("logged out of {}", auth.url()),
+        Ok(false) => println!("not logged in to {}", auth.url()),
+        Err(e) => die(&e),
+    }
+}
+
+/// `hard whoami` — who the stored token belongs to.
+fn cmd_whoami(args: &[String]) {
+    let auth = auth_client(args);
+    match auth.whoami() {
+        Ok(w) => {
+            println!("registry {}", auth.url());
+            println!("  user:   {}", w.user);
+            println!("  token:  {}", w.token_id);
+            println!("  label:  {}", w.name);
+            println!("  scopes: {}", w.scopes.join(", "));
+            match w.last_used_at {
+                Some(at) => println!("  last used: {at}"),
+                None => println!("  last used: never"),
+            }
+        }
+        Err(e) => die(&e),
+    }
+}
+
+/// `hard token create|list|revoke` — personal access tokens.
+fn cmd_token(args: &[String]) {
+    let verb = args.first().map(String::as_str).unwrap_or("list");
+    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+    let auth = auth_client(args);
+    match verb {
+        "create" => {
+            let name = rest
+                .iter()
+                .find(|a| !a.starts_with("--"))
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
+            let scopes = hs_pm::credentials::parse_scopes(&repeated_flags(&rest, "--scope"))
+                .unwrap_or_else(|e| die(&e));
+            match auth.create_token(&name, &scopes) {
+                Ok((info, plaintext)) => {
+                    println!("created token {} ({})", info.id, info.name);
+                    if info.scopes.is_empty() {
+                        println!("  scopes: (registry default)");
+                    } else {
+                        println!("  scopes: {}", info.scopes.join(", "));
+                    }
+                    println!("  token: {plaintext}");
+                    println!("  this is the only time it is shown; store it now");
+                }
+                Err(e) => die(&e),
+            }
+        }
+        "list" | "ls" => match auth.list_tokens() {
+            Ok(list) => {
+                if list.is_empty() {
+                    println!("no tokens for {}", auth.url());
+                    return;
+                }
+                for t in list {
+                    let used = match t.last_used_at {
+                        Some(at) => at.to_string(),
+                        None => "never".to_string(),
+                    };
+                    let state = if t.revoked { " (revoked)" } else { "" };
+                    println!(
+                        "{}  {:<16}  {:<12}  last used {}{}",
+                        t.id, t.name, t.scopes.join(","), used, state
+                    );
+                }
+            }
+            Err(e) => die(&e),
+        },
+        "revoke" | "rm" => {
+            let id = rest
+                .iter()
+                .find(|a| !a.starts_with("--"))
+                .cloned()
+                .or_else(|| flag_value(&rest, "--id"))
+                .unwrap_or_default();
+            if id.is_empty() {
+                eprintln!("hard token revoke: missing token id");
+                eprintln!("usage: hard token revoke <tok_...>");
+                std::process::exit(2);
+            }
+            match auth.revoke_token(&id) {
+                Ok(t) => println!("revoked {} ({})", t.id, t.name),
+                Err(e) => die(&e),
+            }
+        }
+        other => {
+            eprintln!("hard token: unknown subcommand '{other}'");
+            eprintln!("usage: hard token <create [name] [--scope s]> | list | revoke <id>");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// `hard download <pkg>[@<ver>]` — save a package's archive to disk.
 fn cmd_download(args: &[String]) {
     let out_dir = flag_value(args, "--out").map(PathBuf::from);
@@ -882,13 +1129,17 @@ fn cmd_download(args: &[String]) {
 /// `hard publish` — build a `.hspkg` from the project and upload it.
 fn cmd_publish(args: &[String]) {
     let dry_run = args.iter().any(|a| a == "--dry-run");
-    let registry_override = flag_value(args, "--registry");
     let allow_existing = args.iter().any(|a| a == "--allow-existing");
     let version_override = flag_value(args, "--version");
     let channel = flag_value(args, "--channel");
     let tags = repeated_flags(args, "--tag");
     let keywords = repeated_flags(args, "--keyword");
-    let token = flag_value(args, "--token").or_else(|| std::env::var("HARD_TOKEN").ok());
+    let registry_override = flag_value(args, "--registry");
+    let token = registry_token(args, &RegistryConfig::resolve(
+        registry_override.as_deref(),
+        false,
+    )
+    .url);
 
     let project_root = PathBuf::from(".");
     let (manifest, created) = load_manifest_or_default(&project_root);
@@ -995,8 +1246,8 @@ fn cmd_yank(args: &[String]) {
         }
     };
     let registry_override = flag_value(args, "--registry");
-    let token = flag_value(args, "--token").or_else(|| std::env::var("HARD_TOKEN").ok());
     let registry = Registry::new(RegistryConfig::resolve(registry_override.as_deref(), false));
+    let token = registry_token(args, &registry.config.url);
     let path = if unyank {
         "/api/unyank"
     } else {

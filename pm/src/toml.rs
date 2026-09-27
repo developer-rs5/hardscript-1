@@ -197,24 +197,62 @@ impl<'a> Parser<'a> {
             self.bump();
             is_array = true;
         }
-        let mut key = String::new();
         let start_line = self.line;
         let start_col = self.col;
-        let mut segs = Vec::new();
+        let mut segs: Vec<String> = Vec::new();
+        // The segment being accumulated; a '.' commits it and starts a new
+        // one, a quoted segment replaces it wholesale.
+        let mut seg = String::new();
         loop {
             self.skip_ws_comments();
             match self.peek() {
                 Some(']') => break,
+                Some('"') => {
+                    // A quoted segment may contain '.', which is what a
+                    // registry URL in a credentials file looks like:
+                    // [registry."https://registry.example"]
+                    if !seg.is_empty() {
+                        self.err(
+                            "unexpected quote in the middle of a table name",
+                            Some("quote the whole name, e.g. [registry.\"url\"]"),
+                        );
+                        seg.clear();
+                    }
+                    match self.parse_basic_string() {
+                        Some(q) => seg = q,
+                        None => {
+                            self.err(
+                                "unterminated quoted table name",
+                                Some("close the quote with a double quote"),
+                            );
+                            break;
+                        }
+                    }
+                }
+                Some('\'') => {
+                    if !seg.is_empty() {
+                        seg.clear();
+                    }
+                    match self.parse_literal_string() {
+                        Some(q) => seg = q,
+                        None => {
+                            self.err(
+                                "unterminated quoted table name",
+                                Some("close the quote"),
+                            );
+                            break;
+                        }
+                    }
+                }
                 Some('.') => {
                     self.bump();
-                    if key.is_empty() {
+                    if seg.is_empty() {
                         self.err(
                             "expected a table name before '.' in the table header",
                             Some("write [package] instead of [.package]"),
                         );
                     } else {
-                        segs.push(key.clone());
-                        key.clear();
+                        segs.push(std::mem::take(&mut seg));
                     }
                 }
                 Some(c) => {
@@ -225,25 +263,26 @@ impl<'a> Parser<'a> {
                             Some("remove the space, e.g. [dependencies]"),
                         );
                     } else if c == '\n' {
-                        self.err(
-                            "unterminated table header",
-                            Some("close the header with ']'"),
-                        );
+                        self.err("unterminated table header", Some("close the header with ']'"));
                     } else {
-                        key.push(c);
+                        seg.push(c);
                     }
                 }
                 None => {
                     self.err("unterminated table header", Some("close the header with ']'"));
+                    if !seg.is_empty() {
+                        segs.push(seg);
+                    }
                     self.cur_table = segs;
                     return true;
                 }
             }
         }
-        self.bump();
-        if !key.is_empty() {
-            segs.push(key);
+        if !seg.is_empty() {
+            segs.push(seg);
         }
+        self.bump();
+        let _ = (start_line, start_col);
         if segs.is_empty() {
             self.err("empty table header", Some("write a name, e.g. [compiler]"));
         }
@@ -251,7 +290,6 @@ impl<'a> Parser<'a> {
         if is_array {
             self.cur_table.push("__arr__".to_string());
         }
-        let _ = (start_line, start_col);
         true
     }
 

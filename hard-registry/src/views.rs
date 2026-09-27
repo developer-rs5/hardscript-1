@@ -227,14 +227,24 @@ pub fn token_json(
 
 /// A stored token, without its hash.
 pub fn token_view(t: &crate::model::Token) -> Json {
-    token_json(
-        &t.id,
-        &t.user,
-        &t.name,
-        &t.scopes,
-        None,
-        t.created_at,
-    )
+    Json::obj(vec![
+        ("id", Json::str(&t.id)),
+        ("user", Json::str(&t.user)),
+        ("name", Json::str(&t.name)),
+        (
+            "scopes",
+            Json::arr(Scope::render(&t.scopes).into_iter().map(Json::str).collect()),
+        ),
+        ("created_at", Json::num(t.created_at)),
+        (
+            "last_used_at",
+            match t.last_used_at {
+                Some(v) => Json::num(v),
+                None => Json::Null,
+            },
+        ),
+        ("revoked", Json::Bool(t.revoked)),
+    ])
 }
 
 /// A user record, without credential material.
