@@ -478,6 +478,53 @@ else
     fail "and the expiry notice has an address"
 fi
 
+# ---- the documentation matches the tool -------------------------------------
+# A guide that names a subcommand which does not exist is worse than no guide,
+# and it is the kind of thing that only shows up when somebody is already
+# debugging. Every `hard deploy <sub>` in the guide has to be in the help.
+HELP="$($HARD deploy help 2>&1)"
+DOC="$ROOT/docs/DEPLOY.md"
+if [ ! -f "$DOC" ]; then
+    fail "docs/DEPLOY.md exists"
+else
+    DOCS_OK=1
+    while read -r sub; do
+        [ -n "$sub" ] || continue
+        case "$sub" in
+            ssh|env|config|logs|status|releases|rollback|prune|nginx|https|help|compose|start|stop|restart)
+                if ! printf '%s' "$HELP" | grep -q "hard deploy $sub"; then
+                    fail "docs/DEPLOY.md documents 'hard deploy $sub', which is not in the help"
+                    DOCS_OK=0
+                fi ;;
+            *)
+                fail "docs/DEPLOY.md names 'hard deploy $sub', which is not a subcommand"
+                DOCS_OK=0 ;;
+        esac
+    done < <(grep -oE 'hard deploy [a-z]+' "$DOC" | awk '{print $3}' | sort -u)
+    [ "$DOCS_OK" -eq 1 ] && pass "every subcommand in docs/DEPLOY.md is in the help"
+
+    # And the flags it tells people to use are the flags that exist.
+    FLAGS_OK=1
+    for flag in --print --unit --env --to --yes --keep --tls --check --install --run --follow; do
+        if ! grep -q -- "$flag" "$DOC"; then
+            continue
+        fi
+        case "$flag" in
+            --follow) grep -q 'follow: bool' "$ROOT/cli/src/operations.rs" || FLAGS_OK=0 ;;
+            *) for module in deploy operations nginx rollback environments production; do
+                   grep -q -- "\"$flag\"" "$ROOT/cli/src/$module.rs" && found=1
+               done
+               [ "${found:-0}" = 1 ] || FLAGS_OK=0
+               found=0 ;;
+        esac
+    done
+    if [ "$FLAGS_OK" -eq 1 ]; then
+        pass "every flag docs/DEPLOY.md mentions is one the tool parses"
+    else
+        fail "every flag docs/DEPLOY.md mentions is one the tool parses"
+    fi
+fi
+
 # ---- the shell the tool generates is the shell that runs ---------------------
 # A plan is only trustworthy if the commands in it are the commands that run.
 # Every remote command the executor sends has to appear in the print.

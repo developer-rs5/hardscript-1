@@ -266,5 +266,21 @@ for run in "$DIR"/incremental/*/run.sh; do
 done
 rm -f "$DIR/.inc-last.out"
 
+# deployment kind: the deploy QA suite (M7.10). It needs no network: every
+# remote command the tool generates is run against a scratch root, and every
+# command that would reach a host is asserted on the plan instead. One entry
+# here, so a failure names the suite rather than a hundred lines of it.
+if [ -x "$ROOT/qa/run-deploy-tests.sh" ] || [ -f "$ROOT/qa/run-deploy-tests.sh" ]; then
+    TOTAL=$((TOTAL+1))
+    if HARD="$HARD" bash "$ROOT/qa/run-deploy-tests.sh" >"$DIR/.deploy-last.out" 2>&1; then
+        echo "regression: PASS deployment ($(tail -1 "$DIR/.deploy-last.out"))"
+    else
+        echo "regression: FAIL deployment"
+        grep -E "FAIL" "$DIR/.deploy-last.out" | head -20
+        FAILED=$((FAILED+1))
+    fi
+    rm -f "$DIR/.deploy-last.out"
+fi
+
 echo "regression: $((TOTAL-FAILED))/$TOTAL passed"
 [ "$FAILED" -eq 0 ] || exit 1

@@ -50,7 +50,9 @@ fn help() {
          \x20 hard deploy config <sub>         Write the systemd unit, or check a host\n\
          \x20 hard deploy logs [host]         The journal for this service (-f to follow)\n\
          \x20 hard deploy status [host]        What is live, what is running, what is kept\n\
-         \x20 hard deploy start|stop|restart   Run the service\n\
+         \x20 hard deploy start [host]         Start the service\n\
+         \x20 hard deploy stop [host]          Stop the service\n\
+         \x20 hard deploy restart [host]       Restart it and check it came up\n\
          \x20 hard deploy releases [host]      The releases on the host, newest first\n\
          \x20 hard deploy nginx [flags]       Write the reverse proxy config\n\
          \x20 hard deploy https [flags]        The command that issues the certificate\n\
