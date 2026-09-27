@@ -61,7 +61,7 @@ for f in "$DIR"/*.hard; do
             rm -rf "$TMP"
             continue
         fi
-        "$TMP/.hard/prog" >/dev/null 2>&1 &
+        env -u PORT "$TMP/.hard/prog" >/dev/null 2>&1 &
         PID=$!
         sleep 0.6
         if python3 "$DIR/ws_check.py" "$PORT" >/tmp/hs-ws-check.out 2>&1; then
@@ -171,7 +171,10 @@ for f in "$DIR"/*.hard; do
     # make sure the test port is not held by a stale server
     pkill -f 'hs-reg-[0-9]*/.hard/prog' 2>/dev/null || true
     sleep 0.3
-    "$bin" >/dev/null 2>&1 &
+    # PORT belongs to this script (it chooses where to curl); a server must
+    # not inherit it, since the compiled binary now takes PORT as an override
+    # for the port in its source.
+    env -u PORT "$bin" >/dev/null 2>&1 &
     PID=$!
     sleep 0.6
     for spec in "${lines[@]:1}"; do

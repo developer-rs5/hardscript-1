@@ -70,6 +70,38 @@ struct ConnPool {
 inline constexpr size_t kMaxWorkers = 256;
 inline ConnPool& conn_pool() { static ConnPool p; return p; }
 
+// Sockets a worker is serving right now.
+//
+// A worker parked in a keep-alive read wakes only when a request arrives or
+// the peer goes away, so a graceful shutdown has to close the conversation
+// from this end: without it, `kill` does nothing visible, the process stays
+// up until the supervisor escalates to SIGKILL, and every restart costs the
+// supervisor's full stop timeout. A vector, not a set: the count is one
+// client per worker and a linear erase over 256 entries is nothing next to a
+// request.
+inline std::mutex& hs_active_mu() { static std::mutex m; return m; }
+inline std::vector<int>& hs_active_fds() { static std::vector<int> v; return v; }
+inline void hs_active_add(int fd) {
+    std::lock_guard<std::mutex> lock(hs_active_mu());
+    hs_active_fds().push_back(fd);
+}
+inline void hs_active_remove(int fd) {
+    std::lock_guard<std::mutex> lock(hs_active_mu());
+    std::vector<int>& v = hs_active_fds();
+    for (size_t i = 0; i < v.size(); i++)
+        if (v[i] == fd) {
+            v[i] = v.back();
+            v.pop_back();
+            return;
+        }
+}
+/// Make every in-flight read return. Called repeatedly while draining: a
+/// worker can pick up a queued connection after the first pass.
+inline void hs_active_shutdown_all() {
+    std::lock_guard<std::mutex> lock(hs_active_mu());
+    for (int fd : hs_active_fds()) ::shutdown(fd, SHUT_RDWR);
+}
+
 // ---------------------------------------------------------------------------
 // Zero-allocation helpers
 // ---------------------------------------------------------------------------
@@ -1079,7 +1111,9 @@ static void conn_worker(Server& srv) {
             fd = conn_pool().q.back();
             conn_pool().q.pop_back();
         }
+        hs_active_add(fd);
         handle_connection(fd, srv, arena, head);
+        hs_active_remove(fd);
     }
 }
 
@@ -1163,8 +1197,13 @@ inline void Server::listen() {
     close(sfd);
     conn_pool().stop.store(true);
     conn_pool().cv.notify_all();
-    for (int i = 0; i < 100 && g_hs_conn.load() > 0; ++i)
+    // Tell the workers still reading a keep-alive connection that nobody is
+    // listening any more, then wait for them: each pass covers sockets a
+    // worker picked up after the previous one.
+    for (int i = 0; i < 100 && g_hs_conn.load() > 0; ++i) {
+        hs_active_shutdown_all();
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     for (auto& w : conn_pool().workers) if (w.joinable()) w.join();
     conn_pool().workers.clear();
 }

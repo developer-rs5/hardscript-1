@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     hs::Server app;
     hs::hs_set_server(&app);
     app.handle("GET", "/", route_0);
-    app.port = 3031;
+    app.port = hs::port_from_env(3031);
 
     register_schema_0();
     app.listen();

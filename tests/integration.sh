@@ -50,7 +50,9 @@ check "rest-api API.md generated" test -f "$ROOT/examples/rest-api/API.md"
 check "bench examples/rest-api" bash -c "cd '$ROOT/examples/rest-api' && timeout 60 '$HARD' bench"
 
 echo "== live server checks (rest-api on :8080)"
-(cd "$ROOT/examples/rest-api" && timeout 15 ./.hard/main >/tmp/hs_srv.log 2>&1) &
+# PORT is the harness's own choice of where to curl; a server must not
+# inherit it, since the compiled binary reads PORT as an override.
+(cd "$ROOT/examples/rest-api" && env -u PORT timeout 15 ./.hard/main >/tmp/hs_srv.log 2>&1) &
 SRV=$!
 sleep 1
 GET=$(curl -s -m 5 http://localhost:8080/users)

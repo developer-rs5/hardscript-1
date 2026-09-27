@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
     hs::hs_set_server(&app);
     app.handle("GET", "/add", route_0);
     app.handle("GET", "/fib", route_1);
-    app.port = 3031;
+    app.port = hs::port_from_env(3031);
 
     app.listen();
     return 0;
