@@ -441,9 +441,20 @@ pub fn project_deploy_config(
     let binary = PathBuf::from(format!(".hard/{}", docker.binary_name));
     let migrations = sql_files(Path::new("migrations"));
     let static_files = files_under(Path::new("static"));
-    let migrate_helper = match (dialect.is_some(), args.migrate, migrations.is_empty()) {
-        (true, true, false) => Some(crate::migrate::build_helper()),
-        _ => None,
+    // The migration helper travels with the release, so the plan has to say so
+    // whether or not the binary happens to be built yet. Compiling it takes
+    // seconds, and a `--print` uploads nothing -- so the path is always in the
+    // plan and the compile happens only for a deploy that will run it. The
+    // printed plan and the executed plan are the same list either way.
+    let migrates = dialect.is_some() && args.migrate && !migrations.is_empty();
+    let migrate_helper = if migrates {
+        if args.print {
+            Some(PathBuf::from(".hard/migrate-helper"))
+        } else {
+            Some(crate::migrate::build_helper())
+        }
+    } else {
+        None
     };
 
     // The manifest ships with the release when there is one, so the far side

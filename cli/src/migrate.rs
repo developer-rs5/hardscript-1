@@ -635,12 +635,27 @@ fn run_helper(cmd: &str, dialect: Dialect, target: &str, extra: &[String], files
 /// migration code that runs in production is then the code that was compiled
 /// here, from the same embedded runtime, rather than a second implementation
 /// that only exists on the deploy path.
+///
+/// Cached on the fingerprint of the helper source and the runtime headers, the
+/// same stamp the incremental build uses. Without it every `hard migrate up` and
+/// every database deploy pays a three-second C++ compile to produce a binary
+/// that has not changed since the last one -- measured at 3.2s in
+/// `qa/bench_deploy.sh` before this existed, against 5ms after.
 pub fn build_helper() -> std::path::PathBuf {
     let build_dir = std::path::PathBuf::from(".hard");
+    let bin_path = build_dir.join("migrate-helper");
+    let stamp = build_dir.join("migrate-helper.sha");
+    let fingerprint = hs_compiler::sha256::hex(
+        format!("{HELPER_SRC}\n{}", crate::runtime_fingerprint()).as_bytes(),
+    );
+    if let Ok(previous) = std::fs::read_to_string(&stamp) {
+        if previous.trim() == fingerprint && bin_path.is_file() {
+            return bin_path;
+        }
+    }
     std::fs::create_dir_all(&build_dir).unwrap_or_else(|e| die(&e.to_string()));
     write_runtime(&build_dir);
     let src_path = build_dir.join("migrate-helper.cpp");
-    let bin_path = build_dir.join("migrate-helper");
     write(&src_path, HELPER_SRC);
     let out = std::process::Command::new("g++")
         .arg("-std=c++17")
@@ -657,6 +672,7 @@ pub fn build_helper() -> std::path::PathBuf {
     if !out.status.success() {
         die(&format!("could not build the migration helper:\n{}", String::from_utf8_lossy(&out.stderr)));
     }
+    write(&stamp, &format!("{fingerprint}\n"));
     bin_path
 }
 

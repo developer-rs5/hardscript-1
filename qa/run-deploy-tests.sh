@@ -406,6 +406,31 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     fi
 fi
 
+# ---- the migration helper is compiled once ----------------------------------
+# `hard migrate` builds the helper from the embedded runtime, and a deploy ships
+# that binary. If it is compiled on every invocation, every migration is three
+# seconds slower than it has to be -- which is what the first version did.
+if [ -x "$APP/.hard/migrate-helper" ]; then
+    ms() { date +%s%3N; }
+    t0=$(ms); "$HARD" migrate up >/dev/null 2>&1; t1=$(ms)
+    "$HARD" migrate up >/dev/null 2>&1; t2=$(ms)
+    cold=$((t1 - t0))
+    warm=$((t2 - t1))
+    if [ "$warm" -lt $((cold / 2 + 50)) ]; then
+        pass "the migration helper is compiled once (${cold}ms, then ${warm}ms)"
+    else
+        fail "the migration helper is compiled once (${cold}ms, then ${warm}ms)"
+    fi
+    # And the cache is keyed on what it was built from, not on its timestamp.
+    cp "$APP/.hard/migrate-helper" "$TMP/helper.first"
+    "$HARD" migrate up >/dev/null 2>&1
+    if cmp -s "$TMP/helper.first" "$APP/.hard/migrate-helper"; then
+        pass "and a cached helper is the one that ships"
+    else
+        fail "and a cached helper is the one that ships"
+    fi
+fi
+
 # ---- the reverse proxy and the certificate ----------------------------------
 # nginx is the authority on its own configuration, so where it is installed the
 # generated file is tested by nginx rather than by a string comparison.

@@ -446,8 +446,9 @@ fn jobs_arg(rest: &[String]) -> (usize, Vec<String>) {
     (jobs, out)
 }
 
-/// Environment stamp inputs shared by the incremental pipeline and `doctor`.
-fn runtime_fingerprint() -> String {
+/// Environment stamp inputs shared by the incremental pipeline, `doctor`, and
+/// the migration helper's own cache.
+pub(crate) fn runtime_fingerprint() -> String {
     let mut acc = String::new();
     for (name, content) in RUNTIME_FILES {
         acc.push_str(name);
