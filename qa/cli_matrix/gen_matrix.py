@@ -172,6 +172,8 @@ host = "deploy@app.example.com"
 dir = "/srv/hsdb"
 port = 8080
 health_path = "/live"
+domain = "app.example.com"
+tls_email = "ops@example.com"
 secrets = ["DATABASE_URL"]
 
 [env.production.vars]
@@ -395,6 +397,15 @@ CASES = [
     ("rb004", ["deploy", "prune", "--keep", "abc", "root@example.com"], 2, "deploy", "a keep count that is not a number is a usage error"),
     ("rb005", ["deploy", "prune", "--keep"], 2, "deploy", "a keep count with no value is a usage error"),
     ("rb006", ["deploy", "prune", "--yes", "root@nonexistent.invalid"], 1, "deploy", "prune on a host it cannot reach says so"),
+    # nginx and https ========================================================
+    ("ng001", ["deploy", "nginx", "--env", "production"], 0, "deploy", "write a server block"),
+    ("ng002", ["deploy", "nginx", "--env", "production", "--tls"], 0, "deploy", "write one with TLS"),
+    ("ng003", ["deploy", "nginx", "--env", "production", "--tls", "--check"], 0, "deploy", "check the generated file"),
+    ("ng004", ["deploy", "nginx", "--domain", "app.example.com", "--tls"], 0, "deploy", "a domain on the command line"),
+    ("ng005", ["deploy", "nginx", "--env", "nope"], 1, "deploy", "an environment that does not exist fails"),
+    ("ng006", ["deploy", "https", "--env", "production"], 0, "deploy", "the certbot command"),
+    ("ng007", ["deploy", "https", "--env", "production", "--email", "a@example.com"], 0, "deploy", "with an address on the command line"),
+    ("ng008", ["deploy", "https", "--env", "nope"], 1, "deploy", "an environment that does not exist fails"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

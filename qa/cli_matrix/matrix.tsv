@@ -118,3 +118,11 @@ rb003	deploy rollback --to 1.0.0 --nope root@example.com	2	deploy	a flag that ta
 rb004	deploy prune --keep abc root@example.com	2	deploy	a keep count that is not a number is a usage error
 rb005	deploy prune --keep	2	deploy	a keep count with no value is a usage error
 rb006	deploy prune --yes root@nonexistent.invalid	1	deploy	prune on a host it cannot reach says so
+ng001	deploy nginx --env production	0	deploy	write a server block
+ng002	deploy nginx --env production --tls	0	deploy	write one with TLS
+ng003	deploy nginx --env production --tls --check	0	deploy	check the generated file
+ng004	deploy nginx --domain app.example.com --tls	0	deploy	a domain on the command line
+ng005	deploy nginx --env nope	1	deploy	an environment that does not exist fails
+ng006	deploy https --env production	0	deploy	the certbot command
+ng007	deploy https --env production --email a@example.com	0	deploy	with an address on the command line
+ng008	deploy https --env nope	1	deploy	an environment that does not exist fails

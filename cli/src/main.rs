@@ -10,6 +10,7 @@ use std::process::Command;
 
 mod compose;
 mod environments;
+mod nginx;
 mod operations;
 mod production;
 mod rollback;

@@ -75,6 +75,11 @@ pub struct EnvironmentConfig {
     pub health_timeout: Option<u32>,
     /// Replaces the restart command, for a host without systemd.
     pub restart_cmd: Option<String>,
+    /// The hostname a certificate is issued for and the reverse proxy answers to.
+    pub domain: Option<String>,
+    /// The address Let's Encrypt sends the expiry notice to. Not a secret, and
+    /// not optional in practice: without it the notice goes nowhere.
+    pub tls_email: Option<String>,
     /// Variables the deploy writes to the host. Values here are not secret;
     /// anything secret belongs in `secrets` and in the operator's own file.
     pub vars: BTreeMap<String, String>,
@@ -95,6 +100,8 @@ impl EnvironmentConfig {
             && self.health_path.is_none()
             && self.health_timeout.is_none()
             && self.restart_cmd.is_none()
+            && self.domain.is_none()
+            && self.tls_email.is_none()
             && self.vars.is_empty()
             && self.secrets.is_empty()
     }
@@ -165,7 +172,7 @@ const KNOWN_SERVER: &[&str] = &["port", "host"];
 const KNOWN_DATABASE: &[&str] = &["dialect", "path", "url"];
 const KNOWN_ENV: &[&str] = &[
     "host", "dir", "service", "user", "port", "health_path", "health_timeout", "restart_cmd",
-    "vars", "secrets",
+    "domain", "tls_email", "vars", "secrets",
 ];
 
 /// How detailed diagnostics the caller wants.
@@ -473,7 +480,8 @@ fn parse_environment(
     for (k, v) in entries {
         let path = format!("{key}.{k}");
         match k.as_str() {
-            "host" | "dir" | "service" | "user" | "health_path" | "restart_cmd" => {
+            "host" | "dir" | "service" | "user" | "health_path" | "restart_cmd" | "domain"
+            | "tls_email" => {
                 match v.as_str() {
                     Some(s) if !s.trim().is_empty() => match k.as_str() {
                         "host" => env.host = Some(s.to_string()),
@@ -481,6 +489,17 @@ fn parse_environment(
                         "service" => env.service = Some(s.to_string()),
                         "user" => env.user = Some(s.to_string()),
                         "health_path" => env.health_path = Some(s.to_string()),
+                        "domain" => {
+                            if is_hostname(s) {
+                                env.domain = Some(s.to_string());
+                            } else {
+                                errors.push(manifest_err(
+                                    &path,
+                                    format!("'{s}' is not a hostname: no scheme, no path, no port"),
+                                ));
+                            }
+                        }
+                        "tls_email" => env.tls_email = Some(s.to_string()),
                         _ => env.restart_cmd = Some(s.to_string()),
                     },
                     _ => errors.push(manifest_err(&path, format!("'{k}' must be a non-empty string"))),
@@ -555,6 +574,22 @@ fn parse_environment(
         }
     }
     env
+}
+
+/// A hostname for TLS: labels of letters, digits and dashes, and no scheme, no
+/// path, no port. A `domain` with `https://` in it would be pasted into a
+/// `server_name` and into a certificate request, and both would be wrong.
+pub fn is_hostname(name: &str) -> bool {
+    if name.is_empty() || name.len() > 253 || name.starts_with('.') || name.ends_with('.') {
+        return false;
+    }
+    name.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 /// An environment variable name: `UPPER_CASE` or `UPPER_CASE_WITH_1`, which is
@@ -760,6 +795,12 @@ impl Manifest {
                 }
                 if let Some(c) = &env.restart_cmd {
                     s.push_str(&format!("restart_cmd = {}\n", toml_quote(c)));
+                }
+                if let Some(d) = &env.domain {
+                    s.push_str(&format!("domain = {}\n", toml_quote(d)));
+                }
+                if let Some(e) = &env.tls_email {
+                    s.push_str(&format!("tls_email = {}\n", toml_quote(e)));
                 }
                 if !env.secrets.is_empty() {
                     // Before the `vars` subtable: a key written after it would
@@ -1051,6 +1092,35 @@ host = "deploy@staging.example.com"
         // And rendering it again changes nothing, which is what makes a
         // rewritten manifest show a real diff.
         assert_eq!(again.manifest.render(), rendered, "the render is stable");
+    }
+
+    #[test]
+    fn a_domain_has_to_be_a_hostname() {
+        let src = |domain: &str| {
+            format!("schema = 1\nname = \"demo\"\nversion = \"1.0.0\"\nedition = \"2027\"\n\n[env.p]\ndomain = \"{domain}\"\n")
+        };
+        assert!(is_hostname("app.example.com"), "a plain hostname");
+        assert!(is_hostname("localhost"), "one label is a hostname");
+        assert!(is_hostname("xn--80ak6aa92e.com"), "punycode");
+        for bad in [
+            "https://app.example.com",
+            "app.example.com/",
+            "app.example.com:443",
+            "app.example.com/path",
+            "-bad.example.com",
+            "bad-.example.com",
+            "app..example.com",
+            ".app.example.com",
+        ] {
+            assert!(!is_hostname(bad), "{bad} is not a hostname");
+            let res = parse(&src(bad), ManifestMode::Strict);
+            assert!(res.is_err(), "{bad} should be refused: {res:?}");
+        }
+        // And it round-trips, because a rendered manifest that will not re-parse
+        // is a manifest that loses the setting the next time it is written.
+        let res = parse(&src("app.example.com"), ManifestMode::Strict).expect("parses");
+        let again = parse(&res.manifest.render(), ManifestMode::Strict).expect("round-trips");
+        assert_eq!(again.manifest.environments, res.manifest.environments);
     }
 
     #[test]

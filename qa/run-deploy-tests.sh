@@ -256,6 +256,8 @@ cat >> "$APP/hard.toml" <<'TOML'
 [env.production]
 host = "deploy@api.example.com"
 dir = "SRV_PLACEHOLDER"
+domain = "smoke.example.com"
+tls_email = "ops@example.com"
 secrets = ["SESSION_KEY", "DATABASE_URL"]
 
 [env.production.vars]
@@ -402,6 +404,53 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     else
         fail "and wrote the same unit systemd will read"
     fi
+fi
+
+# ---- the reverse proxy and the certificate ----------------------------------
+# nginx is the authority on its own configuration, so where it is installed the
+# generated file is tested by nginx rather than by a string comparison.
+NGX="$TMP/site.conf"
+"$HARD" deploy nginx --env production --tls > "$NGX" 2>"$TMP/err"
+if grep -q "^        proxy_set_header   Upgrade \$http_upgrade;$" "$NGX" \
+    && grep -q "^        proxy_set_header   Connection \$connection_upgrade;$" "$NGX"; then
+    pass "the generated block keeps a WebSocket upgrade alive"
+else
+    fail "the generated block keeps a WebSocket upgrade alive"
+fi
+if [ "$(grep -c 'acme-challenge' "$NGX")" -ge 1 ] \
+    && [ "$(grep -n 'location \^~ /.well-known' "$NGX" | cut -d: -f1)" \
+        -lt "$(grep -n 'return 301' "$NGX" | head -1 | cut -d: -f1)" ]; then
+    pass "the ACME challenge is served before the redirect to HTTPS"
+else
+    fail "the ACME challenge is served before the redirect to HTTPS"
+fi
+if command -v nginx >/dev/null 2>&1; then
+    if "$HARD" deploy nginx --env production --tls --check > "$TMP/ngxcheck" 2>&1; then
+        pass "nginx -t accepts the generated file"
+    else
+        fail "nginx -t accepts the generated file ($(head -2 "$TMP/ngxcheck" | tr '\n' ' '))"
+    fi
+    # The install command is a heredoc and an nginx -t, so it gets the same
+    # treatment as the other generated shell.
+    NGX_INSTALL=$("$HARD" deploy nginx --env production --tls --install "$TMP/srv" 2>&1 || true)
+    case "$NGX_INSTALL" in
+        *"cannot read the host"*|*"Could not resolve"*|*"Connection refused"*)
+            pass "installing the site needs a host (not reachable here)" ;;
+        *)
+            fail "installing the site needs a host (got: $(printf '%s' "$NGX_INSTALL" | head -1))" ;;
+    esac
+else
+    echo "deploy: skip nginx (not installed)"
+fi
+if "$HARD" deploy https --env production | grep -q "certbot certonly --webroot -w '$SRV/shared/acme'"; then
+    pass "the certificate is issued against the webroot the block serves"
+else
+    fail "the certificate is issued against the webroot the block serves"
+fi
+if "$HARD" deploy https --env production | grep -q -- "--email 'ops@example.com'"; then
+    pass "and the expiry notice has an address"
+else
+    fail "and the expiry notice has an address"
 fi
 
 # ---- the shell the tool generates is the shell that runs ---------------------

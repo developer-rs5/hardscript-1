@@ -26,6 +26,8 @@ pub fn cmd_deploy(args: &[String]) {
         "logs" => crate::operations::cmd_logs(rest),
         "status" => crate::operations::cmd_status(rest),
         "releases" => crate::operations::cmd_releases(rest),
+        "nginx" => crate::nginx::cmd_nginx(rest),
+        "https" => crate::nginx::cmd_https(rest),
         "rollback" => crate::rollback::cmd_rollback(rest),
         "prune" => crate::rollback::cmd_prune(rest),
         "start" | "stop" | "restart" => crate::operations::cmd_lifecycle(sub, rest),
@@ -50,6 +52,8 @@ fn help() {
          \x20 hard deploy status [host]        What is live, what is running, what is kept\n\
          \x20 hard deploy start|stop|restart   Run the service\n\
          \x20 hard deploy releases [host]      The releases on the host, newest first\n\
+         \x20 hard deploy nginx [flags]       Write the reverse proxy config\n\
+         \x20 hard deploy https [flags]        The command that issues the certificate\n\
          \x20 hard deploy rollback [host]      Go back to the previous release\n\
          \x20 hard deploy prune [host]         Remove old releases (--keep N --yes)\n\
          \x20 hard deploy help                 Show this help"
@@ -964,6 +968,8 @@ mod tests {
             health_path: Some("/live".to_string()),
             health_timeout: Some(90),
             restart_cmd: Some("rc-service api restart".to_string()),
+            domain: Some("api.example.com".to_string()),
+            tls_email: Some("ops@example.com".to_string()),
             vars: vec![("RUST_LOG".to_string(), "info".to_string())],
             secrets: vec!["DATABASE_URL".to_string()],
         }

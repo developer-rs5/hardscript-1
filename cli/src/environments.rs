@@ -28,6 +28,10 @@ pub struct Environment {
     pub health_path: Option<String>,
     pub health_timeout: Option<u32>,
     pub restart_cmd: Option<String>,
+    /// The hostname the certificate is for and the proxy answers to.
+    pub domain: Option<String>,
+    /// Where the expiry notice goes.
+    pub tls_email: Option<String>,
     pub vars: Vec<(String, String)>,
     pub secrets: Vec<String>,
 }
@@ -46,6 +50,8 @@ impl Environment {
             health_path: cfg.health_path.clone(),
             health_timeout: cfg.health_timeout,
             restart_cmd: cfg.restart_cmd.clone(),
+            domain: cfg.domain.clone(),
+            tls_email: cfg.tls_email.clone(),
             vars: cfg.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             secrets: cfg.secrets.clone(),
         }
@@ -230,6 +236,12 @@ fn cmd_show(project: &str, manifest: &Manifest, args: &[String]) {
     if let Some(t) = env.health_timeout {
         println!("  timeout   {t}s");
     }
+    if let Some(d) = &env.domain {
+        println!("  domain    {d}");
+    }
+    if let Some(e) = &env.tls_email {
+        println!("  tls       {e}");
+    }
     if env.vars.is_empty() {
         println!("  vars      (none)");
     } else {
@@ -375,6 +387,8 @@ dir = "/srv/api"
 port = 8080
 health_path = "/live"
 health_timeout = 60
+domain = "api.example.com"
+tls_email = "ops@example.com"
 secrets = ["DATABASE_URL", "SESSION_KEY"]
 
 [env.production.vars]
@@ -396,6 +410,8 @@ host = "deploy@staging.example.com""#,
         assert_eq!(prod.dir, "/srv/api", "the environment wins");
         assert_eq!(prod.port, Some(8080), "and the port");
         assert_eq!(prod.health_timeout, Some(60), "and the timeout");
+        assert_eq!(prod.domain.as_deref(), Some("api.example.com"), "and the hostname a certificate is for");
+        assert_eq!(prod.tls_email.as_deref(), Some("ops@example.com"), "and where the expiry notice goes");
         assert_eq!(describe(&prod), "deploy@app.example.com (dir /srv/api, app.service)", "one line");
     }
 
@@ -551,6 +567,8 @@ host = "deploy@staging.example.com""#,
             health_path: None,
             health_timeout: None,
             restart_cmd: None,
+            domain: None,
+            tls_email: None,
             vars: vec![
                 ("RUST_LOG".to_string(), "info".to_string()),
                 ("MOTD".to_string(), "it's fine".to_string()),
