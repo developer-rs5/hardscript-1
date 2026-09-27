@@ -1,0 +1,11 @@
+bring http
+
+app @3100
+
+GET "/healthz" :: {
+    <- { ok: true }
+}
+
+GET "/" :: {
+    <- { hello: "world" }
+}

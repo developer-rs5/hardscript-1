@@ -12,6 +12,8 @@ mod compose;
 mod deploy;
 mod dockerfile;
 mod migrate;
+mod release;
+mod ssh;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 

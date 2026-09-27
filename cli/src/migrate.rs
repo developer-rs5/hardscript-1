@@ -607,6 +607,35 @@ int main(int argc, char** argv) {
 /// Compile the helper once per invocation and run it. The helper is built from
 /// the embedded runtime, so it always matches the compiler that generated it.
 fn run_helper(cmd: &str, dialect: Dialect, target: &str, extra: &[String], files: &[String]) -> String {
+    let bin_path = build_helper();
+    let dialect_name = match dialect {
+        Dialect::Sqlite => "sqlite",
+        Dialect::Postgres => "postgres",
+    };
+    let mut command = std::process::Command::new(&bin_path);
+    command.arg(cmd).arg(dialect_name).arg(target);
+    for e in extra {
+        command.arg(e);
+    }
+    for f in files {
+        command.arg(f);
+    }
+    let run = command.output().unwrap_or_else(|e| die(&format!("could not run the migration helper: {e}")));
+    if !run.status.success() {
+        let err = String::from_utf8_lossy(&run.stderr);
+        // The helper prints `error: <message>`; the CLI adds the catalog code.
+        return format!("HELPER-FAILED:{}", err.trim());
+    }
+    String::from_utf8_lossy(&run.stdout).to_string()
+}
+
+/// Compile the migration helper into `.hard/` and return its path.
+///
+/// Public because `hard deploy` ships this exact binary to a server: the
+/// migration code that runs in production is then the code that was compiled
+/// here, from the same embedded runtime, rather than a second implementation
+/// that only exists on the deploy path.
+pub fn build_helper() -> std::path::PathBuf {
     let build_dir = std::path::PathBuf::from(".hard");
     std::fs::create_dir_all(&build_dir).unwrap_or_else(|e| die(&e.to_string()));
     write_runtime(&build_dir);
@@ -628,25 +657,7 @@ fn run_helper(cmd: &str, dialect: Dialect, target: &str, extra: &[String], files
     if !out.status.success() {
         die(&format!("could not build the migration helper:\n{}", String::from_utf8_lossy(&out.stderr)));
     }
-    let dialect_name = match dialect {
-        Dialect::Sqlite => "sqlite",
-        Dialect::Postgres => "postgres",
-    };
-    let mut command = std::process::Command::new(&bin_path);
-    command.arg(cmd).arg(dialect_name).arg(target);
-    for e in extra {
-        command.arg(e);
-    }
-    for f in files {
-        command.arg(f);
-    }
-    let run = command.output().unwrap_or_else(|e| die(&format!("could not run the migration helper: {e}")));
-    if !run.status.success() {
-        let err = String::from_utf8_lossy(&run.stderr);
-        // The helper prints `error: <message>`; the CLI adds the catalog code.
-        return format!("HELPER-FAILED:{}", err.trim());
-    }
-    String::from_utf8_lossy(&run.stdout).to_string()
+    bin_path
 }
 
 fn helper_error(out: &str) -> String {

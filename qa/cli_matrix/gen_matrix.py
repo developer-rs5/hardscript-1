@@ -101,6 +101,7 @@ MAIN_EMAIL = F("main_email.hard")
 MAIN_METRICS = F("main_metrics.hard")
 MAIN_CLUSTER = F("main_cluster.hard")
 MAIN_DOCKER = F("main_docker.hard")
+MAIN_DEPLOY = F("main_deploy.hard")
 DB_TOML = """schema = 1
 name = "hsdb"
 version = "0.1.0"
@@ -165,6 +166,37 @@ def setup_docker(d):
     (d / "hard.toml").write_text(DB_TOML)
 
 
+MIGRATION_SQL = """-- hardscript:migration 0001
+-- hardscript:fingerprint -- table t\\n  "id" INTEGER PRIMARY KEY NOT NULL\\n
+-- hardscript:models
+-- model T {
+--     id : Int @primary
+-- }
+--
+-- hardscript:end
+-- +migrate Up
+-- create table t
+CREATE TABLE IF NOT EXISTS "t" (
+  "id" INTEGER PRIMARY KEY NOT NULL
+);
+-- +migrate Down
+-- create table t
+DROP TABLE IF EXISTS "t";
+"""
+
+
+def setup_deploy(d):
+    # A project with everything a deploy ships: a health route to probe, a
+    # migration, and a static file.
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "main.hard").write_text(MAIN_DEPLOY)
+    (d / "hard.toml").write_text(DB_TOML)
+    (d / "migrations").mkdir(exist_ok=True)
+    (d / "migrations" / "0001_init.sql").write_text(MIGRATION_SQL)
+    (d / "static").mkdir(exist_ok=True)
+    (d / "static" / "app.css").write_text("body { color: red }\n")
+
+
 def setup_cluster(d):
     d.mkdir(parents=True, exist_ok=True)
     (d / "main.hard").write_text(MAIN_CLUSTER)
@@ -178,6 +210,7 @@ SETUPS = {
     "exists": setup_exists, "no_toml": setup_no_toml, "ro": setup_readonly,
     "db": setup_db, "cache": setup_cache, "queue": setup_queue, "sched": setup_sched,
     "session": setup_session, "limit": setup_limit, "email": setup_email, "metrics": setup_metrics, "cluster": setup_cluster, "docker": setup_docker,
+    "deploy": setup_deploy,
 }
 
 # id, argv, expected_rc, setup, note
@@ -289,6 +322,15 @@ CASES = [
     ("cp002", ["deploy", "compose", "--print", "main.hard"], 0, "docker", "print a compose file"),
     ("cp003", ["deploy"], 0, "docker", "deploy with no subcommand prints help"),
     ("cp004", ["deploy", "nonsense"], 2, "docker", "an unknown deploy subcommand is a usage error"),
+    # ssh deployment =========================================================
+    ("dp001", ["deploy", "ssh", "--print", "--no-build", "root@example.com"], 0, "deploy", "print a deploy plan"),
+    ("dp002", ["deploy", "ssh", "--print", "--no-build"], 2, "deploy", "a deploy with no host is a usage error"),
+    ("dp003", ["deploy", "ssh", "--print", "--no-build", "root@example.com", "root@other"], 2, "deploy", "a deploy to two hosts is a usage error"),
+    ("dp004", ["deploy", "ssh", "--print", "--no-build", "--release-id", "../../etc", "root@example.com"], 1, "deploy", "a release id that is a path is refused"),
+    ("dp005", ["deploy", "ssh", "--print", "--no-build", "--dir", "/opt/web;id", "root@example.com"], 1, "deploy", "a remote root that is a shell problem is refused"),
+    ("dp006", ["deploy", "ssh", "--print", "--no-build", "--health-port", "http", "root@example.com"], 2, "deploy", "a health port that is not a number is a usage error"),
+    ("dp007", ["deploy", "ssh", "--print", "--no-build", "--nonsense", "root@example.com"], 2, "deploy", "an unknown deploy flag is a usage error"),
+    ("dp008", ["deploy", "ssh", "--print", "--no-build", "--no-health", "root@example.com"], 0, "deploy", "a deploy that does not verify still prints"),
 ]
 
 for cid, argv, rc, setup, note in CASES:
