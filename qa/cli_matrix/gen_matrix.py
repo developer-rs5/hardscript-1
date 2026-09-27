@@ -381,6 +381,13 @@ CASES = [
     ("pc005", ["deploy", "config", "check"], 2, "deploy", "check with no host is a usage error"),
     ("pc006", ["deploy", "ssh", "--print", "--no-build", "--no-health", "--unit", "root@example.com"], 0, "deploy", "a deploy that installs the unit says so"),
     ("pc007", ["deploy", "ssh", "--print", "--no-build", "--no-health", "root@example.com"], 0, "deploy", "and one that does not, leaves it alone"),
+    # logs and lifecycle ======================================================
+    ("op001", ["deploy", "logs", "-n", "all", "root@example.com"], 2, "deploy", "a line count that is not a number is a usage error"),
+    ("op002", ["deploy", "logs", "--nope", "root@example.com"], 2, "deploy", "an unknown logs flag is a usage error"),
+    ("op003", ["deploy", "status"], 2, "deploy", "status with no host is a usage error"),
+    ("op004", ["deploy", "releases"], 2, "deploy", "releases with no host is a usage error"),
+    ("op005", ["deploy", "restart"], 2, "deploy", "restart with no host is a usage error"),
+    ("op006", ["deploy", "logs", "--env", "nope", "root@example.com"], 1, "deploy", "an environment that does not exist fails any deploy command"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

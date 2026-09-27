@@ -119,6 +119,11 @@ pub trait Ssh: std::fmt::Debug {
     /// Run a command and collect its output.
     fn run(&mut self, target: &SshTarget, command: &str) -> Result<SshOutput, String>;
 
+    /// Run a command with this process's stdio attached, for `logs --follow`:
+    /// a follow is an unbounded stream, and capturing it into memory would
+    /// turn a service logging for an hour into an out-of-memory error.
+    fn stream(&mut self, target: &SshTarget, command: &str) -> Result<i32, String>;
+
     /// Copy a local file or directory to a remote path.
     fn upload(
         &mut self,
@@ -216,6 +221,22 @@ impl Ssh for SystemSsh {
         })
     }
 
+    fn stream(&mut self, target: &SshTarget, command: &str) -> Result<i32, String> {
+        let mut cmd = Command::new(self.ssh_program());
+        cmd.args(SSH_OPTIONS);
+        if target.port != 22 {
+            cmd.arg("-p").arg(target.port.to_string());
+        }
+        cmd.arg(target.destination()).arg(command);
+        let status = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| format!("cannot run {}: {e}", self.ssh_program()))?;
+        Ok(status.code().unwrap_or(255))
+    }
+
     fn upload(
         &mut self,
         target: &SshTarget,
@@ -263,6 +284,8 @@ pub struct MockSsh {
     pub calls: Vec<SshCall>,
     /// Uploads recorded as (local path, remote path, bytes).
     pub uploads: Vec<(String, String, u64)>,
+    /// Streaming commands recorded but not run.
+    pub streamed: Vec<String>,
 }
 
 #[cfg(test)]
@@ -350,6 +373,12 @@ impl Ssh for MockSsh {
         self.default
             .clone()
             .ok_or_else(|| format!("mock: no answer scripted for `{}`", command))
+    }
+
+    fn stream(&mut self, target: &SshTarget, command: &str) -> Result<i32, String> {
+        self.record("stream", target, "", command);
+        self.streamed.push(command.to_string());
+        Ok(0)
     }
 
     fn upload(

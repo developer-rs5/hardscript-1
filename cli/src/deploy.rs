@@ -23,6 +23,10 @@ pub fn cmd_deploy(args: &[String]) {
         "ssh" => cmd_ssh(rest),
         "env" => environments::cmd_env(rest),
         "config" => crate::production::cmd_config(rest),
+        "logs" => crate::operations::cmd_logs(rest),
+        "status" => crate::operations::cmd_status(rest),
+        "releases" => crate::operations::cmd_releases(rest),
+        "start" | "stop" | "restart" => crate::operations::cmd_lifecycle(sub, rest),
         "help" | "-h" | "--help" => help(),
         other => {
             eprintln!("hard deploy: unknown subcommand '{other}'");
@@ -40,6 +44,10 @@ fn help() {
          \x20 hard deploy ssh <host>            Build, upload, and restart this service\n\
          \x20 hard deploy env <sub>            List, show, render, or check environments\n\
          \x20 hard deploy config <sub>         Write the systemd unit, or check a host\n\
+         \x20 hard deploy logs [host]         The journal for this service (-f to follow)\n\
+         \x20 hard deploy status [host]        What is live, what is running, what is kept\n\
+         \x20 hard deploy start|stop|restart   Run the service\n\
+         \x20 hard deploy releases [host]      The releases on the host, newest first\n\
          \x20 hard deploy help                 Show this help"
     );
 }
