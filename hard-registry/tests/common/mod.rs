@@ -208,6 +208,32 @@ impl Harness {
         parse_reply(&raw)
     }
 
+    /// Issue a request whose body may be larger than the server will read.
+    ///
+    /// The server answers 413 and closes as soon as it sees the
+    /// `Content-Length`, so the client's write is expected to fail partway;
+    /// whatever reply did arrive is returned.
+    pub fn oversized_request(&self, method: &str, path: &str, body: &[u8]) -> Option<Reply> {
+        use std::io::Read;
+        let addr = self.server.addr;
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
+        let mut raw = Vec::new();
+        let _ = stream.read_to_end(&mut raw);
+        if raw.is_empty() {
+            None
+        } else {
+            Some(parse_reply(&raw))
+        }
+    }
+
     pub fn get(&self, path: &str) -> Reply {
         self.request("GET", path, b"", &[])
     }
@@ -299,6 +325,11 @@ pub fn parse_reply(raw: &[u8]) -> Reply {
         headers,
         body,
     }
+}
+
+/// A boolean field of a JSON object.
+pub fn jbool(j: &hs_compiler::json::Json, key: &str) -> bool {
+    matches!(j.get(key), Some(hs_compiler::json::Json::Bool(true)))
 }
 
 /// Read a value out of a JSON object as a string.

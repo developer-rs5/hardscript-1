@@ -150,6 +150,20 @@ impl Request {
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
+
+    /// A boolean field in a JSON body (`"1"`, `true` and `1` all count).
+    pub fn json_body_flag(&self, key: &str) -> bool {
+        let text = String::from_utf8_lossy(&self.body);
+        let Some(j) = hs_compiler::json::parse(text.trim()) else {
+            return false;
+        };
+        match j.get(key) {
+            Some(hs_compiler::json::Json::Bool(b)) => *b,
+            Some(hs_compiler::json::Json::Str(s)) => matches!(s.as_str(), "1" | "true" | "yes"),
+            Some(hs_compiler::json::Json::Num(n)) => *n != 0,
+            _ => false,
+        }
+    }
 }
 
 /// A response ready to be written.
@@ -355,24 +369,53 @@ impl ServerMetrics {
     }
 }
 
+/// A request that could not be read, with the status to answer it with.
+#[derive(Clone, Debug)]
+pub struct ReadError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl ReadError {
+    fn bad_request(message: impl Into<String>) -> ReadError {
+        ReadError {
+            status: 400,
+            message: message.into(),
+        }
+    }
+
+    fn too_large(message: impl Into<String>) -> ReadError {
+        ReadError {
+            status: 413,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Read one request from a buffered stream. Returns `Ok(None)` on a clean
 /// EOF before any bytes (a keep-alive connection going away).
-pub fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<Request>, String> {
+pub fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<Request>, ReadError> {
     let mut line = String::new();
     let n = reader
         .read_line(&mut line)
-        .map_err(|e| format!("read request line: {e}"))?;
+        .map_err(|e| ReadError::bad_request(format!("read request line: {e}")))?;
     if n == 0 {
         return Ok(None);
     }
     if line.len() > MAX_LINE {
-        return Err("request line too long".to_string());
+        return Err(ReadError::bad_request("request line too long"));
     }
     let mut parts = line.trim_end().split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
     if method.is_empty() {
-        return Err("missing method".to_string());
+        return Err(ReadError::bad_request("missing method"));
     }
     let mut req = Request::new(&method, &target);
 
@@ -381,13 +424,13 @@ pub fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<Request>
         let mut h = String::new();
         let n = reader
             .read_line(&mut h)
-            .map_err(|e| format!("read header: {e}"))?;
+            .map_err(|e| ReadError::bad_request(format!("read header: {e}")))?;
         if n == 0 {
             break;
         }
         total += n;
         if total > MAX_HEADERS || req.headers.len() >= MAX_HEADER_COUNT {
-            return Err("header block too large".to_string());
+            return Err(ReadError::bad_request("header block too large"));
         }
         let t = h.trim_end();
         if t.is_empty() {
@@ -404,13 +447,15 @@ pub fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Option<Request>
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
     if len > MAX_BODY {
-        return Err(format!("body of {len} bytes exceeds the {MAX_BODY} byte limit"));
+        return Err(ReadError::too_large(format!(
+            "body of {len} bytes exceeds the {MAX_BODY} byte limit"
+        )));
     }
     if len > 0 {
         let mut body = vec![0u8; len];
         reader
             .read_exact(&mut body)
-            .map_err(|e| format!("read body: {e}"))?;
+            .map_err(|e| ReadError::bad_request(format!("read body: {e}")))?;
         req.body = body;
     }
     Ok(Some(req))
@@ -569,8 +614,13 @@ fn serve_connection(
         let mut req = match read_request(&mut reader) {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(()),
-            Err(msg) => {
-                let resp = Response::error(400, "bad_request", msg);
+            Err(e) => {
+                let code = if e.status == 413 {
+                    "payload_too_large"
+                } else {
+                    "bad_request"
+                };
+                let resp = Response::error(e.status, code, e.message);
                 let _ = write_response(&mut writer, &resp, false, false);
                 return Ok(());
             }

@@ -100,6 +100,9 @@ pub struct NewVersion {
 #[derive(Clone, Debug, Default)]
 pub struct NewPackage {
     pub name: String,
+    /// Set only when the package is created; an existing package keeps its
+    /// owner.
+    pub owner: Option<String>,
     pub description: Option<String>,
     pub license: Option<String>,
     pub homepage: Option<String>,
@@ -121,7 +124,8 @@ pub trait Store: Send + Sync {
     // -- packages ----------------------------------------------------------
 
     /// Insert a package, or update its descriptive fields if it already
-    /// exists. Returns the stored record.
+    /// exists. Returns the stored record. An existing package keeps its
+    /// original `owner`.
     fn upsert_package(&self, pkg: &NewPackage) -> StoreResult<Package>;
 
     /// Fetch one package by exact name.

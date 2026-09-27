@@ -8,8 +8,9 @@
 //! - [`lockfile`] — deterministic `hard.lock`
 //! - [`pkgfmt`] — the `.hspkg` package archive format
 //! - [`cache`] — the shared `~/.hard/cache/` store (offline installs)
-//! - [`registry`] — registry HTTP/1.1 client (no backend required)
+//! - [`registry`] — registry HTTP/1.1 client (read, publish, auth)
 //! - [`install`] — install/remove/update/list/outdated orchestration
+//! - [`publish`] — `hard publish`: `.hspkg` building and upload
 //! - [`workspace`] — monorepo support
 //! - [`templates`] — official project templates
 //! - [`report`] — automatic milestone reports
@@ -19,6 +20,7 @@ pub mod install;
 pub mod lockfile;
 pub mod manifest;
 pub mod pkgfmt;
+pub mod publish;
 pub mod registry;
 pub mod report;
 pub mod resolver;

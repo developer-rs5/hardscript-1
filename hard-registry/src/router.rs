@@ -365,7 +365,10 @@ impl Router {
                 Err(e) => store_error(&e),
             };
         }
-        match self.app.download(name, version) {
+        // HEAD asks "does this exist, and how big is it" without counting a
+        // download: the client uses it as a pre-publish conflict check.
+        let count = !req.method.eq_ignore_ascii_case("HEAD");
+        match self.app.download_counted(name, version, count) {
             Ok(bytes) => {
                 let mut r = Response::with_body(200, bytes);
                 r.set_header("Content-Type", "application/vnd.hardscript.package");
@@ -386,10 +389,11 @@ impl Router {
     // -- writes ------------------------------------------------------------
 
     fn publish(&self, req: &Request) -> Response {
-        let owner = match self.authorize(req, Scope::Publish) {
-            Ok(o) => o,
+        let token = match self.publish_token(req) {
+            Ok(t) => t,
             Err(r) => return r,
         };
+        let who = crate::app::Publisher::from_token(token.as_ref());
         let parsed = match crate::publish::parse_publish_request(req) {
             Ok(p) => p,
             Err(e) => return decode_error(&e),
@@ -397,11 +401,32 @@ impl Router {
         if let Err(errs) = self.app.validate_publish(&parsed) {
             return Response::json(422, &crate::codec::validation_json(&errs));
         }
-        match self.app.publish(&parsed) {
+        // A structurally broken archive is a problem with the *package*, not
+        // with the request, so it is reported like any other validation
+        // failure (422) with the reason attached to the field.
+        if let Err(e) = hs_pm::pkgfmt::read_archive(&parsed.archive) {
+            return Response::json(
+                422,
+                &crate::codec::validation_json(&[crate::model::ValidationError::new(
+                    "archive",
+                    format!("not a valid .hspkg archive: {}", e.message),
+                )]),
+            );
+        }
+        if is_dry_run(req) {
+            return match self.app.preview(&parsed, &who) {
+                Ok(p) => Response::json(200, &preview_json(&p)),
+                Err(e) => store_error(&e),
+            };
+        }
+        match self.app.publish_as(&parsed, &who) {
             Ok(v) => {
                 let mut j = views::publish_json(&v);
                 if let Json::Obj(pairs) = &mut j {
-                    pairs.push(("published_by".to_string(), Json::str(owner)));
+                    pairs.push((
+                        "published_by".to_string(),
+                        Json::str(who.name().unwrap_or("anonymous")),
+                    ));
                 }
                 Response::json(201, &j)
             }
@@ -667,11 +692,39 @@ impl Router {
         }
     }
 
+    /// Who is publishing.
+    ///
+    /// On a normal registry this is a token holding `publish`. On an
+    /// open-publishing node (local development, sandboxes) nobody has to
+    /// present one — but a token that *is* presented must still be valid, and
+    /// a scoped registry still checks the scope.
+    fn publish_token(&self, req: &Request) -> Result<Option<crate::model::Token>, Response> {
+        let open = self.app.config.open_publish && !self.app.config.require_auth;
+        match self.token(req)? {
+            Some(t) => {
+                if !open && !has_scope(&t.scopes, Scope::Publish) {
+                    return Err(Response::error(
+                        403,
+                        "forbidden",
+                        format!("token {} lacks the 'publish' scope", t.id),
+                    ));
+                }
+                Ok(Some(t))
+            }
+            None if open => Ok(None),
+            None => Err(Response::error(
+                401,
+                "unauthorized",
+                "this endpoint needs a token with the 'publish' scope (Authorization: Bearer <token>)",
+            )),
+        }
+    }
+
     /// Require a token holding `scope`, returning the token record.
     ///
-    /// Unlike [`Router::authorize`], this never honours open mode: managing
-    /// tokens is always an authenticated act, even on a registry that lets
-    /// anybody publish.
+    /// Unlike [`Router::publish_token`], this never honours open mode:
+    /// managing tokens is always an authenticated act, even on a registry
+    /// that lets anybody publish.
     fn token_for(&self, req: &Request, scope: Scope) -> Result<crate::model::Token, Response> {
         let token = match self.token(req)? {
             Some(t) => t,
@@ -756,6 +809,18 @@ impl TapCache for Response {
     }
 }
 
+/// Did the client ask for a dry run? (header or JSON body flag)
+fn is_dry_run(req: &Request) -> bool {
+    if req
+        .header("x-hard-dry-run")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    req.json_body_flag("dry_run")
+}
+
 fn decode_error(e: &DecodeError) -> Response {
     match e {
         DecodeError::Fields(errs) => Response::json(400, &field_errors_json(errs)),
@@ -794,6 +859,48 @@ pub fn parse_range(raw: &str) -> Option<(u64, u64)> {
         return None;
     }
     Some((start, end))
+}
+
+/// The preview document a dry run returns.
+fn preview_json(p: &crate::app::PublishPreview) -> Json {
+    Json::obj(vec![
+        ("ok", Json::Bool(true)),
+        ("dry_run", Json::Bool(true)),
+        ("name", Json::str(&p.name)),
+        ("version", Json::str(&p.version)),
+        ("integrity", Json::str(&p.integrity)),
+        ("fingerprint", Json::str(&p.fingerprint)),
+        ("size", Json::num(p.size as i64)),
+        ("file_count", Json::num(p.file_count as i64)),
+        (
+            "files",
+            Json::arr(p.files.iter().map(Json::str).collect()),
+        ),
+        (
+            "dependencies",
+            Json::arr(
+                p.dependencies
+                    .iter()
+                    .map(|(n, r, k)| {
+                        Json::obj(vec![
+                            ("name", Json::str(n)),
+                            ("req", Json::str(r)),
+                            ("kind", Json::str(k)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("already_published", Json::Bool(p.already_published)),
+        ("conflicting_version", Json::Bool(p.conflicting_version)),
+        (
+            "owner",
+            match &p.owner {
+                Some(o) => Json::str(o),
+                None => Json::Null,
+            },
+        ),
+    ])
 }
 
 /// The first 16 hex characters of a digest, for ETags.

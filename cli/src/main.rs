@@ -1,6 +1,7 @@
 use hs_compiler::{compile_to_cpp, fmt, frontend, Diag};
 use hs_pm::cache::Cache;
 use hs_pm::install::{self, InstallConfig};
+use hs_pm::registry::{Registry, RegistryConfig};
 use hs_pm::manifest::{default_manifest, Manifest};
 use hs_pm::templates;
 use hs_pm::workspace::Workspace;
@@ -136,6 +137,8 @@ fn main() {
         "docs" => cmd_docs(rest),
         "doctor" => cmd_doctor(rest),
         "add" => cmd_add(rest),
+        "publish" => cmd_publish(rest),
+        "yank" => cmd_yank(rest),
         "remove" | "rm" => cmd_remove(rest),
         "install" => cmd_install(rest),
         "update" => cmd_update(rest),
@@ -175,6 +178,8 @@ fn help() {
          \x20 hard fmt   [file]            Reformat a source file in place\n\
          \x20 hard docs  [file]            Generate API.md for a source file\n\
          \x20 hard add <pkg>[@req]          Add a dependency and install it\n\
+         \x20 hard publish                  Build a .hspkg and publish it to the registry\n\
+         \x20 hard yank <pkg>[@<ver>]       Retract a published version\n\
          \x20 hard remove <pkg>            Remove a dependency\n\
          \x20 hard install                 Resolve and lock all dependencies\n\
          \x20 hard update [pkg]            Update locked packages to newest match\n\
@@ -819,6 +824,186 @@ fn cmd_add(args: &[String]) {
             eprintln!("  {e}");
         }
     }
+}
+
+/// `hard publish` — build a `.hspkg` from the project and upload it.
+fn cmd_publish(args: &[String]) {
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let registry_override = flag_value(args, "--registry");
+    let allow_existing = args.iter().any(|a| a == "--allow-existing");
+    let version_override = flag_value(args, "--version");
+    let channel = flag_value(args, "--channel");
+    let tags = repeated_flags(args, "--tag");
+    let keywords = repeated_flags(args, "--keyword");
+    let token = flag_value(args, "--token").or_else(|| std::env::var("HARD_TOKEN").ok());
+
+    let project_root = PathBuf::from(".");
+    let (manifest, created) = load_manifest_or_default(&project_root);
+    if created {
+        // A directory with no hard.toml still has something publishable;
+        // scaffold the manifest so the published archive describes itself.
+        write(&project_root.join("hard.toml"), &manifest.render());
+    }
+    let options = hs_pm::publish::PublishOptions {
+        tags,
+        keywords,
+        channel,
+        dry_run,
+        allow_existing,
+        version: version_override,
+        registry: registry_override.clone(),
+        token: token.clone(),
+    };
+    let (plan, archive) = match hs_pm::publish::plan(&project_root, &manifest, &options) {
+        Ok(v) => v,
+        Err(e) => die(&e.message),
+    };
+
+    let env_registry = std::env::var("HARD_REGISTRY")
+        .ok()
+        .filter(|u| !u.trim().is_empty());
+    if dry_run && options.registry.is_none() && env_registry.is_none() {
+        // Nothing to talk to: the plan is still useful on its own.
+        print!("{}", hs_pm::publish::render_plan(&plan));
+        println!("dry run: no registry contacted (set registry = \"...\" or HARD_REGISTRY to check remotely)");
+        return;
+    }
+
+    let registry = Registry::new(RegistryConfig::resolve(
+        options.registry.as_deref().or(manifest.registry.as_deref()),
+        false,
+    ));
+    println!("publishing {} {} to {}", plan.name, plan.version, registry.config.url);
+    if !dry_run && !allow_existing {
+        match hs_pm::publish::version_exists(&registry, &plan.name, &plan.version) {
+            Ok(true) => {
+                eprintln!(
+                    "hard publish: {}@{} is already on {}",
+                    plan.name, plan.version, registry.config.url
+                );
+                eprintln!("bump the version in hard.toml, pass --version, or use --allow-existing to see the conflict");
+                std::process::exit(1);
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("warning: {e}"),
+        }
+    }
+    let result = if dry_run {
+        hs_pm::publish::dry_run(&registry, &plan, &archive, token.as_deref())
+    } else {
+        hs_pm::publish::publish(&registry, &plan, &archive, token.as_deref())
+    };
+    match result {
+        Ok(report) => {
+            print!("{}", hs_pm::publish::render_plan(&report.plan));
+            if let Some(i) = &report.registry_integrity {
+                if *i != report.plan.integrity {
+                    eprintln!(
+                        "warning: the registry recorded integrity {i}, the local archive hashes to {}",
+                        report.plan.integrity
+                    );
+                }
+            }
+            if let Some(fp) = &report.fingerprint {
+                println!("recorded fingerprint {fp}");
+            }
+            if let Some(sig) = &report.signature {
+                let kid = report.key_id.clone().unwrap_or_default();
+                println!("signed by {kid} ({sig})");
+            } else {
+                println!("signature  (registry did not sign this publish)");
+            }
+            if dry_run {
+                println!("dry run: the registry validated the publish without storing it");
+            } else {
+                println!("published {}@{}", plan.name, plan.version);
+            }
+        }
+        Err(e) => die(&e.message),
+    }
+}
+
+/// `hard yank <pkg>[@<version>]` — retract a published version.
+fn cmd_yank(args: &[String]) {
+    let unyank = args.iter().any(|a| a == "--unyank");
+    let spec = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("hard yank: missing package name");
+            std::process::exit(2);
+        }
+    };
+    let (name, version) = install::parse_add_spec(&spec);
+    let version = match version {
+        Some(v) => v,
+        None => {
+            eprintln!("hard yank: specify a version, e.g. `hard yank jwt@1.0.0`");
+            std::process::exit(2);
+        }
+    };
+    let registry_override = flag_value(args, "--registry");
+    let token = flag_value(args, "--token").or_else(|| std::env::var("HARD_TOKEN").ok());
+    let registry = Registry::new(RegistryConfig::resolve(registry_override.as_deref(), false));
+    let path = if unyank {
+        "/api/unyank"
+    } else {
+        "/api/yank"
+    };
+    let body = format!(
+        "{{\"name\":\"{name}\",\"version\":\"{version}\",\"yanked\":{}}}",
+        if unyank { "false" } else { "true" }
+    );
+    match registry.post_json(path, &body, token.as_deref()) {
+        Ok(resp) if resp.is_success() => {
+            println!(
+                "{} {name}@{version}",
+                if unyank { "restored" } else { "yanked" }
+            );
+        }
+        Ok(resp) => {
+            eprintln!(
+                "hard yank: {}",
+                Registry::error_message(&resp)
+            );
+            std::process::exit(1);
+        }
+        Err(e) => die(&format!("cannot reach the registry: {e}")),
+    }
+}
+
+/// The value of `--name <value>` or `--name=<value>`.
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(v) = args[i].strip_prefix(&format!("{name}=")) {
+            return Some(v.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every value of a repeatable `--name <value>` flag, in order.
+fn repeated_flags(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            if let Some(v) = args.get(i + 1) {
+                out.push(v.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = args[i].strip_prefix(&format!("{name}=")) {
+            out.push(v.to_string());
+        }
+        i += 1;
+    }
+    out
 }
 
 fn cmd_remove(args: &[String]) {

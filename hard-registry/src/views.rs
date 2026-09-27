@@ -67,6 +67,7 @@ pub fn package_json(p: &Package, versions: &[PackageVersion]) -> Json {
         .max_by(|a, b| a.version.cmp(&b.version));
     let mut pairs = vec![
         ("name", Json::str(&p.name)),
+        ("owner", s(&p.owner)),
         ("description", s(&p.description)),
         ("license", s(&p.license)),
         ("homepage", s(&p.homepage)),

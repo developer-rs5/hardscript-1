@@ -116,6 +116,66 @@ impl PublishRequest {
     }
 }
 
+/// Who is publishing. Ownership of a package name is decided here: the first
+/// account to publish a name owns it, and only that account (or one holding
+/// the `admin` scope) may publish further versions of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Publisher {
+    /// Open mode: no account, no ownership.
+    Anonymous,
+    /// An authenticated account without the `admin` scope.
+    User(String),
+    /// An account holding `admin`, which may publish to any name.
+    Admin(String),
+}
+
+impl Publisher {
+    /// The account name, when there is one.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Publisher::Anonymous => None,
+            Publisher::User(n) | Publisher::Admin(n) => Some(n),
+        }
+    }
+
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Publisher::Admin(_))
+    }
+
+    /// Decide who is publishing from a resolved token.
+    pub fn from_token(token: Option<&Token>) -> Publisher {
+        match token {
+            None => Publisher::Anonymous,
+            Some(t) => {
+                if t.scopes.contains(&Scope::Admin) {
+                    Publisher::Admin(t.user.clone())
+                } else {
+                    Publisher::User(t.user.clone())
+                }
+            }
+        }
+    }
+}
+
+/// What a publish would do, without doing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishPreview {
+    pub name: String,
+    pub version: String,
+    pub integrity: String,
+    pub fingerprint: String,
+    pub size: u64,
+    pub file_count: usize,
+    pub files: Vec<String>,
+    pub dependencies: Vec<(String, String, String)>,
+    /// Set when the version is already published and identical.
+    pub already_published: bool,
+    /// Set when the version exists but with different bytes.
+    pub conflicting_version: bool,
+    /// The current owner of the name, when the package already exists.
+    pub owner: Option<String>,
+}
+
 /// The registry service.
 pub struct App {
     pub store: Arc<dyn Store>,
@@ -236,11 +296,97 @@ impl App {
 
     // -- publish -----------------------------------------------------------
 
-    /// Publish a package version. Validation, then archive write, then the
-    /// row — in that order, so a rejected publish never leaves state behind.
+    /// Publish anonymously (open mode).
     pub fn publish(&self, req: &PublishRequest) -> StoreResult<PackageVersion> {
+        self.publish_as(req, &Publisher::Anonymous)
+    }
+
+    /// Validate and describe a publish without writing anything. This is what
+    /// `hard publish --dry-run` calls, and it is deliberately free of side
+    /// effects: not even the archive is written to disk.
+    pub fn preview(
+        &self,
+        req: &PublishRequest,
+        who: &Publisher,
+    ) -> Result<PublishPreview, StoreError> {
         self.validate_publish(req)
             .map_err(|errs| StoreError::Invalid(render_validation(&errs)))?;
+        let version = hs_pm::semver::Version::parse(&req.version)
+            .map_err(|e| StoreError::invalid(e))?
+            .to_string();
+        let file_list = hs_pm::pkgfmt::read_archive(&req.archive)
+            .map_err(|e| StoreError::Invalid(format!("malformed .hspkg archive: {}", e.message)))?
+            .into_iter()
+            .map(|f| f.rel_path)
+            .collect::<Vec<String>>();
+        let mut deps = req.deps.clone();
+        deps.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.kind.cmp(&b.kind))
+                .then_with(|| a.req.cmp(&b.req))
+        });
+        let fp = fingerprint::compute(
+            &FingerprintInput::new(&req.name, &version)
+                .with_deps(&deps)
+                .with_files(&file_list)
+                .with_channel(req.channel.as_deref()),
+        );
+        let integrity = security::normalize_integrity(&security::sha256_hex(&req.archive));
+        let existing = self.store.version(&req.name, &version)?;
+        let (already, conflicting) = match &existing {
+            None => (false, false),
+            Some(v) => {
+                let same = security::integrity_matches(&v.integrity, &integrity)
+                    && security::integrity_matches(&v.fingerprint, &fp);
+                (same, !same)
+            }
+        };
+        self.check_owner(req, who)?;
+        Ok(PublishPreview {
+            name: req.name.clone(),
+            version,
+            integrity,
+            fingerprint: fp,
+            size: req.archive.len() as u64,
+            file_count: file_list.len(),
+            files: file_list,
+            dependencies: deps
+                .iter()
+                .map(|d| (d.name.clone(), d.req.clone(), d.kind.as_str().to_string()))
+                .collect(),
+            already_published: already,
+            conflicting_version: conflicting,
+            owner: self.store.package(&req.name)?.and_then(|p| p.owner),
+        })
+    }
+
+    /// May `who` publish this name? Unknown names are free; existing ones are
+    /// owned by whoever created them.
+    fn check_owner(&self, req: &PublishRequest, who: &Publisher) -> StoreResult<()> {
+        let Some(existing) = self.store.package(&req.name)? else {
+            return Ok(());
+        };
+        let Some(owner) = existing.owner.as_deref() else {
+            // published by an anonymous open-mode node: no ownership to enforce
+            return Ok(());
+        };
+        let publisher = who.name().unwrap_or("");
+        if publisher == owner || who.is_admin() {
+            return Ok(());
+        }
+        Err(StoreError::Conflict(format!(
+            "'{}' is owned by '{owner}'; publishing to it needs the admin scope",
+            req.name
+        )))
+    }
+
+    /// Publish a package version. Validation, then archive write, then the
+    /// row — in that order, so a rejected publish never leaves state behind.
+    pub fn publish_as(&self, req: &PublishRequest, who: &Publisher) -> StoreResult<PackageVersion> {
+        self.validate_publish(req)
+            .map_err(|errs| StoreError::Invalid(render_validation(&errs)))?;
+        self.check_owner(req, who)?;
 
         let version = hs_pm::semver::Version::parse(&req.version)
             .map_err(|e| StoreError::invalid(e))?;
@@ -305,6 +451,7 @@ impl App {
 
         self.store.upsert_package(&NewPackage {
             name: req.name.clone(),
+            owner: who.name().map(String::from),
             description: req.description.as_deref().map(clamp_text),
             license: req.license.as_deref().map(clamp_text),
             homepage: req.homepage.as_deref().map(clamp_text),
@@ -363,7 +510,24 @@ impl App {
     }
 
     /// Download a version's bytes, counting the download.
+    ///
+    /// `count` is false for `HEAD`, which must be free of side effects: the
+    /// package manager asks "does this version exist?" before uploading, and
+    /// that question must not inflate anybody's download statistics.
+    pub fn download_counted(&self, name: &str, version: &str, count: bool) -> StoreResult<Vec<u8>> {
+        let bytes = self.download_bytes(name, version)?;
+        if count {
+            self.store.record_download(name, version)?;
+        }
+        Ok(bytes)
+    }
+
+    /// Download a version's bytes without touching the counters.
     pub fn download(&self, name: &str, version: &str) -> StoreResult<Vec<u8>> {
+        self.download_counted(name, version, true)
+    }
+
+    fn download_bytes(&self, name: &str, version: &str) -> StoreResult<Vec<u8>> {
         let v = self
             .store
             .version(name, version)?
@@ -379,7 +543,6 @@ impl App {
                 v.integrity
             )));
         }
-        self.store.record_download(name, version)?;
         Ok(bytes)
     }
 

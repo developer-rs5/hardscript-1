@@ -193,6 +193,7 @@ impl SqliteStore {
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS packages (
     name          TEXT PRIMARY KEY,
+    owner         TEXT,
     description   TEXT,
     license       TEXT,
     homepage      TEXT,
@@ -265,6 +266,16 @@ CREATE INDEX IF NOT EXISTS idx_changes_seq ON changes(seq);
 CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
 "#;
 
+/// The one place the package column list is written down. Every read query
+/// interpolates it, and [`package_row`] is the only thing that knows the
+/// order, so the two can never drift apart.
+const PACKAGE_COLUMNS: &str = "name, owner, description, license, homepage, repository, documentation, keywords, tags, downloads, created_at, updated_at";
+
+/// `SELECT <columns> FROM packages <clause>`.
+fn package_select(clause: &str) -> String {
+    format!("SELECT {PACKAGE_COLUMNS} FROM packages {clause}")
+}
+
 /// Let `?` work inside the query helpers below.
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> StoreError {
@@ -330,11 +341,13 @@ impl Store for SqliteStore {
                 .map_err(io)?;
             } else {
                 tx.execute(
-                    "INSERT INTO packages (name, description, license, homepage, repository,
-                        documentation, keywords, tags, downloads, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)",
+                    "INSERT INTO packages (name, owner, description, license, homepage,
+                        repository, documentation, keywords, tags, downloads, created_at,
+                        updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)",
                     params![
                         pkg.name,
+                        pkg.owner,
                         pkg.description,
                         pkg.license,
                         pkg.homepage,
@@ -358,9 +371,7 @@ impl Store for SqliteStore {
         self.with_conn(|c| {
             let mut p = c
                 .query_row(
-                    "SELECT name, description, license, homepage, repository, documentation,
-                            keywords, tags, downloads, created_at, updated_at
-                     FROM packages WHERE name = ?1",
+                    &package_select("WHERE name = ?1"),
                     params![name],
                     package_row,
                 )
@@ -379,9 +390,7 @@ impl Store for SqliteStore {
                     let like = format!("{}%", escape_like(pfx));
                     let mut st = c
                         .prepare(
-                            "SELECT name, description, license, homepage, repository, documentation,
-                                    keywords, tags, downloads, created_at, updated_at
-                             FROM packages WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name",
+                            &package_select("WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name"),
                         )
                         .map_err(io)?;
                     let rows = st
@@ -394,9 +403,7 @@ impl Store for SqliteStore {
                 None => {
                     let mut st = c
                         .prepare(
-                            "SELECT name, description, license, homepage, repository, documentation,
-                                    keywords, tags, downloads, created_at, updated_at
-                             FROM packages ORDER BY name",
+                            &package_select("ORDER BY name"),
                         )
                         .map_err(io)?;
                     let rows = st
@@ -856,16 +863,17 @@ fn escape_like(s: &str) -> String {
 fn package_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Package> {
     Ok(Package {
         name: r.get(0)?,
-        description: r.get(1)?,
-        license: r.get(2)?,
-        homepage: r.get(3)?,
-        repository: r.get(4)?,
-        documentation: r.get(5)?,
-        keywords: split_list(&r.get::<_, String>(6)?),
-        tags: split_list(&r.get::<_, String>(7)?),
-        downloads: r.get::<_, i64>(8)? as u64,
-        created_at: r.get(9)?,
-        updated_at: r.get(10)?,
+        owner: r.get(1)?,
+        description: r.get(2)?,
+        license: r.get(3)?,
+        homepage: r.get(4)?,
+        repository: r.get(5)?,
+        documentation: r.get(6)?,
+        keywords: split_list(&r.get::<_, String>(7)?),
+        tags: split_list(&r.get::<_, String>(8)?),
+        downloads: r.get::<_, i64>(9)? as u64,
+        created_at: r.get(10)?,
+        updated_at: r.get(11)?,
     })
 }
 

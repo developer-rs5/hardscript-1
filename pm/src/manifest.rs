@@ -43,6 +43,7 @@ pub struct Manifest {
     pub compiler: CompilerConfig,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
+    pub package: PackageInfo,
     pub dependencies: BTreeMap<String, String>,
     pub dev_dependencies: BTreeMap<String, String>,
     pub workspace: Vec<String>,
@@ -88,6 +89,28 @@ pub struct DatabaseConfig {
     pub url: Option<String>,
 }
 
+/// Package metadata, published to the registry by `hard publish`.
+///
+/// Kept separate from the build configuration on purpose: `[package]` is what
+/// a *consumer* of the library sees (where the code lives, what it is called,
+/// how it is licensed), while `[compiler]`/`[server]`/`[database]` describe
+/// this particular checkout.
+#[derive(Clone, Debug, Default)]
+pub struct PackageInfo {
+    pub homepage: Option<String>,
+    pub repository: Option<String>,
+    pub documentation: Option<String>,
+    pub keywords: Vec<String>,
+    pub tags: Vec<String>,
+    /// Extra paths to include in the published archive, on top of the
+    /// project tree (e.g. `"CHANGELOG.md"` from a parent directory).
+    pub include: Vec<String>,
+    /// Extra path prefixes to exclude from the published archive.
+    pub exclude: Vec<String>,
+    /// Human-readable category, published as the release channel.
+    pub publish_as: Option<String>,
+}
+
 /// Results of parsing a manifest: the model plus any accumulated diagnostics.
 #[derive(Clone, Debug, Default)]
 pub struct ParseResult {
@@ -97,8 +120,12 @@ pub struct ParseResult {
 
 const KNOWN_TOP: &[&str] = &[
     "schema", "name", "version", "edition", "description", "authors", "license", "registry",
-    "compiler", "server", "database", "dependencies", "dev-dependencies", "dev_dependencies", "workspace",
-    "modules",
+    "compiler", "server", "database", "package", "dependencies", "dev-dependencies",
+    "dev_dependencies", "workspace", "modules",
+];
+const KNOWN_PACKAGE: &[&str] = &[
+    "homepage", "repository", "documentation", "keywords", "tags", "include", "exclude",
+    "publish-as", "publish_as",
 ];
 const KNOWN_COMPILER: &[&str] = &["opt", "warnings", "jobs"];
 const KNOWN_SERVER: &[&str] = &["port", "host"];
@@ -243,6 +270,58 @@ pub fn parse(src: &str, mode: ManifestMode) -> Result<ParseResult, Vec<ManifestE
                         key: format!("database.{other}"),
                         message: format!("unknown database setting '{other}'"),
                         suggestion: suggest(other, KNOWN_DATABASE),
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(t) = doc.table("package") {
+        for (k, v) in t {
+            match k.as_str() {
+                "homepage" | "repository" | "documentation" => match v.as_str() {
+                    Some(s) => match k.as_str() {
+                        "homepage" => res.manifest.package.homepage = Some(s.to_string()),
+                        "repository" => res.manifest.package.repository = Some(s.to_string()),
+                        _ => res.manifest.package.documentation = Some(s.to_string()),
+                    },
+                    None => errors.push(manifest_err(
+                        format!("package.{k}").as_str(),
+                        format!("'{k}' must be a string"),
+                    )),
+                },
+                "publish-as" | "publish_as" => match v.as_str() {
+                    Some(s) => res.manifest.package.publish_as = Some(s.to_string()),
+                    None => errors.push(manifest_err(
+                        "package.publish-as",
+                        "'publish-as' must be a string",
+                    )),
+                },
+                "keywords" | "tags" | "include" | "exclude" => {
+                    let list = match v {
+                        TomlValue::Str(s) => vec![s.clone()],
+                        TomlValue::Array(a) => a.iter().filter_map(|i| i.as_str().map(String::from)).collect(),
+                        _ => {
+                            errors.push(manifest_err(
+                                format!("package.{k}").as_str(),
+                                format!("'{k}' must be a string or an array of strings"),
+                            ));
+                            continue;
+                        }
+                    };
+                    let target = match k.as_str() {
+                        "keywords" => &mut res.manifest.package.keywords,
+                        "tags" => &mut res.manifest.package.tags,
+                        "include" => &mut res.manifest.package.include,
+                        _ => &mut res.manifest.package.exclude,
+                    };
+                    target.extend(list);
+                }
+                other => {
+                    res.warnings.push(ManifestWarning {
+                        key: format!("package.{other}"),
+                        message: format!("unknown package setting '{other}'"),
+                        suggestion: suggest(other, KNOWN_PACKAGE),
                     });
                 }
             }
@@ -412,15 +491,34 @@ fn parse_dep_table(
     out
 }
 
-fn is_valid_package_name(name: &str) -> bool {
+/// Package names are lowercase `[a-z0-9_-]`, may start with a digit or `_`,
+/// and may carry a single `scope/` prefix (`acme/http`) so a name can live in
+/// a namespace the way it does on npm and crates.io.
+pub fn is_valid_package_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 128 {
         return false;
     }
-    let first = name.chars().next().unwrap();
+    let bare = match name.split_once('/') {
+        Some((scope, rest)) => {
+            if scope.is_empty() || rest.is_empty() || rest.contains('/') {
+                return false;
+            }
+            rest
+        }
+        None => name,
+    };
+    let first = bare.chars().next().unwrap();
+    if first.is_ascii_digit() {
+        // a leading digit is fine, but the rest still has to be legible
+        return bare.len() > 1
+            && bare
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    }
     if !(first.is_ascii_lowercase() || first == '_') {
         return false;
     }
-    name.chars()
+    bare.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
@@ -530,6 +628,35 @@ impl Manifest {
             s.push('\n');
         }
 
+        if self.package_is_set() {
+            s.push_str("[package]\n");
+            if let Some(v) = &self.package.homepage {
+                s.push_str(&format!("homepage = {}\n", toml_quote(v)));
+            }
+            if let Some(v) = &self.package.repository {
+                s.push_str(&format!("repository = {}\n", toml_quote(v)));
+            }
+            if let Some(v) = &self.package.documentation {
+                s.push_str(&format!("documentation = {}\n", toml_quote(v)));
+            }
+            if let Some(v) = &self.package.publish_as {
+                s.push_str(&format!("publish-as = {}\n", toml_quote(v)));
+            }
+            for (key, items) in [
+                ("keywords", &self.package.keywords),
+                ("tags", &self.package.tags),
+                ("include", &self.package.include),
+                ("exclude", &self.package.exclude),
+            ] {
+                if items.is_empty() {
+                    continue;
+                }
+                let list: Vec<String> = items.iter().map(|i| toml_quote(i)).collect();
+                s.push_str(&format!("{key} = [{}]\n", list.join(", ")));
+            }
+            s.push('\n');
+        }
+
         if !self.dependencies.is_empty() || !self.dev_dependencies.is_empty() {
             if !self.dependencies.is_empty() {
                 s.push_str("[dependencies]\n");
@@ -548,6 +675,19 @@ impl Manifest {
         }
 
         s
+    }
+
+    /// Does the manifest carry any `[package]` metadata?
+    pub fn package_is_set(&self) -> bool {
+        let p = &self.package;
+        p.homepage.is_some()
+            || p.repository.is_some()
+            || p.documentation.is_some()
+            || p.publish_as.is_some()
+            || !p.keywords.is_empty()
+            || !p.tags.is_empty()
+            || !p.include.is_empty()
+            || !p.exclude.is_empty()
     }
 
     /// Merge another manifest's dependencies into `self`.
@@ -735,6 +875,78 @@ datetime = "latest"
         assert!(m.dependencies.is_empty());
         // a default manifest must round-trip through the parser
         parse(&m.render(), ManifestMode::Strict).expect("default renders cleanly");
+    }
+
+    #[test]
+    fn scoped_package_names_are_accepted() {
+        for good in ["jwt", "acme/http", "acme/http-utils", "v2", "_x"] {
+            let src = format!("name = \"{good}\"\nversion = \"1.0.0\"\n");
+            assert!(parse(&src, ManifestMode::Strict).is_ok(), "'{good}' should parse");
+        }
+        for bad in ["acme/", "/http", "a/b/c", "acme/Http"] {
+            let src = format!("name = \"{bad}\"\nversion = \"1.0.0\"\n");
+            assert!(parse(&src, ManifestMode::Strict).is_err(), "'{bad}' should be rejected");
+        }
+    }
+
+    #[test]
+    fn package_metadata_round_trips() {
+        let src = r#"schema = 1
+name = "demo"
+version = "1.0.0"
+
+[package]
+homepage = "https://example.org"
+repository = "https://git.example.org/demo"
+documentation = "https://docs.example.org"
+keywords = ["auth", "jwt"]
+tags = ["web"]
+include = ["CHANGELOG.md"]
+exclude = ["bench"]
+publish-as = "stable"
+
+[dependencies]
+"#;
+        let res = parse(src, ManifestMode::Strict).expect("package table parses");
+        let p = &res.manifest.package;
+        assert_eq!(p.homepage.as_deref(), Some("https://example.org"));
+        assert_eq!(p.repository.as_deref(), Some("https://git.example.org/demo"));
+        assert_eq!(p.documentation.as_deref(), Some("https://docs.example.org"));
+        assert_eq!(p.keywords, vec!["auth", "jwt"]);
+        assert_eq!(p.tags, vec!["web"]);
+        assert_eq!(p.include, vec!["CHANGELOG.md"]);
+        assert_eq!(p.exclude, vec!["bench"]);
+        assert_eq!(p.publish_as.as_deref(), Some("stable"));
+        assert!(res.warnings.is_empty(), "{:?}", res.warnings);
+
+        let rendered = res.manifest.render();
+        assert!(rendered.contains("[package]"), "{rendered}");
+        let again = parse(&rendered, ManifestMode::Strict).expect("rendered parses");
+        assert_eq!(again.manifest.package.keywords, p.keywords);
+        assert_eq!(again.manifest.package.homepage, p.homepage);
+    }
+
+    #[test]
+    fn a_package_table_is_optional() {
+        let res = parse("name = \"x\"\nversion = \"1.0.0\"\n", ManifestMode::Strict).unwrap();
+        assert!(!res.manifest.package_is_set());
+        assert!(!res.manifest.render().contains("[package]"));
+    }
+
+    #[test]
+    fn an_unknown_package_key_warns_with_a_suggestion() {
+        let src = "name = \"x\"\nversion = \"1.0.0\"\n\n[package]\nhomepages = \"y\"\n";
+        let res = parse(src, ManifestMode::Lenient).expect("still parses");
+        assert!(res.warnings.iter().any(|w| w.key == "package.homepages"), "{:?}", res.warnings);
+    }
+
+    #[test]
+    fn bad_package_value_types_are_errors() {
+        let src = "name = \"x\"\nversion = \"1.0.0\"\n\n[package]\nkeywords = 7\n";
+        let errs = parse(src, ManifestMode::Lenient).expect_err("keywords must be a list");
+        assert!(errs.iter().any(|e| e.key == "package.keywords"));
+        let src = "name = \"x\"\nversion = \"1.0.0\"\n\n[package]\nhomepage = true\n";
+        assert!(parse(src, ManifestMode::Lenient).is_err());
     }
 
     #[test]

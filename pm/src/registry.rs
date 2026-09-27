@@ -1,12 +1,15 @@
-//! Registry client: package metadata, downloads, search — over a minimal
-//! dependency-free HTTP/1.1 client.
+//! Registry client: metadata, downloads, search, publish, yank and
+//! authentication — over a minimal dependency-free HTTP/1.1 client.
 //!
-//! There is no registry *server* in this milestone: only the *client* side.
-//! Tests exercise it against a local mock registry (`http://127.0.0.1`), and
-//! real deployments point it at `https://registry.hardscript.org` — HTTPS is
-//! handled by delegating to `curl` when it is available, plain HTTP by a
-//! direct [`std::net::TcpStream`]. The client supports timeouts, retries and
-//! redirect following.
+//! v0.4 shipped only the read side, because no registry server existed yet.
+//! v0.9 adds [`hard_registry`](../hard_registry/index.html)'s API: the client
+//! can now issue any verb, so `hard publish`, `hard login` and
+//! `hard token` work against a real [`hard-registry`](../../hard-registry)
+//! server as well as against the mock registry the tests use.
+//!
+//! HTTPS is handled by delegating to `curl` when it is available, plain HTTP
+//! by a direct [`std::net::TcpStream`]. The client supports timeouts, retries
+//! and redirect following.
 
 use crate::semver::Version;
 use std::collections::BTreeMap;
@@ -27,6 +30,56 @@ pub const MAX_REDIRECTS: usize = 5;
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// Response headers, lower-cased. Empty when the transport cannot expose
+    /// them (the `curl` path only keeps the status and body).
+    pub headers: Vec<(String, String)>,
+}
+
+impl HttpResponse {
+    /// A header value, matched case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn is_success(&self) -> bool {
+        (200..=299).contains(&self.status)
+    }
+
+    /// The body decoded as text.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// The body parsed as JSON, or `None`.
+    pub fn json(&self) -> Option<hs_compiler::json::Json> {
+        hs_compiler::json::parse(&self.text())
+    }
+}
+
+/// The HTTP verbs the client uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Method {
+    #[default]
+    Get,
+    Head,
+    Post,
+    Put,
+    Delete,
+}
+
+impl Method {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Head => "HEAD",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+        }
+    }
 }
 
 /// Configuration for one registry client.
@@ -54,9 +107,12 @@ impl Default for RegistryConfig {
 impl RegistryConfig {
     /// Resolve the effective registry URL from manifest + environment.
     pub fn resolve(manifest_registry: Option<&str>, offline: bool) -> RegistryConfig {
+        // An empty value means "unset": `HARD_REGISTRY=` is how a script
+        // disables the override, and it must not become a URL of "".
         let url = manifest_registry
             .map(String::from)
-            .or_else(|| std::env::var("HARD_REGISTRY").ok())
+            .filter(|u| !u.trim().is_empty())
+            .or_else(|| std::env::var("HARD_REGISTRY").ok().filter(|u| !u.trim().is_empty()))
             .unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
         let timeout_ms = std::env::var("HARD_REGISTRY_TIMEOUT")
             .ok()
@@ -172,17 +228,75 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     })
 }
 
-/// Perform one HTTP GET, following redirects, with retries + timeouts.
+/// One HTTP request: method, url, optional body and headers.
+#[derive(Clone, Debug, Default)]
+pub struct HttpRequest {
+    pub method: Method,
+    pub url: String,
+    pub body: Vec<u8>,
+    pub headers: Vec<(String, String)>,
+}
+
+impl HttpRequest {
+    pub fn get(url: impl Into<String>) -> HttpRequest {
+        HttpRequest {
+            method: Method::Get,
+            url: url.into(),
+            body: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+
+    pub fn new(method: Method, url: impl Into<String>, body: Vec<u8>) -> HttpRequest {
+        HttpRequest {
+            method,
+            url: url.into(),
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    pub fn with_header(mut self, name: &str, value: &str) -> HttpRequest {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// The `Authorization` header for a bearer token, when one is supplied.
+    pub fn with_bearer(self, token: Option<&str>) -> HttpRequest {
+        match token {
+            Some(t) if !t.is_empty() => self.with_header("Authorization", &format!("Bearer {t}")),
+            _ => self,
+        }
+    }
+}
+
+/// Perform one HTTP request, following redirects, with retries + timeouts.
+///
+/// `http_get` is the GET-only shorthand the read paths use.
 pub fn http_get(
     url: &str,
     timeout_ms: u64,
     retries: u32,
 ) -> Result<HttpResponse, RegistryError> {
-    http_get_with_depth(url, timeout_ms, retries, 0)
+    request(
+        &HttpRequest::get(url),
+        timeout_ms,
+        retries,
+        0,
+    )
 }
 
-fn http_get_with_depth(
-    url: &str,
+/// Perform a request with redirects, retries and timeouts.
+pub fn request_with_retries(
+    req: &HttpRequest,
+    timeout_ms: u64,
+    retries: u32,
+) -> Result<HttpResponse, RegistryError> {
+    request(req, timeout_ms, retries, 0)
+}
+
+fn request(
+    req: &HttpRequest,
     timeout_ms: u64,
     retries: u32,
     depth: usize,
@@ -190,19 +304,22 @@ fn http_get_with_depth(
     if depth > MAX_REDIRECTS {
         return Err(RegistryError::new("too many redirects while fetching"));
     }
-    let parsed = parse_url(url).map_err(RegistryError::new)?;
+    let parsed = parse_url(&req.url).map_err(RegistryError::new)?;
     if parsed.scheme == "https" {
-        return http_get_https(&parsed, url, timeout_ms, retries);
+        return request_https(req, &parsed, timeout_ms, retries);
     }
     let mut attempt = 0u32;
     loop {
-        match raw_get(&parsed.host, parsed.port, &parsed.path, timeout_ms) {
+        match raw_request(&parsed, req, timeout_ms) {
             Ok((headers, body)) => {
-                if (300..=399).contains(&headers_status(&headers)) {
+                let status = headers_status(&headers);
+                if (300..=399).contains(&status) {
                     if let Some(loc) = location_header(&headers) {
                         // Resolve relative redirects against the current URL.
-                        let next = resolve_url(url, &loc);
-                        return match http_get_with_depth(&next, timeout_ms, retries, depth + 1) {
+                        let next = resolve_url(&req.url, &loc);
+                        let mut moved = req.clone();
+                        moved.url = next;
+                        return match request(&moved, timeout_ms, retries, depth + 1) {
                             Ok(r) => Ok(r),
                             Err(e) => Err(RegistryError::new(format!(
                                 "redirect to '{loc}' failed: {e}"
@@ -210,17 +327,24 @@ fn http_get_with_depth(
                         };
                     }
                 }
+                let headers: Vec<(String, String)> = headers
+                    .iter()
+                    .filter(|(k, _)| k != "__status")
+                    .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                    .collect();
                 return Ok(HttpResponse {
-                    status: headers_status(&headers),
+                    status,
                     body,
+                    headers,
                 });
             }
             Err(e) => {
                 attempt += 1;
                 if attempt > retries {
                     return Err(RegistryError::new(format!(
-                        "GET {}/{} failed after {attempt} attempt(s): {e}",
-                        parsed.host, parsed.path
+                        "{} {} failed after {attempt} attempt(s): {e}",
+                        req.method.as_str(),
+                        req.url
                     )));
                 }
                 std::thread::sleep(Duration::from_millis(200 * attempt as u64));
@@ -238,13 +362,13 @@ fn headers_status(headers: &[(String, String)]) -> u16 {
         .unwrap_or(200)
 }
 
-fn http_get_https(
+fn request_https(
+    req: &HttpRequest,
     parsed: &ParsedUrl,
-    original: &str,
     timeout_ms: u64,
     retries: u32,
 ) -> Result<HttpResponse, RegistryError> {
-    match curl_get(original, timeout_ms, retries) {
+    match curl_request(req, timeout_ms, retries) {
         Some(Ok(r)) => {
             let _ = parsed;
             Ok(r)
@@ -256,55 +380,68 @@ fn http_get_https(
     }
 }
 
-fn curl_get(
-    original: &str,
+fn curl_request(
+    req: &HttpRequest,
     timeout_ms: u64,
-    retries: u32,
+    _retries: u32,
 ) -> Option<Result<HttpResponse, RegistryError>> {
     let mut temp = std::env::temp_dir();
     temp.push(format!(
-        "hard-download-{}-{}.body",
+        "hard-body-{}-{}.bin",
         std::process::id(),
         instantaneous_nanos()
     ));
-    for _attempt in 0..=retries {
-        let out = Command::new("curl")
-            .arg("-sS")
-            .arg("-L")
-            .arg("--max-redirs")
-            .arg(MAX_REDIRECTS.to_string())
-            .arg("--max-time")
-            .arg((timeout_ms / 1000).max(1).to_string())
-            .arg("--connect-timeout")
-            .arg((timeout_ms / 1000).max(1).to_string())
-            .arg("-o")
-            .arg(&temp)
-            .arg("-w")
-            .arg("%{http_code}")
-            .arg(original)
-            .output();
-        return match out {
-            Ok(prog) => {
-                let code = String::from_utf8_lossy(&prog.stdout)
-                    .trim()
-                    .parse::<u16>()
-                    .unwrap_or(0);
-                let body = std::fs::read(&temp).unwrap_or_default();
-                let _ = std::fs::remove_file(&temp);
-                Some(Ok(HttpResponse { status: code, body }))
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&temp);
-                Some(Err(RegistryError::new(format!(
-                    "could not invoke curl: {e} (install it or use an http:// registry)"
-                ))))
-            }
-        };
+    let body_file = temp.clone();
+    let head_file = std::env::temp_dir().join(format!(
+        "hard-head-{}-{}.txt",
+        std::process::id(),
+        instantaneous_nanos()
+    ));
+    let _ = std::fs::write(&body_file, &req.body);
+    let out = Command::new("curl")
+        .arg("-sS")
+        .arg("-L")
+        .arg("--max-redirs")
+        .arg(MAX_REDIRECTS.to_string())
+        .arg("--max-time")
+        .arg((timeout_ms / 1000).max(1).to_string())
+        .arg("--connect-timeout")
+        .arg((timeout_ms / 1000).max(1).to_string())
+        .arg("-X")
+        .arg(req.method.as_str())
+        .arg("-o")
+        .arg(&body_file)
+        .arg("-D")
+        .arg(&head_file)
+        .arg("-w")
+        .arg("%{http_code}")
+        .arg(&req.url)
+        .output();
+    let _ = std::fs::remove_file(&head_file);
+    match out {
+        Ok(prog) => {
+            let code = String::from_utf8_lossy(&prog.stdout)
+                .trim()
+                .parse::<u16>()
+                .unwrap_or(0);
+            let body = std::fs::read(&body_file).unwrap_or_default();
+            let _ = std::fs::remove_file(&body_file);
+            Some(Ok(HttpResponse {
+                status: code,
+                body,
+                headers: Vec::new(),
+            }))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&body_file);
+            Some(Err(RegistryError::new(format!(
+                "could not invoke curl: {e} (install it or use an http:// registry)"
+            ))))
+        }
     }
-    let _ = std::fs::remove_file(&temp);
-    None
 }
 
+/// A monotonically increasing-enough nonce for temporary file names.
 fn instantaneous_nanos() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -355,7 +492,12 @@ fn location_header(headers: &[(String, String)]) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
-fn raw_get(host: &str, port: u16, path: &str, timeout_ms: u64) -> Result<RawResponse, String> {
+fn raw_request(
+    parsed: &ParsedUrl,
+    req: &HttpRequest,
+    timeout_ms: u64,
+) -> Result<RawResponse, String> {
+    let (host, port) = (parsed.host.as_str(), parsed.port);
     let addr = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("cannot resolve {host}:{port}: {e}"))?
@@ -365,20 +507,36 @@ fn raw_get(host: &str, port: u16, path: &str, timeout_ms: u64) -> Result<RawResp
         .map_err(|e| format!("connect {host}:{port}: {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(timeout_ms)));
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: hard-pm/0.4\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    let mut head = format!(
+        "{} {} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: hard-pm/0.9\r\nAccept: */*\r\n",
+        req.method.as_str(),
+        parsed.path
     );
+    for (k, v) in &req.headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str(&format!("Content-Length: {}\r\n", req.body.len()));
+    head.push_str("Connection: close\r\n\r\n");
     stream
-        .write_all(req.as_bytes())
+        .write_all(head.as_bytes())
         .map_err(|e| format!("send request: {e}"))?;
+    if !req.body.is_empty() {
+        stream
+            .write_all(&req.body)
+            .map_err(|e| format!("send body: {e}"))?;
+    }
     let mut buf = Vec::new();
     stream
         .read_to_end(&mut buf)
         .map_err(|e| format!("read response: {e}"))?;
-    parse_response(&buf)
+    // A HEAD response carries the headers a GET would, but no body, so its
+    // Content-Length must not be read as "bytes still to come".
+    parse_response_as(&buf, req.method != Method::Head)
 }
 
-fn parse_response(buf: &[u8]) -> Result<RawResponse, String> {
+/// Split a raw response. `expect_body` is false for HEAD, where the server
+/// advertises a length it deliberately does not send.
+fn parse_response_as(buf: &[u8], expect_body: bool) -> Result<RawResponse, String> {
     let head_end = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -406,6 +564,9 @@ fn parse_response(buf: &[u8]) -> Result<RawResponse, String> {
     // The status is honored from the __status header so callers get one
     // unified `headers` type.
     let body_start = head_end + 4;
+    if !expect_body {
+        return Ok((headers, Vec::new()));
+    }
     let body = if let Some(cl) = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
@@ -537,6 +698,77 @@ impl Registry {
             }
         }
         Ok(resp.body)
+    }
+
+    /// Issue an arbitrary request against this registry, attaching the
+    /// bearer token when one is configured.
+    pub fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+        headers: &[(&str, &str)],
+        token: Option<&str>,
+    ) -> Result<HttpResponse, RegistryError> {
+        if self.config.offline {
+            return Err(RegistryError::new(
+                "registry is disabled (offline mode); use the package cache",
+            ));
+        }
+        let mut req = HttpRequest::new(method, self.url(path), body);
+        for (k, v) in headers {
+            req = req.with_header(k, v);
+        }
+        req = req.with_bearer(token);
+        request_with_retries(&req, self.config.timeout_ms, self.config.retries)
+    }
+
+    /// POST a JSON body, returning the parsed response.
+    pub fn post_json(
+        &self,
+        path: &str,
+        body: &str,
+        token: Option<&str>,
+    ) -> Result<HttpResponse, RegistryError> {
+        self.request(
+            Method::Post,
+            path,
+            body.as_bytes().to_vec(),
+            &[("Content-Type", "application/json")],
+            token,
+        )
+    }
+
+    /// The registry's error message for a non-2xx response, extracted from
+    /// the `{"error":{"message":...}}` body when present.
+    pub fn error_message(resp: &HttpResponse) -> String {
+        if let Some(j) = resp.json() {
+            if let Some(msg) = j
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+            {
+                return msg.to_string();
+            }
+        }
+        let text = resp.text();
+        if text.trim().is_empty() {
+            format!("registry returned HTTP {}", resp.status)
+        } else {
+            text.trim().to_string()
+        }
+    }
+
+    /// Fail unless the response is 2xx, carrying the registry's message.
+    pub fn expect_ok(resp: HttpResponse, what: &str) -> Result<HttpResponse, RegistryError> {
+        if resp.is_success() {
+            Ok(resp)
+        } else {
+            Err(RegistryError::new(format!(
+                "{what}: {}",
+                Registry::error_message(&resp)
+            )))
+        }
     }
 
     /// Search for packages by name/keyword.

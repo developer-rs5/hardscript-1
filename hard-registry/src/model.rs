@@ -71,6 +71,9 @@ impl Dep {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Package {
     pub name: String,
+    /// The account that first published this name. Later publishes by a
+    /// different account need the `admin` scope.
+    pub owner: Option<String>,
     pub description: Option<String>,
     pub license: Option<String>,
     pub homepage: Option<String>,
