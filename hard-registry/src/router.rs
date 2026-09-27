@@ -233,14 +233,28 @@ impl Router {
 
     fn search(&self, req: &Request) -> Response {
         let text = req.param("q").unwrap_or("");
-        let limit = req.param_usize("limit", 20, self.app.config.max_search_results);
+        let limit = match count_param(req.param("limit"), 20, self.app.config.max_search_results) {
+            Ok(v) => v,
+            Err(e) => return Response::error(400, "invalid_request", e),
+        };
+        let offset = match count_param(req.param("offset"), 0, MAX_SEARCH_OFFSET) {
+            Ok(v) => v,
+            Err(e) => return Response::error(400, "invalid_request", e),
+        };
         let tags: Vec<String> = req.multi.get("tag").cloned().unwrap_or_default();
+        // `?tag=` is a filter that cannot mean anything. Silently dropping it
+        // would turn the request into "match everything".
+        if tags.iter().any(|t| t.trim().is_empty()) {
+            return Response::error(400, "invalid_request", "a tag filter cannot be empty");
+        }
         let q = Query::parse(text, &tags, req.param("prefix"));
         if text.trim().is_empty() && tags.is_empty() && q.prefix.is_none() {
             return Response::error(400, "invalid_request", "search needs ?q=, ?tag= or ?prefix=");
         }
-        let hits = search::run(self.app.store.as_ref(), &q, limit);
-        Response::json(200, &views::search_json(&hits, text, hits.len()))
+        let ranked = search::run(self.app.store.as_ref(), &q);
+        let total = ranked.len();
+        let page: Vec<views::SearchHit> = ranked.into_iter().skip(offset).take(limit).collect();
+        Response::json(200, &views::search_json(&page, text, total))
     }
 
     fn metadata(&self, name: &str, req: &Request) -> Response {
@@ -831,6 +845,23 @@ fn decode_error(e: &DecodeError) -> Response {
 
 fn store_error(e: &StoreError) -> Response {
     Response::error(e.status(), e.code(), e.to_string())
+}
+
+/// The largest `offset` a client may ask for. Pagination is for skipping a
+/// few pages, not for walking the whole index one row at a time.
+const MAX_SEARCH_OFFSET: usize = 10_000;
+
+/// A count-valued query parameter: absent or blank means `default`, anything
+/// unparseable (or negative) is a client error rather than a silent default.
+fn count_param(raw: Option<&str>, default: usize, max: usize) -> Result<usize, String> {
+    match raw {
+        None => Ok(default),
+        Some(s) if s.trim().is_empty() => Ok(default),
+        Some(s) => s
+            .parse::<usize>()
+            .map(|v| v.min(max))
+            .map_err(|_| format!("'{s}' is not a valid count")),
+    }
 }
 
 fn not_found_package(name: &str) -> Response {

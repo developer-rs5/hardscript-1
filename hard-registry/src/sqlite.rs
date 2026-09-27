@@ -514,7 +514,7 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT name, version, integrity, fingerprint, signature, key_id, size,
                             file_count, files, channel, yanked, downloads, published_at
-                     FROM versions WHERE name = ?1 ORDER BY version",
+                     FROM versions WHERE name = ?1",
                 )
                 .map_err(io)?;
             let mut out = st
@@ -526,26 +526,23 @@ impl Store for SqliteStore {
             for v in out.iter_mut() {
                 v.deps = load_deps(c, name, &v.version.to_string())?;
             }
+            // SQL would sort "1.10.0" before "1.9.0"; versions are semver.
+            out.sort_by(|a, b| a.version.cmp(&b.version));
             Ok(out)
         })
     }
 
+    /// The newest non-yanked version.
+    ///
+    /// Not `ORDER BY version DESC LIMIT 1`: that compares version *strings*,
+    /// so a package with 1.9.0 and 1.10.0 published would report 1.9.0 as its
+    /// latest. Ordering happens in Rust, where `Version: Ord` is semver.
     fn latest(&self, name: &str) -> StoreResult<Option<PackageVersion>> {
-        self.with_conn(|c| {
-            let mut v = c
-                .query_row(
-                    "SELECT name, version, integrity, fingerprint, signature, key_id, size,
-                            file_count, files, channel, yanked, downloads, published_at
-                     FROM versions WHERE name = ?1 AND yanked = 0 ORDER BY version DESC LIMIT 1",
-                    params![name],
-                    version_row,
-                )
-                .optional()?;
-            if let Some(v) = v.as_mut() {
-                v.deps = load_deps(c, name, &v.version.to_string())?;
-            }
-            Ok(v)
-        })
+        Ok(self
+            .versions(name)?
+            .into_iter()
+            .filter(|v| !v.yanked)
+            .next_back())
     }
 
     fn set_yanked(&self, name: &str, version: &str, yanked: bool) -> StoreResult<PackageVersion> {

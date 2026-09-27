@@ -127,6 +127,16 @@ fn main() {
         return;
     }
     let (cmd, rest) = args.split_first().unwrap();
+    // `hard <cmd> --help` must never do work: without this, `hard publish
+    // --help` would try to publish the current directory.
+    if matches!(cmd.as_str(), "--help" | "-h" | "help") || rest.iter().any(|a| a == "--help" || a == "-h") {
+        if let Some(text) = subcommand_help(cmd) {
+            print!("{text}");
+            return;
+        }
+        help();
+        return;
+    }
     match cmd.as_str() {
         "new" => cmd_new(rest),
         "init" => cmd_init(rest),
@@ -162,13 +172,79 @@ fn main() {
         "migrate" => migrate::cmd_migrate(rest),
         "seed" => migrate::cmd_seed(rest),
         "--version" | "-V" => println!("hard {VERSION}"),
-        "--help" | "-h" | "help" => help(),
         other => {
             eprintln!("hard: unknown command '{other}'");
             eprintln!("run `hard help` for usage.");
             std::process::exit(2);
         }
     }
+}
+
+/// Per-subcommand usage, for `hard <cmd> --help`.
+fn subcommand_help(cmd: &str) -> Option<String> {
+    let text = match cmd {
+        "search" => {
+            "hard search — search the registry\n\n\
+             USAGE:\n\
+             \x20 hard search <text> [--tag <tag>]... [--prefix <p>] [--owner <o>]\n\
+             \x20 hard search --tag <tag> [--limit <n>] [--offset <n>]\n\n\
+             OPTIONS:\n\
+             \x20 --tag <tag>       only packages carrying this tag (repeatable)\n\
+             \x20 --prefix <p>      only packages whose name starts with <p>\n\
+             \x20 --owner <o>      only packages owned by <o>\n\
+             \x20 --limit <n>       at most <n> results (1-200, default 20)\n\
+             \x20 --offset <n>      skip the first <n> results\n\
+             \x20 --json            print results as JSON\n\
+             \x20 --explain         also print each result's score\n\
+             \x20 --offline, -o     search the local cache instead of the network\n\n\
+             The registry is asked first; if it cannot be reached the cached\n\
+             index answers instead, and the summary says so.\n"
+        }
+        "publish" => {
+            "hard publish — build a .hspkg and publish it\n\n\
+             USAGE:\n\
+             \x20 hard publish [--dry-run] [--token <t>] [--registry <url>]\n\n\
+             OPTIONS:\n\
+             \x20 --dry-run       validate and describe the package, upload nothing\n\
+             \x20 --token <t>     publish with <t> instead of the stored token\n\
+             \x20 --registry <url>  publish to <url>\n"
+        }
+        "download" => {
+            "hard download — fetch a package archive\n\n\
+             USAGE:\n\
+             \x20 hard download <pkg>[@<ver>] [--output <path>] [--force]\n\n\
+             A version that is already in the cache is not downloaded again\n\
+             unless --force is given.\n"
+        }
+        "yank" => {
+            "hard yank — retract a published version\n\n\
+             USAGE:\n\
+             \x20 hard yank <pkg>[@<ver>]\n\n\
+             Yanking needs a token with the 'yank' scope.\n"
+        }
+        "add" => {
+            "hard add — add a dependency and install it\n\n\
+             USAGE:\n\
+             \x20 hard add <pkg>[@<req>] [--dev]\n"
+        }
+        "install" => {
+            "hard install — resolve and lock every dependency\n\n\
+             USAGE:\n\
+             \x20 hard install [--offline] [--frozen]\n"
+        }
+        "login" => "hard login — store a registry token\n\n\
+             USAGE:\n             \x20 hard login [--user <name>] [--token <t>] [--registry <url>]\n",
+        "register" => "hard register — create a registry account\n\n\
+             USAGE:\n             \x20 hard register --user <name> [--email <e>]\n",
+        "token" => "hard token — manage personal access tokens\n\n\
+             USAGE:\n             \x20 hard token create [--name <n>] [--scope <s>]...\n             \x20 hard token list\n             \x20 hard token revoke <id>\n",
+        "cache" => "hard cache — inspect and clean the package cache\n\n             USAGE:
+             \x20 hard cache [info|clean|verify]\n",
+        "info" => "hard info — show a package's registry metadata\n\n             USAGE:
+             \x20 hard info <pkg> [--json]\n",
+        _ => return None,
+    };
+    Some(text.to_string())
 }
 
 fn help() {
@@ -1424,34 +1500,101 @@ fn cmd_outdated(args: &[String]) {
 }
 
 fn cmd_search(args: &[String]) {
-    let query = match args.first() {
-        Some(q) => q.clone(),
-        None => {
-            eprintln!("hard search: missing query");
-            std::process::exit(2);
+    let text = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_default();
+    let json_out = args.iter().any(|a| a == "--json");
+    let tags = repeated_flags(args, "--tag");
+    let offline = args.iter().any(|a| a == "--offline" || a == "-o");
+    let mut query = hs_pm::search::SearchQuery::new(&text).with_tags(&tags);
+    if let Some(p) = flag_value(args, "--prefix") {
+        query = query.with_prefix(&p);
+    }
+    if let Some(o) = flag_value(args, "--owner") {
+        query = query.with_owner(&o);
+    }
+    if let Some(l) = flag_value(args, "--limit") {
+        query = query.with_limit(l.parse().unwrap_or(20));
+    }
+    if let Some(o) = flag_value(args, "--offset") {
+        query.offset = o.parse().unwrap_or(0);
+    }
+    if query.is_empty() {
+        eprintln!("hard search: missing query");
+        eprintln!("usage: hard search <text> [--tag <t>] [--limit <n>] [--offset <n>]");
+        std::process::exit(2);
+    }
+    let registry = Registry::new(RegistryConfig::resolve(
+        flag_value(args, "--registry").as_deref(),
+        offline,
+    ));
+    let cache = Cache::new();
+    let results = hs_pm::search::search_with_fallback(&registry, &cache, &query);
+    if let Some(e) = &results.error {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    if results.hits.is_empty() {
+        println!("no packages matching '{text}'");
+        if !tags.is_empty() {
+            println!("(tags: {})", tags.join(", "));
         }
-    };
-    let registry = hs_pm::registry::Registry::new(hs_pm::registry::RegistryConfig::resolve(None, false));
-    match registry.search(&query) {
-        Ok(results) => {
-            if results.is_empty() {
-                println!("no packages matching '{query}'");
-                return;
-            }
-            for r in results {
-                let version = r
-                    .version
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                match &r.description {
-                    Some(d) => println!("{} {version}  {d}", r.name),
-                    None => println!("{} {version}", r.name),
-                }
-            }
+        if results.degraded {
+            println!("(the registry could not be reached: nothing in the local cache)");
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+        return;
+    }
+    if json_out {
+        let items: Vec<hs_compiler::json::Json> = results
+            .hits
+            .iter()
+            .map(|h| {
+                hs_compiler::json::Json::obj(vec![
+                    ("name", hs_compiler::json::Json::str(&h.name)),
+                    (
+                        "version",
+                        match &h.version {
+                            Some(v) => hs_compiler::json::Json::str(v),
+                            None => hs_compiler::json::Json::Null,
+                        },
+                    ),
+                    ("description", hs_compiler::json::Json::str(h.description.clone().unwrap_or_default())),
+                    ("license", hs_compiler::json::Json::str(h.license.clone().unwrap_or_default())),
+                    ("downloads", hs_compiler::json::Json::num(h.downloads as i64)),
+                    (
+                        "tags",
+                        hs_compiler::json::Json::arr(
+                            h.tags.iter().map(hs_compiler::json::Json::str).collect(),
+                        ),
+                    ),
+                    (
+                        "owner",
+                        hs_compiler::json::Json::str(h.owner.clone().unwrap_or_default()),
+                    ),
+                    ("score", hs_compiler::json::Json::num(h.score)),
+                ])
+            })
+            .collect();
+        let j = hs_compiler::json::Json::obj(vec![
+            ("query", hs_compiler::json::Json::str(&results.query)),
+            (
+                "origin",
+                hs_compiler::json::Json::str(
+                    results.origin.map(|o| o.as_str()).unwrap_or("none"),
+                ),
+            ),
+            ("total", hs_compiler::json::Json::num(results.total as i64)),
+            ("results", hs_compiler::json::Json::arr(items)),
+        ]);
+        println!("{}", j.to_string());
+        return;
+    }
+    print!("{}", hs_pm::search::render_table(&results));
+    if args.iter().any(|a| a == "--explain") {
+        for h in &results.hits {
+            println!("  {} score {}", h.name, h.score);
         }
     }
 }

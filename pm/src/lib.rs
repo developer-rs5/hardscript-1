@@ -15,6 +15,7 @@
 //! - [`install`] — install/remove/update/list/outdated orchestration
 //! - [`publish`] — `hard publish`: `.hspkg` building and upload
 //! - [`workspace`] — monorepo support
+//! - [`search`] — `hard search`: query shaping, offline fallback, ranking
 //! - [`templates`] — official project templates
 //! - [`report`] — automatic milestone reports
 
@@ -30,6 +31,7 @@ pub mod publish;
 pub mod registry;
 pub mod report;
 pub mod resolver;
+pub mod search;
 pub mod semver;
 pub mod templates;
 pub mod toml;

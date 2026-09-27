@@ -156,6 +156,8 @@ pub fn rank(mut packages: Vec<Package>, q: &Query, limit: usize) -> Vec<SearchHi
                 license: p.license.clone(),
                 downloads: p.downloads,
                 tags: p.tags.clone(),
+                keywords: p.keywords.clone(),
+                owner: p.owner.clone(),
                 score: sc,
             })
         })
@@ -171,12 +173,15 @@ pub fn rank(mut packages: Vec<Package>, q: &Query, limit: usize) -> Vec<SearchHi
 }
 
 /// Run a search against a store, filling in the latest version of each hit.
-pub fn run(store: &dyn Store, q: &Query, limit: usize) -> Vec<SearchHit> {
+///
+/// Every match is returned, ranked: the caller paginates, so that a client can
+/// be told both how many packages matched and how many it is being shown.
+pub fn run(store: &dyn Store, q: &Query) -> Vec<SearchHit> {
     let packages = match store.packages(q.prefix.as_deref()) {
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
-    let mut hits = rank(packages, q, limit);
+    let mut hits = rank(packages, q, usize::MAX);
     for h in hits.iter_mut() {
         h.version = store
             .latest(&h.name)

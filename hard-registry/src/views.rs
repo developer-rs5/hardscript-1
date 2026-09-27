@@ -129,6 +129,8 @@ pub struct SearchHit {
     pub license: Option<String>,
     pub downloads: u64,
     pub tags: Vec<String>,
+    pub keywords: Vec<String>,
+    pub owner: Option<String>,
     pub score: i64,
 }
 
@@ -147,6 +149,8 @@ impl SearchHit {
             ("license", s(&self.license)),
             ("downloads", Json::num(self.downloads as i64)),
             ("tags", list(&self.tags)),
+            ("keywords", list(&self.keywords)),
+            ("owner", s(&self.owner)),
             ("score", Json::num(self.score)),
         ])
     }
@@ -396,12 +400,16 @@ mod tests {
             license: None,
             downloads: 3,
             tags: vec!["auth".to_string()],
+            keywords: vec!["tokens".to_string()],
+            owner: Some("ada".to_string()),
             score: 90,
         }];
         let j = search_json(&hits, "jw", 1).to_string();
         assert!(j.contains("\"total\":1"));
         assert!(j.contains("\"count\":1"));
         assert!(j.contains("\"score\":90"));
+        assert!(j.contains("\"owner\":\"ada\""), "{j}");
+        assert!(j.contains("\"keywords\":[\"tokens\"]"), "{j}");
     }
 
     #[test]

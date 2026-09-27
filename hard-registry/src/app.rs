@@ -962,6 +962,57 @@ mod tests {
     }
 
     #[test]
+    fn latest_version_is_semver_not_lexicographic() {
+        // "1.10.0" sorts before "1.9.0" as text. Anything that picks the
+        // newest version with a plain string comparison gets this wrong.
+        let (app, dir) = build("semverlatest", Config::permissive());
+        for v in ["1.9.0", "1.2.0", "1.10.0", "1.0.10"] {
+            app.publish(&publish_req("vers", v)).unwrap();
+        }
+        assert_eq!(
+            app.store.latest("vers").unwrap().unwrap().version.to_string(),
+            "1.10.0"
+        );
+        let (_, versions) = app.package_document("vers").unwrap().unwrap();
+        let listed: Vec<String> = versions.iter().map(|v| v.version.to_string()).collect();
+        assert_eq!(listed, vec!["1.0.10", "1.2.0", "1.9.0", "1.10.0"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_ignores_a_yanked_newer_version_and_orders_prereleases_below_their_release() {
+        let (app, dir) = build("semverlatest2", Config::permissive());
+        for v in ["1.9.0", "1.10.0-rc.1", "1.10.0"] {
+            app.publish(&publish_req("vers2", v)).unwrap();
+        }
+        assert_eq!(
+            app.store.latest("vers2").unwrap().unwrap().version.to_string(),
+            "1.10.0",
+            "1.10.0-rc.1 is newer than 1.9.0 but older than 1.10.0"
+        );
+        app.set_yanked("vers2", "1.10.0", true).unwrap();
+        assert_eq!(
+            app.store.latest("vers2").unwrap().unwrap().version.to_string(),
+            "1.10.0-rc.1",
+            "yanking the newest release falls back to the prerelease"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_reports_the_semver_latest_version() {
+        let (app, dir) = build("semversearch", Config::permissive());
+        for v in ["1.9.0", "1.10.0"] {
+            app.publish(&publish_req("jwt", v)).unwrap();
+        }
+        let q = crate::search::Query::parse("jwt", &[], None);
+        let hits = crate::search::run(app.store.as_ref(), &q);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].version.as_deref(), Some("1.10.0"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn register_login_and_token_flow() {
         let (app, dir) = build("auth", Config::permissive());
         app.register("ada", "supersecret", Some("ada@example.org")).unwrap();

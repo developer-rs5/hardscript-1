@@ -130,9 +130,16 @@ impl PartialOrd for Version {
 
 impl Ord for Version {
     fn cmp(&self, other: &Version) -> Ordering {
-        self.tuple()
-            .cmp(&other.tuple())
-            .then_with(|| compare_ids(&self.pre, &other.pre))
+        self.tuple().cmp(&other.tuple()).then_with(|| {
+            // A release outranks its own pre-releases: 1.0.0-rc.1 < 1.0.0.
+            // compare_ids alone would rank the shorter, empty list lower.
+            match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => compare_ids(&self.pre, &other.pre),
+            }
+        })
     }
 }
 

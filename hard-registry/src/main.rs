@@ -261,12 +261,12 @@ fn search_cmd(args: &[String]) -> i32 {
         }
     };
     let q = hard_registry::search::Query::parse(&query, &opts.tags, None);
-    let hits = hard_registry::search::run(app.store.as_ref(), &q, opts.limit);
-    if hits.is_empty() {
+    let all = hard_registry::search::run(app.store.as_ref(), &q);
+    if all.is_empty() {
         println!("no packages matching '{query}'");
         return 0;
     }
-    for h in hits {
+    for h in all.into_iter().take(opts.limit.max(1)) {
         let version = h.version.clone().unwrap_or_else(|| "-".to_string());
         let desc = h.description.clone().unwrap_or_default();
         let tags = if h.tags.is_empty() {
