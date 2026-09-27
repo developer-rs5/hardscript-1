@@ -284,6 +284,11 @@ CASES = [
     ("dk001", ["build", "--docker", "main.hard"], 0, "docker", "generate a Dockerfile"),
     ("dk002", ["build", "--docker", "--print", "main.hard"], 0, "docker", "print a Dockerfile"),
     ("dk003", ["build", "--docker", "missing.hard"], 1, "docker", "a Dockerfile for a missing source fails"),
+    # compose generation ======================================================
+    ("cp001", ["deploy", "compose", "main.hard"], 0, "docker", "generate a compose file"),
+    ("cp002", ["deploy", "compose", "--print", "main.hard"], 0, "docker", "print a compose file"),
+    ("cp003", ["deploy"], 0, "docker", "deploy with no subcommand prints help"),
+    ("cp004", ["deploy", "nonsense"], 2, "docker", "an unknown deploy subcommand is a usage error"),
 ]
 
 for cid, argv, rc, setup, note in CASES:

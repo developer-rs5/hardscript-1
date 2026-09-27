@@ -1,6 +1,8 @@
 #ifndef HS_RUNTIME_IO_HPP
 #define HS_RUNTIME_IO_HPP
 #include "hs_runtime_value.hpp"
+#include <cstdio>
+#include <cstdlib>
 namespace hs {
 
 // ===========================================================================
@@ -20,6 +22,33 @@ inline int hs_send_flags() {
 #else
     return 0;
 #endif
+}
+
+/// Log a warning when `cond` holds. Generated code needs a way to say
+/// something without failing, and a helper keeps that out of every `main`.
+inline void log_warn_if(bool cond, const char* message) {
+    if (cond) fprintf(stderr, "hard: warning: %s\n", message);
+}
+
+/// The port the server should listen on: the one in the source unless `PORT`
+/// says otherwise.
+///
+/// The env override is what makes a compiled binary deployable -- a container
+/// image, a systemd unit and a load balancer all need to set the port
+/// without a rebuild. A value that is not a port is a warning rather than a
+/// failure: a typo in an environment variable should not stop a server from
+/// answering on the port it was built with.
+inline int port_from_env(int fallback) {
+    std::string v = env_get("PORT");
+    if (v.empty()) return fallback;
+    char* end = nullptr;
+    long parsed = strtol(v.c_str(), &end, 10);
+    bool clean = end != v.c_str() && end != nullptr && *end == '\0' && parsed > 0 && parsed <= 65535;
+    if (!clean) {
+        fprintf(stderr, "hard: warning: PORT=\"%s\" is not a port, using %d\n", v.c_str(), fallback);
+        return fallback;
+    }
+    return (int)parsed;
 }
 
 inline int64_t unix_ms() {

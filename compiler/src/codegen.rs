@@ -1191,7 +1191,12 @@ impl Codegen {
             );
             self.wln(&line);
         }
-        let line = format!("app.port = {port};");
+        // The port in the source, unless PORT says otherwise. A port baked
+        // into the binary cannot be changed by whatever deploys it, and every
+        // deployment needs to: a container env, a systemd unit, a load
+        // balancer target. The parsing and the warning live in the runtime so
+        // there is one of each.
+        let line = format!("app.port = hs::port_from_env({port});");
         self.wln(&line);
         self.blank();
         for i in 0..nmodels {

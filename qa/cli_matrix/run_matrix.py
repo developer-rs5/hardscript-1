@@ -27,6 +27,35 @@ BIN = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "target/release/hard")
 TIMEOUT = 25  # seconds; run/bench lanes self-terminate after warmup
 
 
+def starts_a_server(argv):
+    """Whether a lane can leave a listening server behind.
+
+    `hard test` counts: it runs the built binary with `--test`, and a test
+    program that starts a server outlives the runner exactly as a killed
+    `hard run` does.
+    """
+    return bool(argv) and argv[0] in ("run", "test")
+
+
+def reap_servers():
+    """Kill any `.hard/main` server this matrix started.
+
+    Scans /proc rather than tracking pids: the lanes go through `subprocess`
+    with a timeout, and by the time a timeout is noticed the child has already
+    been orphaned, so there is nothing left to wait on.
+    """
+    for pd in Path("/proc").glob("[0-9]*"):
+        try:
+            cmd = (pd / "cmdline").read_bytes().replace(b"\0", b" ")
+        except OSError:
+            continue
+        if b".hard/main" in cmd:
+            try:
+                os.kill(int(pd.name), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+
+
 def main():
     with TSV.open() as f:
         rows = list(csv.DictReader(f, delimiter="\t"))
@@ -51,20 +80,13 @@ def main():
             _G.SETUPS[r.get("setup", "missing")](d)
         except KeyError:
             pass
-        if argv and argv[0] == "run":
-            # A timeout-killed `hard run` orphans its `.hard/main` server,
-            # which keeps holding port 3000 and breaks later run lanes.
-            # Reap any orphaned server processes (scan /proc cmdlines).
-            for pd in Path("/proc").glob("[0-9]*"):
-                try:
-                    cmd = (pd / "cmdline").read_bytes().replace(b"\0", b" ")
-                except OSError:
-                    continue
-                if b".hard/main" in cmd:
-                    try:
-                        os.kill(int(pd.name), signal.SIGKILL)
-                    except (OSError, ProcessLookupError):
-                        pass
+        if starts_a_server(argv):
+            # A timeout-killed `hard run` or `hard test` orphans its
+            # `.hard/main` server, which keeps holding port 3000: every later
+            # lane fails to bind, and so does every suite that runs after this
+            # one. Reaped on both sides of the lane, because the orphan appears
+            # after the runner has stopped watching.
+            reap_servers()
             shutil.rmtree(d / ".hard", ignore_errors=True)
         try:
             p = subprocess.run(
@@ -76,7 +98,11 @@ def main():
             status = "PASS" if r["expected_rc"] == "124" else "TIME_OUT"
             results.append([cid, r["argv"], r["expected_rc"], "124",
                             status, "stayed up past %ds" % TIMEOUT])
+            if starts_a_server(argv):
+                reap_servers()
             continue
+        if starts_a_server(argv):
+            reap_servers()
         first_err = stderr[0] if stderr else ""
         exp = int(r["expected_rc"])
         status = "PASS" if rc == exp else "FINDING"

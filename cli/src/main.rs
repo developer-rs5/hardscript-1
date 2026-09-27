@@ -8,6 +8,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod compose;
+mod deploy;
 mod dockerfile;
 mod migrate;
 
@@ -150,6 +152,7 @@ fn main() {
         "hir" => cmd_hir(rest),
         "opt" => cmd_opt(rest),
         "errors" => cmd_errors(rest),
+        "deploy" => deploy::cmd_deploy(rest),
         "migrate" => migrate::cmd_migrate(rest),
         "seed" => migrate::cmd_seed(rest),
         "--version" | "-V" => println!("hard {VERSION}"),
@@ -190,7 +193,8 @@ fn help() {
          \x20 hard hir   [file]            Print the lowered HIR (debugging)\n\
           \x20 hard opt   [file]            Optimize and show before/after (debugging)\n\
           \x20 hard errors                   List the diagnostic catalog (--markdown)\n\
-          \x20 hard migrate <diff|up|down|status> [--dialect <name>] [--database <target>]\n\
+          \x20 hard deploy <subcommand>          Production deployment (compose, ssh, logs, ...)\n\
+         \x20 hard migrate <diff|up|down|status> [--dialect <name>] [--database <target>]\n\
           \x20 hard seed   [file]            Run seed files against the database\n\
           \x20 hard help                    Show this help\n\
          \n\
@@ -352,46 +356,7 @@ fn cmd_build_docker(rest: &[String]) {
         Ok(_) => {}
         Err(diags) => report(&diags),
     }
-    let cpp_name = target
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "main".to_string());
-
-    let mut cfg = dockerfile::DockerConfig {
-        app_name: std::env::current_dir()
-            .ok()
-            .and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "app".to_string()),
-        cpp_name: cpp_name.clone(),
-        ..dockerfile::DockerConfig::default()
-    };
-    // A manifest, when there is one, names the image and the port.
-    if let Ok(Some(man)) = Manifest::load(Path::new("hard.toml")) {
-        if !man.name.is_empty() {
-            cfg.app_name = man.name.clone();
-        }
-        if let Some(port) = man.server.port {
-            cfg.port = port;
-        }
-    }
-    // A health path only makes sense if the program has one. A project using
-    // the metrics module gets /healthz from the runtime; anything else is
-    // probed at the TCP level rather than answering a 404 as "healthy".
-    if let Ok(src) = std::fs::read_to_string(&target) {
-        if let Ok(prog) = frontend(&src, target.to_string_lossy().into_owned()) {
-            if !program_has_healthz(&prog) {
-                cfg.health_path = None;
-            }
-        }
-    }
-    if std::env::var("HS_ALPINE").ok().filter(|v| !v.is_empty()).is_some() {
-        let image = std::env::var("HS_ALPINE").unwrap();
-        cfg.builder_image = image.clone();
-        cfg.runtime_image = image;
-    }
-    if std::env::var("HS_DOCKER_HEALTH_PATH").ok().filter(|v| !v.is_empty()).is_some() {
-        cfg.health_path = Some(std::env::var("HS_DOCKER_HEALTH_PATH").unwrap());
-    }
+    let cfg = deploy::project_docker_config(&target);
 
     let dockerfile = dockerfile::render_dockerfile(&cfg);
     if print_only {
@@ -406,21 +371,6 @@ fn cmd_build_docker(rest: &[String]) {
     println!("wrote .dockerignore");
     println!("build: docker build -t {} .", cfg.image_tag());
     println!("run:   docker run --rm -p {}:{} {}", cfg.port, cfg.port, cfg.image_tag());
-}
-
-/// Whether a program answers `GET /healthz`. Only the metrics module installs
-/// that route, and a health check that requests it from a program without it
-/// would report a perfectly healthy server as unhealthy.
-fn program_has_healthz(prog: &hs_compiler::ast::Program) -> bool {
-    use hs_compiler::ast::*;
-    for st in &prog.stmts {
-        if let Stmt::Route(r) = st {
-            if r.method == "GET" && r.path == "/healthz" {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Extract `--warnings <spec>` / `--deny <spec>` (and `=` forms) from the
