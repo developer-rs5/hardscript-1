@@ -215,9 +215,13 @@ fn subcommand_help(cmd: &str) -> Option<String> {
         "download" => {
             "hard download — fetch a package archive\n\n\
              USAGE:\n\
-             \x20 hard download <pkg>[@<ver>] [--output <path>] [--force]\n\n\
-             A version that is already in the cache is not downloaded again\n\
-             unless --force is given.\n"
+             \x20 hard download <pkg>[@<ver>] [--out <dir>] [--output <file>]\n\
+             \x20                            [--force] [--offline]\n\n\
+             OPTIONS:\n\
+             \x20 --out <dir>       write <name>-<version>.hspkg into <dir>\n\
+             \x20 --output <file>   write the archive to exactly this path\n\
+             \x20 --force           fetch again even if the cache has it\n\
+             \x20 --offline, -o     use the cache only; never touch the network\n"
         }
         "yank" => {
             "hard yank — retract a published version\n\n\
@@ -1170,7 +1174,11 @@ fn cmd_token(args: &[String]) {
 
 /// `hard download <pkg>[@<ver>]` — save a package's archive to disk.
 fn cmd_download(args: &[String]) {
+    // `--out` is a directory, `--output` is a file: both are accepted, and
+    // neither silently does nothing.
     let out_dir = flag_value(args, "--out").map(PathBuf::from);
+    let out_file = flag_value(args, "--output").map(PathBuf::from);
+    let force = args.iter().any(|a| a == "--force");
     let offline = args.iter().any(|a| a == "--offline" || a == "-o");
     let spec = match args.iter().find(|a| !a.starts_with("--")) {
         Some(s) => s.clone(),
@@ -1199,7 +1207,6 @@ fn cmd_download(args: &[String]) {
         .iter()
         .find(|v| v.version == version)
         .and_then(|v| v.integrity.clone());
-    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("."));
     let downloader = hs_pm::download::Downloader::new(
         registry,
         Cache::new(),
@@ -1208,11 +1215,24 @@ fn cmd_download(args: &[String]) {
             parallel: 1,
             verbose: true,
             max_bytes: 0,
+            force,
         },
     );
-    match downloader.save_to(&name, &version, integrity.as_deref(), &out_dir) {
-        Ok(f) => {
-            println!("wrote {}", out_dir.join(format!("{name}-{version}.hspkg")).display());
+    let written = match &out_file {
+        Some(path) => downloader
+            .save_to_file(&name, &version, integrity.as_deref(), path)
+            .map(|f| (f, path.clone())),
+        None => {
+            let dir = out_dir.unwrap_or_else(|| PathBuf::from("."));
+            let dest = dir.join(format!("{name}-{version}.hspkg"));
+            downloader
+                .save_to(&name, &version, integrity.as_deref(), &dir)
+                .map(|f| (f, dest))
+        }
+    };
+    match written {
+        Ok((f, dest)) => {
+            println!("wrote {}", dest.display());
             println!("  {}", f.summary());
         }
         Err(e) => die(&e.message),

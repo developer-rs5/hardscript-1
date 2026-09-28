@@ -131,6 +131,268 @@ locked() {   # $1 = package, $2 = version to find
     sed -n "/^\[package\.$1\]$/,/^$/p" hard.lock | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1
 }
 
+# ---- version ranges and convergence (M8.10 coverage) -----------------------
+t_range_gte_is_honoured() {
+    case_begin r-gte
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.5.0
+    pub "${PFX}a" 2.0.0
+    echo "${PFX}a@>=1.2.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "2.0.0" ] || { echo "case r-gte: $(locked "${PFX}a")"; exit 1; }
+}
+t_range_upper_bound_is_honoured() {
+    case_begin r-lt
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.9.9
+    pub "${PFX}a" 2.0.0
+    echo "${PFX}a@>=1.0.0 <2.0.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.9.9" ] || { echo "case r-lt: $(locked "${PFX}a")"; exit 1; }
+}
+t_range_exact_pin_rejects_a_newer_version() {
+    case_begin r-exact
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.0.1
+    echo "${PFX}a@=1.0.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.0.0" ] || { echo "case r-exact: $(locked "${PFX}a")"; exit 1; }
+}
+t_range_tilde_takes_the_newest_patch_of_that_minor() {
+    case_begin r-tilde
+    pub "${PFX}a" 1.2.0
+    pub "${PFX}a" 1.2.7
+    pub "${PFX}a" 1.9.0
+    echo "${PFX}a@~1.2.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.2.7" ] || { echo "case r-tilde: $(locked "${PFX}a")"; exit 1; }
+}
+t_range_tilde_does_not_leave_the_minor() {
+    case_begin r-tilde-bound
+    pub "${PFX}a" 1.2.0
+    pub "${PFX}a" 1.9.0
+    echo "${PFX}a@~1.2.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.2.0" ] || { echo "case r-tilde-bound: $(locked "${PFX}a")"; exit 1; }
+}
+t_range_tilde_major_is_bounded() {
+    case_begin r-tilde-major
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 2.0.0
+    echo "${PFX}a@~2" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "2.0.0" ] || { echo "case r-tilde-major: $(locked "${PFX}a")"; exit 1; }
+}
+t_range_or_picks_the_newest_matching() {
+    case_begin r-or
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 3.0.0
+    echo "${PFX}a@^2.0.0 || ^3.0.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "3.0.0" ] || { echo "case r-or: $(locked "${PFX}a")"; exit 1; }
+}
+t_caret_keeps_zero_minor_packages_below_one() {
+    case_begin r-caret-zero
+    pub "${PFX}a" 0.1.0
+    pub "${PFX}a" 0.2.0
+    pub "${PFX}a" 1.0.0
+    echo "${PFX}a@^0.1.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "0.1.0" ] || { echo "case r-caret-zero: $(locked "${PFX}a")"; exit 1; }
+}
+t_a_prerelease_is_only_taken_when_asked_for() {
+    case_begin r-pre
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 2.0.0-rc.1
+    echo "${PFX}a@*" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.0.0" ] || { echo "case r-pre: $(locked "${PFX}a")"; exit 1; }
+}
+t_a_prerelease_requirement_selects_the_prerelease() {
+    case_begin r-pre-req
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" "2.0.0-rc.1"
+    echo "${PFX}a@=2.0.0-rc.1" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "2.0.0-rc.1" ] || { echo "case r-pre-req: $(locked "${PFX}a")"; exit 1; }
+}
+t_two_requirements_on_one_package_converge() {
+    case_begin r-converge
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.6.0
+    pub "${PFX}b" 1.0.0 "${PFX}a@^1.5.0"
+    pub "${PFX}c" 1.0.0 "${PFX}a@^1.0.0"
+    printf '%s\n%s\n' "${PFX}b@1" "${PFX}c@1" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.6.0" ] || { echo "case r-converge: $(locked "${PFX}a")"; exit 1; }
+}
+t_impossible_convergence_is_reported() {
+    case_begin r-conflict
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}b" 1.0.0 "${PFX}a@^1.0.0"
+    pub "${PFX}c" 1.0.0 "${PFX}a@^2.0.0"
+    pub "${PFX}a" 2.0.0
+    printf '%s\n%s\n' "${PFX}b@1" "${PFX}c@1" | consumer
+    assert_rc 1 "$HARD" install
+}
+t_a_missing_version_is_named_in_the_error() {
+    case_begin r-missing-version
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 2.0.0
+    echo "${PFX}a@^3.0.0" | consumer
+    out=$("$HARD" install 2>&1) && rc=0 || rc=$?
+    [ "$rc" = "1" ] || { echo "case r-missing-version: rc $rc"; exit 1; }
+    echo "$out" | grep -qF "${PFX}a" || { echo "case r-missing-version: error does not name the package: $out"; exit 1; }
+}
+t_a_wildcard_with_no_versions_fails_cleanly() {
+    case_begin r-no-versions
+    echo "${PFX}nothing@*" | consumer
+    out=$("$HARD" install 2>&1) && rc=0 || rc=$?
+    [ "$rc" = "1" ] || { echo "case r-no-versions: rc $rc"; exit 1; }
+    echo "$out" | grep -qi "cannot resolve" || { echo "case r-no-versions: unhelpful error: $out"; exit 1; }
+}
+t_a_yanked_version_is_not_chosen() {
+    case_begin r-yanked
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.1.0
+    assert_rc 0 "$HARD" yank "${PFX}a@1.1.0"
+    echo "${PFX}a@^1.0.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.0.0" ] || { echo "case r-yanked: $(locked "${PFX}a")"; exit 1; }
+}
+t_an_exact_pin_on_a_yanked_version_still_fails_loudly() {
+    case_begin r-yanked-exact
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.1.0
+    assert_rc 0 "$HARD" yank "${PFX}a@1.1.0"
+    echo "${PFX}a@=1.1.0" | consumer
+    assert_rc 1 "$HARD" install
+}
+t_three_level_chain_orders_dependencies_first() {
+    case_begin r-chain3
+    pub "${PFX}c" 1.0.0 "${PFX}b@^1.0.0"
+    pub "${PFX}b" 1.0.0 "${PFX}a@^1.0.0"
+    pub "${PFX}a" 1.0.0
+    echo "${PFX}c@1" | consumer
+    assert_rc 0 "$HARD" install
+    order=$(grep '^\[package\.' hard.lock | sed 's/^\[package\.//; s/\]$//')
+    a=$(printf '%s\n' "$order" | grep -n "^${PFX}a$" | cut -d: -f1)
+    b=$(printf '%s\n' "$order" | grep -n "^${PFX}b$" | cut -d: -f1)
+    c=$(printf '%s\n' "$order" | grep -n "^${PFX}c$" | cut -d: -f1)
+    [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ] || { echo "case r-chain3: order was $order"; exit 1; }
+}
+t_a_shared_transitive_is_installed_once() {
+    case_begin r-shared
+    pub "${PFX}shared" 1.0.0
+    pub "${PFX}left" 1.0.0 "${PFX}shared@^1.0.0"
+    pub "${PFX}right" 1.0.0 "${PFX}shared@^1.0.0"
+    printf '%s\n%s\n' "${PFX}left@1" "${PFX}right@1" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(grep -c "^\[package\.${PFX}shared\]$" hard.lock)" = "1" ] \
+        || { echo "case r-shared: shared appears more than once"; exit 1; }
+}
+t_a_consumer_dev_dependency_is_installed() {
+    case_begin r-consumer-dev
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}testkit" 1.0.0
+    {
+        echo "name = \"consumer\""
+        echo "version = \"0.1.0\""
+        echo "edition = \"2027\""
+        echo
+        echo "[dependencies]"
+        echo "${PFX}a = \"1\""
+        echo
+        echo "[dev-dependencies]"
+        echo "${PFX}testkit = \"1\""
+    } > hard.toml
+    assert_rc 0 "$HARD" install
+    [ -n "$(locked "${PFX}a")" ] || { echo "case r-consumer-dev: the dependency is missing"; exit 1; }
+    [ -n "$(locked "${PFX}testkit")" ] || { echo "case r-consumer-dev: the dev-dependency is missing"; exit 1; }
+}
+t_a_workspace_root_installs_registry_dependencies() {
+    case_begin r-workspace
+    pub "${PFX}a" 1.0.0
+    mkdir -p "$CASE_DIR/member"
+    printf 'schema = 1\nname = "%s"\nversion = "0.1.0"\nedition = "2027"\n' "${PFX}member" > "$CASE_DIR/member/hard.toml"
+    printf 'calc m() => Int { <- 1 }\n' > "$CASE_DIR/member/main.hard"
+    {
+        echo "schema = 1"
+        echo "name = \"root\""
+        echo "version = \"0.1.0\""
+        echo "edition = \"2027\""
+        echo "workspace = [\"member\"]"
+        echo
+        echo "[dependencies]"
+        echo "${PFX}a = \"1\""
+    } > hard.toml
+    assert_rc 0 "$HARD" install
+    grep -q "^\[package\.${PFX}a\]$" hard.lock || { echo "case r-workspace: the registry dependency is missing"; exit 1; }
+    out=$("$HARD" workspace list 2>&1) && rc=0 || rc=$?
+    assert_out "member" "$HARD" workspace list
+}
+t_a_deleted_lockfile_is_regenerated_identically() {
+    case_begin r-regen
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}b" 1.0.0 "${PFX}a@^1.0.0"
+    printf '%s\n' "${PFX}b@1" | consumer
+    assert_rc 0 "$HARD" install
+    cp hard.lock "$CASE_DIR/first.lock"
+    rm -f hard.lock
+    assert_rc 0 "$HARD" install
+    assert_grep "$CASE_DIR/first.lock" "[package.${PFX}a]"
+    cmp -s hard.lock "$CASE_DIR/first.lock" || { echo "case r-regen: regenerated lock differs"; exit 1; }
+}
+t_an_offline_install_uses_the_locked_versions() {
+    case_begin r-offline
+    pub "${PFX}a" 1.0.0
+    pub "${PFX}a" 1.5.0
+    echo "${PFX}a@^1.0.0" | consumer
+    assert_rc 0 "$HARD" install
+    [ "$(locked "${PFX}a")" = "1.5.0" ] || { echo "case r-offline: $(locked "${PFX}a")"; exit 1; }
+    pub "${PFX}a" 2.0.0
+    assert_rc 0 "$HARD" install --offline
+    [ "$(locked "${PFX}a")" = "1.5.0" ] || { echo "case r-offline: offline install moved the lock"; exit 1; }
+}
+t_a_corrupt_lockfile_is_not_trusted() {
+    case_begin r-corrupt
+    pub "${PFX}a" 1.0.0
+    echo "${PFX}a@1" | consumer
+    assert_rc 0 "$HARD" install
+    printf 'schema = "hard-lock/v1"\nthis is not toml [\n' > hard.lock
+    assert_rc 0 "$HARD" install
+    grep -q "^\[package\.${PFX}a\]$" hard.lock || { echo "case r-corrupt: lock was not rebuilt"; exit 1; }
+}
+t_a_manifest_without_a_schema_still_resolves() {
+    case_begin r-no-schema
+    pub "${PFX}a" 1.0.0
+    {
+        echo "name = \"consumer\""
+        echo "version = \"0.1.0\""
+        echo
+        echo "[dependencies]"
+        echo "${PFX}a = \"1\""
+    } > hard.toml
+    assert_rc 0 "$HARD" install
+    grep -q "^\[package\.${PFX}a\]$" hard.lock || { echo "case r-no-schema: nothing was locked"; exit 1; }
+}
+t_installing_twice_installs_nothing_new() {
+    case_begin r-idempotent
+    pub "${PFX}a" 1.0.0
+    echo "${PFX}a@1" | consumer
+    assert_rc 0 "$HARD" install
+    out=$("$HARD" install 2>&1)
+    assert_nogrep "$out" "installed ${PFX}a"
+}
+t_outdated_is_empty_for_the_newest_version() {
+    case_begin r-up-to-date
+    pub "${PFX}a" 1.0.0
+    echo "${PFX}a@1" | consumer
+    assert_rc 0 "$HARD" install
+    out=$("$HARD" outdated 2>&1) && rc=0 || rc=$?
+    assert_nogrep "$out" "${PFX}a"
+}
+
 # ---- scenarios -----------------------------------------------------------
 t_newest_satisfying_wins() {
     case_begin newest
@@ -392,6 +654,32 @@ run_case frozen-never-resolves t_a_frozen_install_never_re_resolves
 run_case deep-chain t_a_deep_chain_resolves_in_order
 run_case diamond t_a_diamond_resolves_once
 run_case empty-project t_an_empty_project_resolves
+run_case caret-zero t_caret_keeps_zero_minor_packages_below_one
+run_case r-gte t_range_gte_is_honoured
+run_case r-lt t_range_upper_bound_is_honoured
+run_case r-exact t_range_exact_pin_rejects_a_newer_version
+run_case r-tilde t_range_tilde_takes_the_newest_patch_of_that_minor
+run_case r-tilde-bound t_range_tilde_does_not_leave_the_minor
+run_case r-tilde-major t_range_tilde_major_is_bounded
+run_case r-or t_range_or_picks_the_newest_matching
+run_case r-pre t_a_prerelease_is_only_taken_when_asked_for
+run_case r-pre-req t_a_prerelease_requirement_selects_the_prerelease
+run_case r-converge t_two_requirements_on_one_package_converge
+run_case r-conflict t_impossible_convergence_is_reported
+run_case r-missing-version t_a_missing_version_is_named_in_the_error
+run_case r-no-versions t_a_wildcard_with_no_versions_fails_cleanly
+run_case r-yanked t_a_yanked_version_is_not_chosen
+run_case r-yanked-exact t_an_exact_pin_on_a_yanked_version_still_fails_loudly
+run_case r-chain3 t_three_level_chain_orders_dependencies_first
+run_case r-shared t_a_shared_transitive_is_installed_once
+run_case r-consumer-dev t_a_consumer_dev_dependency_is_installed
+run_case r-workspace t_a_workspace_root_installs_registry_dependencies
+run_case r-regen t_a_deleted_lockfile_is_regenerated_identically
+run_case r-offline t_an_offline_install_uses_the_locked_versions
+run_case r-corrupt t_a_corrupt_lockfile_is_not_trusted
+run_case r-no-schema t_a_manifest_without_a_schema_still_resolves
+run_case r-idempotent t_installing_twice_installs_nothing_new
+run_case r-up-to-date t_outdated_is_empty_for_the_newest_version
 
 echo "resolver: $((PASS - FAILED))/$PASS suite passed"
 [ "$FAILED" -eq 0 ] || exit 1

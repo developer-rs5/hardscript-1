@@ -153,6 +153,11 @@ pub struct RegistryVersion {
     pub kinds: BTreeMap<String, String>,
     pub integrity: Option<String>,
     pub description: Option<String>,
+    /// True when the publisher retracted this version.
+    ///
+    /// A retracted version must never be chosen by a fresh resolution, or
+    /// `hard yank` would be a comment rather than a retraction.
+    pub yanked: bool,
 }
 
 impl RegistryVersion {
@@ -756,6 +761,7 @@ impl Registry {
                     }
                 }
                 versions.push(RegistryVersion {
+                    yanked: v.get("yanked") == Some(&hs_compiler::json::Json::Bool(true)),
                     version,
                     dependencies: deps,
                     kinds,

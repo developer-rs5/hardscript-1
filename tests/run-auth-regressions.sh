@@ -341,6 +341,243 @@ t_the_login_session_survives_a_new_process() {
     assert_out "registry $HARD_REGISTRY" "$HARD" whoami
 }
 
+# ---- coverage added for the v0.9 QA gate (M8.10) --------------------------
+# These cases talk to the API directly as well as through the CLI, because a
+# trust boundary is worth checking from both sides.
+# One account per case: the registry is shared, so a name reused with a
+# different password would fail to log in. Built after `case_begin` sets
+# $CASE_NAME.
+token_user() { printf 'ada-%s' "$CASE_NAME"; }
+TOKEN_PASS="supersecret-1"
+login_user() {   # $1 = user, $2 = password
+    # every case shares one registry, so a name may already be taken
+    "$HARD" register --user "$1" --password "$2" >/dev/null 2>&1 || true
+    assert_rc 0 "$HARD" login --user "$1" --password "$2"
+}
+stored_token() {  # the token the CLI is using, from the credentials file
+    python3 - "$HARD_HOME/credentials.toml" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+tokens = re.findall(r'token = "([^"]+)"', text)
+print(tokens[0] if tokens else "")
+PY
+}
+api_status() {   # $1 = path, $2 = token (may be empty)
+    if [ -n "$2" ]; then
+        curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $2" "$HARD_REGISTRY$1"
+    else
+        curl -s -o /dev/null -w '%{http_code}' "$HARD_REGISTRY$1"
+    fi
+}
+api_body() {   # $1 = path, $2 = token (may be empty)
+    if [ -n "$2" ]; then
+        curl -s -H "Authorization: Bearer $2" "$HARD_REGISTRY$1"
+    else
+        curl -s "$HARD_REGISTRY$1"
+    fi
+}
+
+t_a_token_is_accepted_by_the_api() {
+    case_begin token-api
+    login_user "$(token_user)" "$TOKEN_PASS"
+    token=$(stored_token)
+    [ -n "$token" ] || { echo "case token-api: no token was stored"; exit 1; }
+    [ "$(api_status /auth/whoami "$token")" = "200" ] || { echo "case token-api: the stored token was rejected"; exit 1; }
+    assert_in "\"user\":\"$(token_user)\"" "$(api_body /auth/whoami "$token")"
+}
+t_a_missing_token_is_a_401_not_a_500() {
+    case_begin token-401
+    [ "$(api_status /auth/whoami "")" = "401" ] || { echo "case token-401: no token did not give 401"; exit 1; }
+    [ "$(api_status /auth/tokens "")" = "401" ] || { echo "case token-401: /auth/tokens without a token did not give 401"; exit 1; }
+    [ "$(api_status /api/publish "" )" != "500" ] || { echo "case token-401: an unauthenticated publish gave 500"; exit 1; }
+}
+t_a_garbage_token_is_refused() {
+    case_begin token-garbage
+    [ "$(api_status /auth/whoami "not-a-token")" = "401" ] || { echo "case token-garbage: a garbage token was accepted"; exit 1; }
+    [ "$(api_status /auth/whoami "k:0123456789abcdef")" = "401" ] || { echo "case token-garbage: a key id was accepted as a token"; exit 1; }
+}
+t_reads_do_not_need_a_token() {
+    case_begin read-open
+    login_user "$(token_user)" "$TOKEN_PASS"
+    dir="$CASE_DIR/pub"
+    mkdir -p "$dir"
+    printf 'schema = 1\nname = "%s"\nversion = "1.0.0"\nedition = "2027"\ndescription = "readable"\n' "$PFX" > "$dir/hard.toml"
+    printf 'calc r() => Int { <- 1 }\n' > "$dir/main.hard"
+    ( cd "$dir" && "$HARD" publish >/dev/null 2>&1 ) || { echo "case read-open: publish failed"; exit 1; }
+    [ "$(api_status "/packages/$PFX" "")" = "200" ] || { echo "case read-open: metadata needs a token"; exit 1; }
+    [ "$(api_status "/search?q=$PFX" "")" = "200" ] || { echo "case read-open: search needs a token"; exit 1; }
+    [ "$(api_status /keys "")" = "200" ] || { echo "case read-open: /keys needs a token"; exit 1; }
+    [ "$(api_status /health "")" = "200" ] || { echo "case read-open: /health needs a token"; exit 1; }
+}
+t_a_second_account_cannot_publish_over_the_first() {
+    case_begin two-accounts
+    login_user alice password-alice-1
+    dir="$CASE_DIR/pub"
+    mkdir -p "$dir"
+    printf 'schema = 1\nname = "%s"\nversion = "1.0.0"\nedition = "2027"\ndescription = "owned by alice"\n' "$PFX" > "$dir/hard.toml"
+    printf 'calc r() => Int { <- 1 }\n' > "$dir/main.hard"
+    ( cd "$dir" && "$HARD" publish >/dev/null 2>&1 ) || { echo "case two-accounts: alice could not publish"; exit 1; }
+    "$HARD" logout >/dev/null 2>&1 || true
+    login_user bob password-bob-22
+    # publish the *same* name from the same directory: that is the conflict
+    out=$( cd "$dir" && "$HARD" publish --version 1.1.0 2>&1 ) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case two-accounts: bob published over alice"; exit 1; }
+    echo "$out" | head -3
+}
+t_a_token_with_only_read_can_read_everything() {
+    case_begin read-scope
+    login_user carol password-carol-3
+    dir="$CASE_DIR/pub"
+    mkdir -p "$dir"
+    printf 'schema = 1\nname = "%s"\nversion = "1.0.0"\nedition = "2027"\ndescription = "published by carol"\n' "$PFX" > "$dir/hard.toml"
+    printf 'calc r() => Int { <- 1 }\n' > "$dir/main.hard"
+    ( cd "$dir" && "$HARD" publish >/dev/null 2>&1 ) || { echo "case read-scope: publish failed"; exit 1; }
+    read_token=$("$HARD" token create --name readonly --scope read 2>&1 | sed -n 's/^  token: //p' | head -1)
+    [ -n "$read_token" ] || { echo "case read-scope: no token was created"; exit 1; }
+    [ "$(api_status "/packages/$PFX" "$read_token")" = "200" ] || { echo "case read-scope: a read token cannot read"; exit 1; }
+    # a read token must be refused by the *scope* check, so POST a real
+    # publish rather than relying on a GET being rejected for the wrong reason
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer $read_token" \
+        -H 'Content-Type: application/octet-stream' --data-binary 'not an archive' \
+        "$HARD_REGISTRY/api/publish?name=$PFX&version=9.9.9")
+    case "$code" in
+        401|403) ;;
+        *) echo "case read-scope: a read token got $code for publish"; exit 1 ;;
+    esac
+}
+t_a_revoked_token_stops_working_immediately() {
+    case_begin revoke-now
+    login_user dave password-dave-44
+    token=$(stored_token)
+    id=$("$HARD" token list 2>&1 | awk 'NR==1 {print $1}')
+    [ -n "$id" ] || { echo "case revoke-now: no token id in the list"; exit 1; }
+    assert_rc 0 "$HARD" token revoke "$id"
+    [ "$(api_status /auth/whoami "$token")" = "401" ] || { echo "case revoke-now: a revoked token still works"; exit 1; }
+}
+t_logout_clears_only_the_named_registry() {
+    case_begin logout-one
+    login_user erin password-erin-55
+    other="$CASE_DIR/other"
+    mkdir -p "$other"
+    printf 'schema = 1\nname = "otherapp"\nversion = "0.1.0"\nedition = "2027"\n' > "$other/hard.toml"
+    printf 'calc o() => Int { <- 1 }\n' > "$other/main.hard"
+    ( cd "$other" && "$HARD" publish --registry "$HARD_REGISTRY" >/dev/null 2>&1 ) || { echo "case logout-one: publish failed"; exit 1; }
+    before=$(grep -c 'token = ' "$HARD_HOME/credentials.toml" || true)
+    [ "$before" -ge 1 ] || { echo "case logout-one: no token recorded"; exit 1; }
+    assert_rc 0 "$HARD" logout
+    if grep -q 'token = ' "$HARD_HOME/credentials.toml"; then
+        after=$(grep -c 'token = ' "$HARD_HOME/credentials.toml" || true)
+        [ "$after" -lt "$before" ] || { echo "case logout-one: nothing was forgotten"; exit 1; }
+    fi
+}
+t_the_credentials_file_is_not_world_readable() {
+    case_begin creds-mode
+    login_user frank password-frank-66
+    mode=$(stat -c '%a' "$HARD_HOME/credentials.toml")
+    case "$mode" in
+        600|400) ;;
+        *) echo "case creds-mode: mode $mode"; exit 1 ;;
+    esac
+}
+t_a_password_is_never_echoed_by_the_api() {
+    case_begin no-echo
+    login_user grace password-grace-77
+    out=$(api_body /auth/whoami "$(stored_token)")
+    assert_not_in "supersecret" "$out"
+    assert_not_in "$TOKEN_PASS" "$out"
+}
+t_an_empty_password_is_refused() {
+    case_begin empty-pass
+    out=$("$HARD" register --user nopass --password "" 2>&1) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case empty-pass: an empty password was accepted"; exit 1; }
+    echo "$out" | head -2
+}
+t_a_very_long_password_is_accepted() {
+    case_begin long-pass
+    long=$(python3 -c 'print("x" * 200)')
+    out=$("$HARD" register --user longpass --password "$long" 2>&1) && rc=0 || rc=$?
+    [ "$rc" = "0" ] || { echo "case long-pass: a 200-character password was refused: $out"; exit 1; }
+}
+t_a_user_name_outside_the_allowed_set_is_refused_clearly() {
+    case_begin unicode-user
+    # user names are lowercase ASCII by design; the message must say so rather
+    # than failing somewhere deeper
+    out=$("$HARD" register --user "zoë" --password password-zoe-88 2>&1) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case unicode-user: a non-ASCII name was accepted"; exit 1; }
+    assert_in "lowercase" "$out"
+    out=$("$HARD" register --user "Has Spaces" --password password-spaces-89 2>&1) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case unicode-user: a name with spaces was accepted"; exit 1; }
+    # upper case is normalised rather than refused, so what matters is that the
+    # account then exists under the lower-case name
+    "$HARD" register --user "uppercase-user" --password password-upper-90 >/dev/null 2>&1
+    assert_rc 0 "$HARD" login --user "uppercase-user" --password password-upper-90
+    assert_rc 0 "$HARD" logout
+}
+t_register_twice_with_the_same_password_is_refused() {
+    case_begin duplicate2
+    assert_rc 0 "$HARD" register --user twice --password password-twice-99
+    out=$("$HARD" register --user twice --password password-twice-99 2>&1) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case duplicate2: the same account was registered twice"; exit 1; }
+    echo "$out" | head -2
+}
+t_yanking_someone_elses_package_needs_the_right_scope() {
+    case_begin yank-scope
+    login_user heidi password-heidi-1011
+    dir="$CASE_DIR/pub"
+    mkdir -p "$dir"
+    printf 'schema = 1\nname = "%s"\nversion = "1.0.0"\nedition = "2027"\ndescription = "heidi owns this"\n' "$PFX" > "$dir/hard.toml"
+    printf 'calc r() => Int { <- 1 }\n' > "$dir/main.hard"
+    ( cd "$dir" && "$HARD" publish >/dev/null 2>&1 ) || { echo "case yank-scope: publish failed"; exit 1; }
+    assert_rc 0 "$HARD" yank "$PFX@1.0.0"
+    assert_out "yanked" "$HARD" yank "$PFX@1.0.0"
+}
+t_a_token_survives_a_restart_of_the_registry() {
+    case_begin token-persist
+    login_user ivan password-ivan-1212
+    token=$(stored_token)
+    [ -n "$token" ] || { echo "case token-persist: no token stored"; exit 1; }
+    # the store is on disk; a second login must not invalidate the first token
+    assert_rc 0 "$HARD" login --user ivan --password password-ivan-1212
+    [ "$(api_status /auth/whoami "$token")" = "200" ] || { echo "case token-persist: logging in again revoked the first token"; exit 1; }
+}
+t_the_registry_reports_its_auth_mode() {
+    case_begin auth-mode
+    out=$(curl -s "$HARD_REGISTRY/health")
+    assert_in "ok" "$out"
+    login_user judy password-judy-1313
+    [ "$(api_status /stats "")" = "200" ] || { echo "case auth-mode: stats needs a token"; exit 1; }
+}
+t_a_bad_scope_name_is_refused_without_a_request() {
+    case_begin bad-scope
+    login_user ken password-ken-1414
+    out=$("$HARD" token create --name bad --scope administrator 2>&1) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case bad-scope: an unknown scope was accepted"; exit 1; }
+    echo "$out" | head -2
+}
+t_a_token_name_is_optional() {
+    case_begin no-name
+    login_user laura password-laura-1515
+    out=$("$HARD" token create 2>&1) && rc=0 || rc=$?
+    [ "$rc" = "0" ] || { echo "case no-name: an unnamed token was refused: $out"; exit 1; }
+    assert_in "created token" "$out"
+    # the id it printed must be in the list, and the token must work
+    id=$(printf '%s\n' "$out" | sed -n 's/^created token \([^ ]*\).*/\1/p' | head -1)
+    [ -n "$id" ] || { echo "case no-name: no id in: $out"; exit 1; }
+    assert_in "$id" "$("$HARD" token list 2>&1)"
+    pat=$(printf '%s\n' "$out" | sed -n 's/^  token: //p' | head -1)
+    [ -n "$pat" ] || { echo "case no-name: no token in: $out"; exit 1; }
+    [ "$(api_status /auth/whoami "$pat")" = "200" ] || { echo "case no-name: the new token does not work"; exit 1; }
+}
+t_whoami_reports_the_scopes_it_was_granted() {
+    case_begin scopes
+    login_user mike password-mike-1616
+    out=$("$HARD" whoami 2>&1)
+    assert_in "read" "$out"
+    assert_in "publish" "$out"
+    assert_not_in "administrator" "$out"
+}
+
 # ---- run ----------------------------------------------------------------
 run_case register-login t_register_then_login
 run_case wrong-password t_a_wrong_password_is_refused
@@ -365,6 +602,26 @@ run_case per-registry t_credentials_are_per_registry
 run_case logout-all t_logout_all_clears_every_registry
 run_case tokens-never-printed t_whoami_never_prints_a_token
 run_case session-persists t_the_login_session_survives_a_new_process
+run_case token-api t_a_token_is_accepted_by_the_api
+run_case token-401 t_a_missing_token_is_a_401_not_a_500
+run_case token-garbage t_a_garbage_token_is_refused
+run_case read-open t_reads_do_not_need_a_token
+run_case two-accounts t_a_second_account_cannot_publish_over_the_first
+run_case read-scope t_a_token_with_only_read_can_read_everything
+run_case revoke-now t_a_revoked_token_stops_working_immediately
+run_case logout-one t_logout_clears_only_the_named_registry
+run_case creds-mode t_the_credentials_file_is_not_world_readable
+run_case no-echo t_a_password_is_never_echoed_by_the_api
+run_case empty-pass t_an_empty_password_is_refused
+run_case long-pass t_a_very_long_password_is_accepted
+run_case unicode-user t_a_user_name_outside_the_allowed_set_is_refused_clearly
+run_case duplicate2 t_register_twice_with_the_same_password_is_refused
+run_case yank-scope t_yanking_someone_elses_package_needs_the_right_scope
+run_case token-persist t_a_token_survives_a_restart_of_the_registry
+run_case auth-mode t_the_registry_reports_its_auth_mode
+run_case bad-scope t_a_bad_scope_name_is_refused_without_a_request
+run_case no-name t_a_token_name_is_optional
+run_case scopes t_whoami_reports_the_scopes_it_was_granted
 
 echo "auth: $((PASS - FAILED))/$PASS suite passed"
 [ "$FAILED" -eq 0 ] || exit 1

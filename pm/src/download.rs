@@ -118,6 +118,13 @@ pub struct DownloadConfig {
     pub verbose: bool,
     /// Refuse to start a download larger than this (0 = no cap).
     pub max_bytes: u64,
+    /// Ignore the cache and fetch the bytes again.
+    ///
+    /// The reason this exists: "the package is in the cache" and "the package
+    /// on the registry is what I have" are different claims, and only asking
+    /// again can tell you. A cache hit does not count a download, so a caller
+    /// that needs the registry to record one has to force it.
+    pub force: bool,
 }
 
 impl Default for DownloadConfig {
@@ -127,6 +134,7 @@ impl Default for DownloadConfig {
             parallel: 4,
             verbose: false,
             max_bytes: 0,
+            force: false,
         }
     }
 }
@@ -244,7 +252,12 @@ impl Downloader {
         integrity: Option<&str>,
     ) -> Result<Fetched, DownloadError> {
         let version_str = version.to_string();
-        if self.cache.has_version(name, &version_str) {
+        if self.config.force {
+            // Fetch again regardless of what is cached; the digest check below
+            // still has to pass before the bytes are used.
+            let _ = std::fs::remove_file(self.cache.archive_path(name, &version_str));
+        }
+        if !self.config.force && self.cache.has_version(name, &version_str) {
             match self.cached(name, &version_str, integrity) {
                 Some(f) => return Ok(f),
                 None => {
@@ -505,7 +518,7 @@ impl Downloader {
         integrity: Option<&str>,
         out_dir: &Path,
     ) -> Result<Fetched, DownloadError> {
-        let fetched = self.fetch(name, version, integrity)?;
+        self.fetch(name, version, integrity)?;
         let src = self.cache.archive_path(name, &version.to_string());
         let dest = out_dir.join(format!("{name}-{version}.hspkg"));
         std::fs::create_dir_all(out_dir)
@@ -517,8 +530,53 @@ impl Downloader {
             name: name.to_string(),
             version: version.clone(),
             size: std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
-            ..fetched
+            ..self.fetched_facts(name, version)
         })
+    }
+
+    /// Write the archive to one exact path.
+    ///
+    /// `--output` names a file, `--out` names a directory; a caller that
+    /// wanted a directory and used `--output` used to get nothing at all.
+    pub fn save_to_file(
+        &self,
+        name: &str,
+        version: &Version,
+        integrity: Option<&str>,
+        dest: &Path,
+    ) -> Result<Fetched, DownloadError> {
+        self.fetch(name, version, integrity)?;
+        let src = self.cache.archive_path(name, &version.to_string());
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    DownloadError::new(format!("cannot create {}: {e}", parent.display()))
+                })?;
+            }
+        }
+        std::fs::copy(&src, dest).map_err(|e| {
+            DownloadError::new(format!("cannot write {}: {e}", dest.display()))
+        })?;
+        let size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        let mut f = self.fetched_facts(name, version);
+        f.size = size;
+        f.bytes = size;
+        Ok(f)
+    }
+
+    /// The facts a caller reports about a fetch, re-derived from the cache.
+    fn fetched_facts(&self, name: &str, version: &Version) -> Fetched {
+        let version_str = version.to_string();
+        let size = file_size(&self.cache.archive_path(name, &version_str));
+        Fetched {
+            name: name.to_string(),
+            version: version.clone(),
+            source: Source::Cache,
+            bytes: 0,
+            size,
+            attempts: 0,
+            verified: self.cache.has_version(name, &version_str),
+        }
     }
 }
 

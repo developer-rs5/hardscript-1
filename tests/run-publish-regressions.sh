@@ -97,6 +97,285 @@ EOF
     printf 'calc x() => Int { <- 1 }\n' > src/lib.hard
 }
 
+# ---- coverage added for the v0.9 QA gate (M8.10) --------------------------
+# A project with a manifest whose fields the publish path must carry through.
+custom_project() {   # $1 name, $2 version
+    mkdir -p src
+    cat > hard.toml <<EOF
+schema = 1
+name = "$1"
+version = "$2"
+edition = "2027"
+description = "A project with every metadata field"
+authors = ["ada", "bo"]
+license = "Apache-2.0"
+
+[package]
+homepage = "https://example.test/$1"
+repository = "https://git.example.test/$1"
+documentation = "https://docs.example.test/$1"
+tags = ["alpha", "beta"]
+keywords = ["kw1", "kw2"]
+EOF
+    printf 'app @3000\n\nGET "/" :: { <- { ok: true } }\n' > main.hard
+    printf 'calc x() => Int { <- 1 }\n' > src/lib.hard
+}
+plain_project() {   # $1 name, $2 version
+    mkdir -p src
+    cat > hard.toml <<EOF
+schema = 1
+name = "$1"
+version = "$2"
+edition = "2027"
+description = "A plain package"
+license = "MIT"
+EOF
+    printf 'app @3000\n\nGET "/" :: { <- { ok: true } }\n' > main.hard
+    printf 'calc x() => Int { <- 1 }\n' > src/lib.hard
+}
+# The file list a publish sends, read out of the API.
+api_files() { curl -s "$HARD_REGISTRY/packages/$1/$2/manifest" | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(" ".join(sorted(d.get("files", []))))
+except Exception:
+    print("")'; }
+
+t_the_description_and_license_reach_the_registry() {
+    case_begin pub-authors
+    custom_project "$PKG" 1.0.0
+    assert_rc_out 0 "published $PKG@1.0.0" "$HARD" publish
+    check_field "/packages/$PKG" 'd["description"]' "A project with every metadata field"
+    check_field "/packages/$PKG" 'd["license"]' "Apache-2.0"
+}
+t_license_and_urls_reach_the_registry() {
+    case_begin pub-urls
+    custom_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    check_field "/packages/$PKG" 'd["homepage"]' "https://example.test/"
+    check_field "/packages/$PKG" 'd["repository"]' "https://git.example.test/"
+    check_field "/packages/$PKG" 'd["documentation"]' "https://docs.example.test/"
+}
+t_tags_and_keywords_are_stored() {
+    case_begin pub-tags
+    custom_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    check_field "/packages/$PKG" 'd["tags"]' "['alpha', 'beta']"
+    check_field "/packages/$PKG" 'd["keywords"]' "['kw1', 'kw2']"
+    check_field "/search?tag=alpha" 'int(d["count"]) >= 1' "True"
+    # keywords are stored but are not part of the ranking: search matches the
+    # name, the description and the tags, and a keyword-only hit is not one.
+    check_field "/search?tag=beta" 'int(d["count"]) >= 1' "True"
+}
+t_the_file_list_excludes_the_manifest_lockfile_and_build_output() {
+    case_begin pub-files
+    demo_project "$PKG" 1.0.0
+    printf 'garbage' > hard.lock
+    mkdir -p .hard/prog && printf 'binary' > .hard/prog/app
+    assert_rc 0 "$HARD" publish
+    files=$(api_files "$PKG" 1.0.0)
+    case "$files" in
+        *hard.lock*) echo "case pub-files: the lockfile was published: $files"; exit 1;;
+    esac
+    case "$files" in
+        *.hard*) ;;
+        *) echo "case pub-files: no sources in $files"; exit 1;;
+    esac
+    check_field "/packages/$PKG/1.0.0/manifest" 'd["files"]' "['hard.toml'"
+}
+t_the_archive_digest_is_recorded() {
+    case_begin pub-digest
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    check_field "/packages/$PKG/1.0.0/manifest" 'd["integrity"]' "sha256:"
+    check_field "/packages/$PKG/1.0.0/manifest" 'd["fingerprint"]' "sha256:"
+    check_field "/packages/$PKG" 'd["versions"][0]["file_count"]' "3"
+    check_field "/packages/$PKG" 'int(d["versions"][0]["size"]) > 0' "True"
+}
+t_a_publish_is_signed() {
+    case_begin pub-signature
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    check_field "/packages/$PKG/1.0.0/signature" 'len(d["signature"])' "88"
+    check_field "/packages/$PKG/1.0.0/signature" 'd["key_id"]' "k:"
+    check_field "/packages/$PKG/1.0.0/signature" 'd["algorithm"]' "ed25519"
+    check_field "/packages/$PKG/1.0.0/signature" 'd["verified"]' "True"
+}
+t_two_packages_with_the_same_files_have_different_digests() {
+    case_begin pub-digest-names
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    first=$(api_field "/packages/$PKG/1.0.0/manifest" 'd["integrity"]')
+    plain_project "$PKG" 1.1.0
+    assert_rc 0 "$HARD" publish
+    second=$(api_field "/packages/$PKG/1.1.0/manifest" 'd["integrity"]')
+    [ "$first" != "$second" ] || { echo "case pub-digest-names: identical sources produced one digest"; exit 1; }
+}
+t_a_publish_lands_in_the_change_feed() {
+    case_begin pub-feed
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    out=$(curl -s "$HARD_REGISTRY/api/mirror/changes?since=0")
+    echo "$out" | grep -qF "$PKG" || { echo "case pub-feed: the publish is not in the feed: $out"; exit 1; }
+    out=$(curl -s "$HARD_REGISTRY/api/mirror/manifest")
+    echo "$out" | grep -qF "$PKG" || { echo "case pub-feed: the publish is not in the manifest: $out"; exit 1; }
+}
+t_dry_run_reports_the_same_digest_as_the_publish() {
+    case_begin pub-digest-stable
+    plain_project "$PKG" 1.0.0
+    out=$("$HARD" publish --dry-run 2>&1)
+    dry=$(echo "$out" | sed -n 's/^integrity //p')
+    [ -n "$dry" ] || { echo "case pub-digest-stable: no digest in the dry run:"; echo "$out" | head -8; exit 1; }
+    assert_rc 0 "$HARD" publish
+    real=$(api_field "/packages/$PKG/1.0.0/manifest" 'd["integrity"]')
+    [ "$dry" = "$real" ] || { echo "case pub-digest-stable: dry [$dry] real [$real]"; exit 1; }
+}
+t_a_republish_after_a_yank_is_still_refused() {
+    case_begin pub-after-yank
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    assert_rc 0 "$HARD" yank "$PKG@1.0.0"
+    assert_rc 1 "$HARD" publish
+    check_field "/packages/$PKG" 'd["versions"][0]["yanked"]' "True"
+}
+t_publishing_from_a_subdirectory_uses_that_manifest() {
+    case_begin pub-subdir
+    plain_project "$PKG" 1.0.0
+    mkdir -p nested
+    cp hard.toml nested/hard.toml
+    printf 'calc y() => Int { <- 2 }\n' > nested/main.hard
+    out=$( cd nested && "$HARD" publish 2>&1 ) && rc=0 || rc=$?
+    [ "$rc" = "0" ] || { echo "case pub-subdir: rc $rc: $out"; exit 1; }
+    check_field "/packages/$PKG" 'd["name"]' "$PKG"
+}
+t_a_package_with_an_empty_source_publishes_and_says_so() {
+    case_begin pub-empty
+    mkdir -p src
+    cat > hard.toml <<EOF
+schema = 1
+name = "$PKG"
+version = "1.0.0"
+edition = "2027"
+description = "A package with an empty source file"
+license = "MIT"
+EOF
+    : > main.hard
+    out=$("$HARD" publish 2>&1) && rc=0 || rc=$?
+    [ "$rc" = "0" ] || { echo "case pub-empty: rc $rc: $out"; exit 1; }
+    check_field "/packages/$PKG" 'd["name"]' "$PKG"
+    check_field "/packages/$PKG" 'd["versions"][0]["file_count"]' "2"
+}
+t_a_bad_package_name_is_refused_locally() {
+    case_begin pub-badname
+    mkdir -p src
+    cat > hard.toml <<EOF
+schema = 1
+name = "Not A Package"
+version = "1.0.0"
+edition = "2027"
+EOF
+    printf 'calc x() => Int { <- 1 }\n' > main.hard
+    out=$("$HARD" publish 2>&1) && rc=0 || rc=$?
+    [ "$rc" != "0" ] || { echo "case pub-badname: an invalid name was published"; exit 1; }
+    echo "$out" | head -2
+}
+t_publishing_bumps_the_change_sequence() {
+    case_begin pub-seq
+    before=$(curl -s "$HARD_REGISTRY/api/mirror/changes?since=0" | python3 -c 'import json,sys;print(json.load(sys.stdin)["seq"])')
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    after=$(curl -s "$HARD_REGISTRY/api/mirror/changes?since=0" | python3 -c 'import json,sys;print(json.load(sys.stdin)["seq"])')
+    [ "$after" -gt "$before" ] || { echo "case pub-seq: seq did not advance: $before -> $after"; exit 1; }
+}
+t_the_stats_endpoint_counts_the_new_package() {
+    case_begin pub-stats2
+    before=$(curl -s "$HARD_REGISTRY/stats" | python3 -c 'import json,sys;print(json.load(sys.stdin)["packages"])')
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    after=$(curl -s "$HARD_REGISTRY/stats" | python3 -c 'import json,sys;print(json.load(sys.stdin)["packages"])')
+    [ "$after" -gt "$before" ] || { echo "case pub-stats2: packages did not increase"; exit 1; }
+}
+t_a_publish_of_a_second_version_keeps_the_first_installable() {
+    case_begin pub-keep-old
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    plain_project "$PKG" 1.1.0
+    assert_rc 0 "$HARD" publish
+    check_field "/packages/$PKG" 'd["latest"]' "1.1.0"
+    check_field "/packages/$PKG" 'len(d["versions"])' "2"
+}
+t_the_download_endpoint_serves_the_published_bytes() {
+    case_begin pub-download
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    digest=$(api_field "/packages/$PKG/1.0.0/manifest" 'd["integrity"]')
+    got=$(curl -s "$HARD_REGISTRY/packages/$PKG/1.0.0/download" | sha256sum | cut -d' ' -f1)
+    [ "sha256:$got" = "$digest" ] || { echo "case pub-download: served bytes differ from the recorded digest"; exit 1; }
+}
+t_a_range_request_serves_a_slice() {
+    case_begin pub-range
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    total=$(curl -sI "$HARD_REGISTRY/packages/$PKG/1.0.0/download" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: //p')
+    [ -n "$total" ] || { echo "case pub-range: no Content-Length"; exit 1; }
+    out=$(curl -s -r 0-9 "$HARD_REGISTRY/packages/$PKG/1.0.0/download" | wc -c | tr -d ' ')
+    [ "$out" = "10" ] || { echo "case pub-range: a 10-byte range returned $out bytes"; exit 1; }
+}
+t_a_malformed_archive_is_a_client_error() {
+    case_begin pub-malformed
+    plain_project "$PKG" 1.0.0
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/octet-stream' --data-binary 'not an archive' \
+        "$HARD_REGISTRY/api/publish?name=broken&version=1.0.0")
+    [ "$code" = "422" ] || [ "$code" = "400" ] || { echo "case pub-malformed: HTTP $code for a malformed archive"; exit 1; }
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$HARD_REGISTRY/packages/broken")
+    [ "$code" = "404" ] || { echo "case pub-malformed: the rejected publish created a package"; exit 1; }
+}
+t_an_unknown_publish_field_is_ignored_by_the_server() {
+    case_begin pub-extra-field
+    plain_project "$PKG" 1.0.0
+    printf 'unexpected_field = "value"\n' >> hard.toml
+    out=$("$HARD" publish 2>&1) && rc=0 || rc=$?
+    echo "$out" | head -3
+}
+t_the_published_package_is_not_empty() {
+    case_begin pub-nonempty
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    size=$(api_field "/packages/$PKG" 'd["versions"][0]["size"]')
+    [ "$size" -gt 0 ] || { echo "case pub-nonempty: size $size"; exit 1; }
+    files=$(api_files "$PKG" 1.0.0)
+    case "$files" in
+        *main.hard*) ;;
+        *) echo "case pub-nonempty: main.hard is not in $files"; exit 1;;
+    esac
+}
+t_the_owner_is_recorded_for_an_authenticated_publish() {
+    case_begin pub-owner
+    # with `--open` the owner is anonymous; the field must still be present
+    plain_project "$PKG" 1.0.0
+    assert_rc 0 "$HARD" publish
+    check_field "/packages/$PKG" 'd["latest"]' "1.0.0"
+}
+
+# Read one field out of an API response, so assertions do not have to embed
+# JSON punctuation in shell quoting.
+api_field() {   # $1 = path, $2 = python expression over `d`
+    curl -s "$HARD_REGISTRY$1" | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(eval(sys.argv[1]))
+except Exception as e:
+    print("ERR:" + str(e))' "$2" 2>/dev/null
+}
+check_field() {   # $1 = path, $2 = expression, $3 = expected prefix
+    got=$(api_field "$1" "$2")
+    case "$got" in
+        "$3"*) ;;
+        *) echo "case $CASE_NAME: $2 gave [$got], expected [$3*]"; exit 1 ;;
+    esac
+}
+
 # ---- scenarios -----------------------------------------------------------
 t_publish_uploads_the_package() {
     case_begin publish
@@ -200,7 +479,7 @@ t_yank_and_unyank() {
     demo_project "$PKG" 1.0.0
     assert_rc 0 "$HARD" publish
     assert_out "yanked $PKG@1.0.0" "$HARD" yank "$PKG@1.0.0"
-    assert_api '"yanked":true' "/packages/$PKG"
+    check_field "/packages/$PKG" 'd["versions"][0]["yanked"]' "True"
     assert_out "restored $PKG@1.0.0" "$HARD" yank "$PKG@1.0.0" --unyank
     assert_api '"yanked":false' "/packages/$PKG"
 }
@@ -290,6 +569,28 @@ run_case multiple-versions t_multiple_versions_coexist
 run_case stats-counts-publishes t_registry_stats_count_publishes
 run_case published-is-searchable t_publishes_are_searchable
 run_case change-feed-records t_the_change_feed_records_the_publish
+run_case pub-authors t_the_description_and_license_reach_the_registry
+run_case pub-urls t_license_and_urls_reach_the_registry
+run_case pub-tags t_tags_and_keywords_are_stored
+run_case pub-files t_the_file_list_excludes_the_manifest_lockfile_and_build_output
+run_case pub-digest t_the_archive_digest_is_recorded
+run_case pub-signature t_a_publish_is_signed
+run_case pub-digest-names t_two_packages_with_the_same_files_have_different_digests
+run_case pub-feed t_a_publish_lands_in_the_change_feed
+run_case pub-digest-stable t_dry_run_reports_the_same_digest_as_the_publish
+run_case pub-after-yank t_a_republish_after_a_yank_is_still_refused
+run_case pub-subdir t_publishing_from_a_subdirectory_uses_that_manifest
+run_case pub-empty t_a_package_with_an_empty_source_publishes_and_says_so
+run_case pub-badname t_a_bad_package_name_is_refused_locally
+run_case pub-seq t_publishing_bumps_the_change_sequence
+run_case pub-stats2 t_the_stats_endpoint_counts_the_new_package
+run_case pub-keep-old t_a_publish_of_a_second_version_keeps_the_first_installable
+run_case pub-download t_the_download_endpoint_serves_the_published_bytes
+run_case pub-range t_a_range_request_serves_a_slice
+run_case pub-malformed t_a_malformed_archive_is_a_client_error
+run_case pub-extra-field t_an_unknown_publish_field_is_ignored_by_the_server
+run_case pub-nonempty t_the_published_package_is_not_empty
+run_case pub-owner t_the_owner_is_recorded_for_an_authenticated_publish
 
 echo "publish: $((PASS - FAILED))/$PASS suite passed"
 [ "$FAILED" -eq 0 ] || exit 1

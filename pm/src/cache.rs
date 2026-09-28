@@ -475,6 +475,19 @@ impl Cache {
             if meta.exists() {
                 let _ = std::fs::remove_file(&meta);
             }
+            // The extracted sources go too: leaving them behind would let a
+            // later install link the code of a version whose archive was just
+            // declared untrustworthy.
+            let src = self
+                .root
+                .join("packages")
+                .join(&issue.name)
+                .join(format!("{}-{}.src", sanitize(&issue.name), issue.version));
+            if src.exists() {
+                std::fs::remove_dir_all(&src).map_err(|e| {
+                    format!("cannot remove {}: {e}", src.display())
+                })?;
+            }
             let sig = self.root.join("signatures").join(format!(
                 "{}@{}.json",
                 issue.name, issue.version
@@ -704,6 +717,10 @@ mod audit_tests {
         assert!(good.exists(), "the healthy archive is untouched");
         assert!(cache.audit().is_empty(), "and the cache is clean again");
         assert!(!cache.meta_path_for("demo", "1.0.0").exists(), "its metadata goes too");
+        assert!(
+            !cache.root.join("packages/demo/demo-1.0.0.src").exists(),
+            "the extracted sources go too"
+        );
     }
 
     #[test]

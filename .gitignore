@@ -76,3 +76,4 @@ qa/lsp/results.json
 qa/extension/results.json
 qa/__pycache__/
 qa/*/__pycache__/
+target/qa-sanitizer-*/

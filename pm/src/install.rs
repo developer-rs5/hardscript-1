@@ -234,6 +234,10 @@ fn registry_entries(name: &str, meta: &crate::registry::PackageMeta) -> Vec<Inde
     let _ = name;
     meta.versions
         .iter()
+        // A retracted version is not a candidate. Keeping it would make a
+        // fresh `hard install` pick it up again, which is the opposite of what
+        // `hard yank` means.
+        .filter(|v| !v.yanked)
         .map(|v| IndexEntry {
             version: v.version.clone(),
             kinds: v.dependency_kinds(),
@@ -396,6 +400,7 @@ pub fn install(cfg: &InstallConfig) -> InstallReport {
             parallel: cfg.parallel,
             verbose: cfg.verbose,
             max_bytes: 0,
+            force: false,
         },
     );
     let batch = downloader.with_mirrors(cfg.mirrors.clone()).fetch_all(&wanted);

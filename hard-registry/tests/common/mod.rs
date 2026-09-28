@@ -204,7 +204,7 @@ impl Harness {
         }
         stream.flush().expect("flush");
         let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).expect("read reply");
+        read_to_end_retrying(&mut stream, &mut raw);
         parse_reply(&raw)
     }
 
@@ -299,8 +299,36 @@ impl Drop for Harness {
     }
 }
 
+/// Read a whole reply, treating `WouldBlock` as "not yet".
+///
+/// A read timeout of twenty seconds is not twenty seconds of *progress*: a
+/// loaded machine — a sanitizer build, a busy CI box — can leave the socket
+/// with nothing buffered for long enough to trip the timeout even though the
+/// server is about to answer. Retrying until the deadline turns a real failure
+/// (a genuine timeout) into a failure and a scheduling hiccup into a pass.
+fn read_to_end_retrying(stream: &mut TcpStream, out: &mut Vec<u8>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    panic!("read reply: timed out after 60s with {} bytes", out.len());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!("read reply: {e}"),
+        }
+    }
+}
+
 /// Split a raw HTTP response into status, headers and body.
-pub fn parse_reply(raw: &[u8]) -> Reply {
+pub(crate) fn parse_reply(raw: &[u8]) -> Reply {
     let split = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
